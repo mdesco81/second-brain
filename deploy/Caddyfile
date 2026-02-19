@@ -1,0 +1,8 @@
+{$DOMAIN} {
+  encode gzip zstd
+
+  @telegram path /telegram/*
+  reverse_proxy @telegram app:8080
+
+  reverse_proxy app:8080
+}
