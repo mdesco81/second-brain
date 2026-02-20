@@ -9,8 +9,10 @@ MVP para capturar entradas via Telegram (`texto`, `audio`, `PDF`, `imagem`), cla
 - PDF text extraction (`pdf-parse`)
 - Image understanding (OpenAI vision)
 - AI categorization with dynamic category creation
+- Action-oriented classification with `prioridade`, `proximo passo` and optional `prazo`
 - Postgres persistence for operational state
-- Daily proactive check-in agent
+- Daily proactive check-in agent with focus queue
+- Weekly report with summary + next-week priorities
 - Web dashboard (`/`) with counts, categories and recent activity
 
 ## Folder structure (knowledge base)
@@ -24,6 +26,7 @@ Root definido por `STORAGE_ROOT` (padrao: `./storage/SecondBrain`).
 - `31_RESEARCH/`: pesquisas em andamento
 - `40_ARCHIVE/`: itens arquivados
 - `80_STATUS/`: status de projetos e rastreio rapido
+- `80_STATUS/action_board.md`: fila de acoes abertas priorizadas
 - `90_SYSTEM/`: metadados operacionais
 
 ## Tech stack
@@ -74,6 +77,7 @@ Webhook route:
 - `GET /api/health`
 - `GET /api/dashboard`
 - `GET /api/categories`
+- `GET /api/actions`
 
 ## Daily proactive agent
 
@@ -82,8 +86,17 @@ Config:
 - `TIMEZONE` (ex: `America/Sao_Paulo`)
 - `PROACTIVE_HOUR`
 - `PROACTIVE_MINUTE`
+- `WEEKLY_REPORT_DAY` (`0`=domingo ... `6`=sabado)
+- `WEEKLY_REPORT_HOUR`
+- `WEEKLY_REPORT_MINUTE`
 
 Todos os chats que interagem com o bot entram na lista de check-in diario automaticamente.
+
+Comandos Telegram:
+
+- `/prioridades`: mostra itens abertos com prioridade
+- `/done <id>`: marca item como concluido
+- `/weekly`: gera resumo semanal sob demanda
 
 ## Operational flow
 
@@ -91,9 +104,10 @@ Todos os chats que interagem com o bot entram na lista de check-in diario automa
 2. Content extraction (text/transcription/pdf/image).
 3. AI classification (or rules fallback).
 4. Category upsert (including new categories when needed).
-5. Inbox item persisted in Postgres.
+5. Inbox item persisted in Postgres (com prioridade, prazo e proximo passo).
 6. Knowledge note written in PARA-like folders.
-7. Action feedback sent to user in PT-BR.
+7. Action board atualizado em `80_STATUS/action_board.md`.
+8. Action feedback sent to user in PT-BR.
 
 ## Notes
 

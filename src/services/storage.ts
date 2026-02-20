@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { ClassificationResult } from "../types/domain.js";
+import type { OpenActionItem } from "../db/schema.js";
 import { KNOWLEDGE_PATHS, slugify, toDailyFolder } from "../utils/paths.js";
 
 const TREE = Object.values(KNOWLEDGE_PATHS);
@@ -19,6 +20,17 @@ export async function ensureKnowledgeTree(): Promise<void> {
       "| Updated At | Project | Status | Source |",
       "|---|---|---|---|"
     ].join("\n") + "\n"
+  );
+
+  const actionBoardPath = path.join(KNOWLEDGE_PATHS.status, "action_board.md");
+  await touchIfMissing(
+    actionBoardPath,
+    [
+      "# Action Board",
+      "",
+      "Acoes abertas ordenadas por prioridade e prazo.",
+      ""
+    ].join("\n")
   );
 
   const systemReadmePath = path.join(KNOWLEDGE_PATHS.system, "README.md");
@@ -92,6 +104,9 @@ export async function writeKnowledgeNote(params: {
     `- Categoria: ${params.classification.categoryName}`,
     `- Bucket: ${params.classification.bucket}`,
     `- Acao: ${params.classification.action}`,
+    `- Prioridade: ${params.classification.priority}`,
+    `- Proximo passo: ${params.classification.nextStepPtBr || "Nao definido"}`,
+    `- Prazo: ${params.classification.dueDateISO || "Nao definido"}`,
     `- Confianca: ${params.classification.confidence}`,
     `- Origem: ${params.sourceLabel}`,
     `- Criado em: ${params.createdAt.toISOString()}`,
@@ -114,4 +129,28 @@ export async function appendProjectStatus(projectName: string, status: string, s
   const target = path.join(KNOWLEDGE_PATHS.status, "project_status.md");
   const line = `| ${new Date().toISOString()} | ${projectName} | ${status} | ${source} |\n`;
   await fs.appendFile(target, line, "utf8");
+}
+
+export async function writeActionBoard(items: OpenActionItem[]): Promise<void> {
+  const target = path.join(KNOWLEDGE_PATHS.status, "action_board.md");
+  const lines = [
+    "# Action Board",
+    "",
+    `Atualizado em: ${new Date().toISOString()}`,
+    "",
+    "| Item | Prioridade | Acao | Categoria | Prazo | Proximo passo |",
+    "|---|---|---|---|---|---|"
+  ];
+
+  if (items.length === 0) {
+    lines.push("| - | - | - | - | - | Nao ha acoes abertas |");
+  } else {
+    for (const item of items) {
+      lines.push(
+        `| #${item.id} | ${item.priority} | ${item.action} | ${item.categoryName} | ${item.dueAt || "-"} | ${item.nextStep || item.summaryPtBr} |`
+      );
+    }
+  }
+
+  await fs.writeFile(target, `${lines.join("\n")}\n`, "utf8");
 }

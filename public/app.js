@@ -1,5 +1,6 @@
 const statsNode = document.getElementById("stats");
 const categoriesNode = document.getElementById("categories");
+const focusNode = document.getElementById("focus");
 const recentNode = document.getElementById("recent");
 const statTemplate = document.getElementById("stat-template");
 
@@ -36,6 +37,19 @@ function renderDashboard(summary) {
         .join("")
     : "<li>Nenhuma categoria registrada ainda.</li>";
 
+  focusNode.innerHTML = summary.focusItems.length
+    ? summary.focusItems
+        .map((item) => {
+          const due = item.dueAt ? ` | prazo ${escapeHtml(item.dueAt)}` : "";
+          return `<li>
+              <p class="meta">#${item.id} | ${escapeHtml(item.categoryName)} | ${escapeHtml(item.action)}</p>
+              <p class="title">[${escapeHtml(item.priority)}] ${escapeHtml(item.summaryPtBr)}</p>
+              <p class="meta">${due}</p>
+            </li>`;
+        })
+        .join("")
+    : "<li>Nenhuma prioridade aberta.</li>";
+
   recentNode.innerHTML = summary.recentItems.length
     ? summary.recentItems
         .map((item) => {
@@ -44,7 +58,7 @@ function renderDashboard(summary) {
           return `<li>
               <p class="meta">#${item.id} | ${escapeHtml(created)} | ${escapeHtml(item.inputType)} | ${escapeHtml(item.categoryName)}</p>
               <p class="title">${escapeHtml(item.summaryPtBr)}</p>
-              <p class="meta">Acao: ${escapeHtml(item.action)} <span class="${badgeClass}">${escapeHtml(item.status)}</span></p>
+              <p class="meta">Acao: ${escapeHtml(item.action)} | Prioridade: ${escapeHtml(item.priority)} <span class="${badgeClass}">${escapeHtml(item.status)}</span></p>
             </li>`;
         })
         .join("")

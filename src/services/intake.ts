@@ -6,12 +6,17 @@ import { getFileBuffer, sendText } from "./telegram.js";
 import { TelegramMessage } from "../types/telegram.js";
 import {
   ensureProject,
+  insertProactiveRun,
   insertInboxItem,
+  listOpenActionItems,
+  loadWeeklySummary,
+  updateInboxItemStatus,
   updateInboxItemStoragePath,
   upsertCategory,
   upsertChatSubscription
 } from "../db/schema.js";
-import { appendProjectStatus, storeIncomingMedia, writeKnowledgeNote } from "./storage.js";
+import { buildOpenActionsMessage, buildWeeklyMessage } from "./reports.js";
+import { appendProjectStatus, storeIncomingMedia, writeActionBoard, writeKnowledgeNote } from "./storage.js";
 import { InputType } from "../types/domain.js";
 import { log } from "../utils/logger.js";
 
@@ -180,12 +185,18 @@ function buildReply(params: {
   summary: string;
   category: string;
   action: string;
+  priority: string;
+  nextStep?: string;
+  dueDateISO?: string;
   question?: string;
 }): string {
   const lines = [
     "Registro feito no Second Brain.",
     `Categoria: ${params.category}`,
     `Acao: ${params.action}`,
+    `Prioridade: ${params.priority}`,
+    `Proximo passo: ${params.nextStep || "Nao definido"}`,
+    `Prazo: ${params.dueDateISO || "Nao definido"}`,
     `Resumo: ${params.summary}`
   ];
 
@@ -205,17 +216,72 @@ function actionTitleFallback(text: string): string {
     .slice(0, 80);
 }
 
+function parseDoneCommand(text: string): number | null {
+  const match = text.trim().match(/^\/done\s+(\d+)$/i);
+  if (!match) {
+    return null;
+  }
+  const id = Number(match[1]);
+  if (!Number.isInteger(id) || id <= 0) {
+    return null;
+  }
+  return id;
+}
+
+async function handleTextCommand(chatId: number, text: string): Promise<boolean> {
+  const normalized = text.trim();
+
+  if (normalized === "/start" || normalized === "/help") {
+    await sendText(
+      chatId,
+      [
+        "Second Brain ativo.",
+        "Envie texto, audio, imagem ou PDF para registrar.",
+        "",
+        "Comandos:",
+        "- /prioridades -> lista acoes abertas",
+        "- /done <id> -> marca acao como concluida",
+        "- /weekly -> gera resumo semanal agora"
+      ].join("\n")
+    );
+    return true;
+  }
+
+  if (normalized === "/prioridades") {
+    const items = await listOpenActionItems(chatId, 12);
+    await sendText(chatId, buildOpenActionsMessage(items));
+    return true;
+  }
+
+  const doneId = parseDoneCommand(normalized);
+  if (doneId !== null) {
+    const updated = await updateInboxItemStatus(chatId, doneId, "done");
+    if (updated) {
+      await sendText(chatId, `Item #${doneId} marcado como concluido.`);
+    } else {
+      await sendText(chatId, `Nao encontrei item aberto com id #${doneId} neste chat.`);
+    }
+    return true;
+  }
+
+  if (normalized === "/weekly") {
+    const summary = await loadWeeklySummary(chatId);
+    const message = buildWeeklyMessage(summary);
+    await sendText(chatId, message);
+    await insertProactiveRun(chatId, message, "manual");
+    return true;
+  }
+
+  return false;
+}
+
 export async function processTelegramMessage(message: TelegramMessage): Promise<void> {
   const chatId = message.chat.id;
   const messageId = message.message_id;
 
   await upsertChatSubscription(chatId);
 
-  if (message.text?.trim() === "/start") {
-    await sendText(
-      chatId,
-      "Second Brain ativo. Pode enviar texto, audio, imagem ou PDF. Vou organizar, classificar e sugerir proximas acoes."
-    );
+  if (message.text && (await handleTextCommand(chatId, message.text))) {
     return;
   }
 
@@ -242,11 +308,19 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
     categoryId,
     bucket: classification.bucket,
     action: classification.action,
+    priority: classification.priority,
     actionTitle: classification.actionTitle,
     actionDetails: classification.actionDetails,
+    dueAt: classification.dueDateISO,
+    nextStep: classification.nextStepPtBr,
     confidence: classification.confidence,
     storagePath: extracted.mediaPath,
-    metadata: extracted.metadata
+    metadata: {
+      ...extracted.metadata,
+      priority: classification.priority,
+      dueDateISO: classification.dueDateISO,
+      nextStepPtBr: classification.nextStepPtBr
+    }
   });
 
   const sourceLabel = `telegram:${chatId}#${messageId}`;
@@ -260,6 +334,7 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
   });
 
   await updateInboxItemStoragePath(itemId, notePath);
+  await writeActionBoard(await listOpenActionItems(undefined, 40));
 
   if (classification.action === "CREATE_PROJECT") {
     const projectTitle = classification.actionTitle || actionTitleFallback(classification.summaryPtBr);
@@ -278,6 +353,9 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
       summary: classification.summaryPtBr,
       category: classification.categoryName,
       action: classification.action,
+      priority: classification.priority,
+      nextStep: classification.nextStepPtBr,
+      dueDateISO: classification.dueDateISO,
       question: classification.followUpQuestionPtBr
     })
   );

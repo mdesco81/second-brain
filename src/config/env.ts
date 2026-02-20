@@ -15,6 +15,9 @@ const envSchema = z.object({
   TIMEZONE: z.string().default("America/Sao_Paulo"),
   PROACTIVE_HOUR: z.coerce.number().int().min(0).max(23).default(9),
   PROACTIVE_MINUTE: z.coerce.number().int().min(0).max(59).default(0),
+  WEEKLY_REPORT_DAY: z.coerce.number().int().min(0).max(6).default(1),
+  WEEKLY_REPORT_HOUR: z.coerce.number().int().min(0).max(23).default(8),
+  WEEKLY_REPORT_MINUTE: z.coerce.number().int().min(0).max(59).default(30),
   STORAGE_ROOT: z.string().default("./storage/SecondBrain")
 });
 

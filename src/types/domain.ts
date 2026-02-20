@@ -14,6 +14,8 @@ export type SuggestedAction =
   | "FOLLOW_UP"
   | "NONE";
 
+export type ActionPriority = "ALTA" | "MEDIA" | "BAIXA";
+
 export interface IntakePayload {
   chatId: number;
   messageId: number;
@@ -31,6 +33,9 @@ export interface ClassificationResult {
   action: SuggestedAction;
   actionTitle?: string;
   actionDetails?: string;
+  nextStepPtBr?: string;
+  dueDateISO?: string;
+  priority: ActionPriority;
   confidence: number;
   shouldCreateCategory: boolean;
   followUpQuestionPtBr?: string;
@@ -48,6 +53,15 @@ export interface DashboardSummary {
     categoryName: string;
     summaryPtBr: string;
     action: SuggestedAction;
+    priority: ActionPriority;
     status: string;
+  }>;
+  focusItems: Array<{
+    id: number;
+    categoryName: string;
+    summaryPtBr: string;
+    action: SuggestedAction;
+    priority: ActionPriority;
+    dueAt?: string;
   }>;
 }

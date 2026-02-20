@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 import { env } from "../config/env.js";
+import { ActionPriority } from "../types/domain.js";
 import { log } from "../utils/logger.js";
 
 export interface AIClassificationInput {
@@ -16,6 +17,9 @@ export interface AIClassificationOutput {
   action: "CREATE_PROJECT" | "CREATE_TASK" | "STORE_REFERENCE" | "FOLLOW_UP" | "NONE";
   actionTitle?: string;
   actionDetails?: string;
+  nextStepPtBr?: string;
+  dueDateISO?: string | null;
+  priority: ActionPriority;
   confidence: number;
   shouldCreateCategory: boolean;
   followUpQuestionPtBr?: string;
@@ -163,6 +167,7 @@ export async function classifyWithAI(input: AIClassificationInput): Promise<AICl
               "categoryDescription",
               "bucket",
               "action",
+              "priority",
               "confidence",
               "shouldCreateCategory"
             ],
@@ -180,6 +185,20 @@ export async function classifyWithAI(input: AIClassificationInput): Promise<AICl
               },
               actionTitle: { type: "string" },
               actionDetails: { type: "string" },
+              nextStepPtBr: { type: "string" },
+              dueDateISO: {
+                anyOf: [
+                  {
+                    type: "string",
+                    pattern: "^\\d{4}-\\d{2}-\\d{2}$"
+                  },
+                  { type: "null" }
+                ]
+              },
+              priority: {
+                type: "string",
+                enum: ["ALTA", "MEDIA", "BAIXA"]
+              },
               confidence: { type: "number", minimum: 0, maximum: 1 },
               shouldCreateCategory: { type: "boolean" },
               followUpQuestionPtBr: { type: "string" }
@@ -191,7 +210,7 @@ export async function classifyWithAI(input: AIClassificationInput): Promise<AICl
         {
           role: "system",
           content:
-            "You classify personal knowledge inputs for a Second Brain system. Think in English for accuracy, but every textual output must be in Brazilian Portuguese. Reuse an existing category if possible. Create a new category only when no existing category can capture intent." 
+            "You classify personal knowledge inputs for a Second Brain system. Think in English for accuracy, but every textual output must be in Brazilian Portuguese. Reuse existing categories whenever possible. Create a new category only when strictly necessary. Always propose a concrete next step for actionable items and assign a practical priority (ALTA, MEDIA, BAIXA). Only set dueDateISO when the text implies a date or deadline." 
         },
         {
           role: "user",

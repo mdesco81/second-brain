@@ -1,44 +1,74 @@
 import cron from "node-cron";
 import { env } from "../config/env.js";
-import { insertProactiveRun, listProactiveChats, loadLast24hSnapshot } from "../db/schema.js";
+import {
+  insertProactiveRun,
+  listOpenActionItems,
+  listProactiveChats,
+  loadLast24hSnapshot,
+  loadWeeklySummary
+} from "../db/schema.js";
+import { buildDailyMessage, buildWeeklyMessage } from "./reports.js";
 import { sendText } from "./telegram.js";
 import { log } from "../utils/logger.js";
 
-function buildDailyMessage(snapshot: { items: number; projects: number; categoriesUsed: number }): string {
-  return [
-    "Check-in diario do Second Brain:",
-    `Ultimas 24h: ${snapshot.items} itens, ${snapshot.projects} projetos tocados, ${snapshot.categoriesUsed} categorias usadas.`,
-    "Perguntas rapidas:",
-    "1) Qual e a prioridade numero 1 de hoje?",
-    "2) Existe algum bloqueio que devo registrar?",
-    "3) Ha algo importante que voce nao me enviou ainda?"
-  ].join("\n");
+async function deliverDailyRun(chatIds: number[]): Promise<void> {
+  const snapshot = await loadLast24hSnapshot();
+  for (const chatId of chatIds) {
+    const focusItems = await listOpenActionItems(chatId, 3);
+    const message = buildDailyMessage(snapshot, focusItems);
+    await sendText(chatId, message);
+    await insertProactiveRun(chatId, message, "daily");
+  }
+  log.info("Daily proactive run delivered", { recipients: chatIds.length, snapshot });
+}
+
+async function deliverWeeklyRun(chatIds: number[]): Promise<void> {
+  for (const chatId of chatIds) {
+    const summary = await loadWeeklySummary(chatId);
+    const message = buildWeeklyMessage(summary);
+    await sendText(chatId, message);
+    await insertProactiveRun(chatId, message, "weekly");
+  }
+  log.info("Weekly proactive run delivered", { recipients: chatIds.length });
 }
 
 export function startProactiveScheduler(): void {
-  const expression = `${env.PROACTIVE_MINUTE} ${env.PROACTIVE_HOUR} * * *`;
+  const dailyExpression = `${env.PROACTIVE_MINUTE} ${env.PROACTIVE_HOUR} * * *`;
+  const weeklyExpression = `${env.WEEKLY_REPORT_MINUTE} ${env.WEEKLY_REPORT_HOUR} * * ${env.WEEKLY_REPORT_DAY}`;
 
   cron.schedule(
-    expression,
+    dailyExpression,
     async () => {
       try {
-        const [chatIds, snapshot] = await Promise.all([listProactiveChats(), loadLast24hSnapshot()]);
+        const chatIds = await listProactiveChats();
 
         if (chatIds.length === 0) {
-          log.info("Proactive run skipped: no chat subscriptions");
+          log.info("Daily proactive run skipped: no chat subscriptions");
           return;
         }
 
-        const message = buildDailyMessage(snapshot);
-
-        for (const chatId of chatIds) {
-          await sendText(chatId, message);
-          await insertProactiveRun(chatId, message);
-        }
-
-        log.info("Proactive run delivered", { recipients: chatIds.length, snapshot });
+        await deliverDailyRun(chatIds);
       } catch (error) {
-        log.error("Proactive run failed", { error });
+        log.error("Daily proactive run failed", { error });
+      }
+    },
+    {
+      timezone: env.TIMEZONE
+    }
+  );
+
+  cron.schedule(
+    weeklyExpression,
+    async () => {
+      try {
+        const chatIds = await listProactiveChats();
+        if (chatIds.length === 0) {
+          log.info("Weekly proactive run skipped: no chat subscriptions");
+          return;
+        }
+        await deliverWeeklyRun(chatIds);
+      } catch (error) {
+        log.error("Weekly proactive run failed", { error });
       }
     },
     {
@@ -48,7 +78,14 @@ export function startProactiveScheduler(): void {
 
   log.info("Proactive scheduler started", {
     timezone: env.TIMEZONE,
-    hour: env.PROACTIVE_HOUR,
-    minute: env.PROACTIVE_MINUTE
+    daily: {
+      hour: env.PROACTIVE_HOUR,
+      minute: env.PROACTIVE_MINUTE
+    },
+    weekly: {
+      day: env.WEEKLY_REPORT_DAY,
+      hour: env.WEEKLY_REPORT_HOUR,
+      minute: env.WEEKLY_REPORT_MINUTE
+    }
   });
 }

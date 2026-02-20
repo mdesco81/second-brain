@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { listCategories, loadDashboardSummary } from "../db/schema.js";
+import { listCategories, listOpenActionItems, loadDashboardSummary } from "../db/schema.js";
 
 export const apiRouter = Router();
 
@@ -20,6 +20,15 @@ apiRouter.get("/categories", async (_req, res, next) => {
   try {
     const categories = await listCategories();
     res.json({ categories });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.get("/actions", async (_req, res, next) => {
+  try {
+    const actions = await listOpenActionItems(undefined, 30);
+    res.json({ actions });
   } catch (error) {
     next(error);
   }
