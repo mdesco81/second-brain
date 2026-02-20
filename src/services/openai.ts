@@ -31,6 +31,39 @@ export function hasAI(): boolean {
   return Boolean(maybeClient);
 }
 
+const SUPPORTED_AUDIO_EXTENSIONS = new Set([".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".flac"]);
+
+function normalizeUploadFileName(fileName: string, mimeType?: string): string {
+  const fallbackBase = "audio";
+  const trimmed = fileName?.trim() || fallbackBase;
+  const lastDot = trimmed.lastIndexOf(".");
+  const baseName = (lastDot > 0 ? trimmed.slice(0, lastDot) : trimmed) || fallbackBase;
+  const ext = lastDot > 0 ? trimmed.slice(lastDot).toLowerCase() : "";
+
+  if (SUPPORTED_AUDIO_EXTENSIONS.has(ext)) {
+    return trimmed;
+  }
+
+  if (mimeType === "audio/webm") {
+    return `${baseName}.webm`;
+  }
+  if (mimeType === "audio/flac") {
+    return `${baseName}.flac`;
+  }
+  if (mimeType === "audio/wav" || mimeType === "audio/x-wav") {
+    return `${baseName}.wav`;
+  }
+  if (mimeType === "audio/mpeg" || mimeType === "audio/mp3") {
+    return `${baseName}.mp3`;
+  }
+  if (mimeType === "audio/mp4" || mimeType === "audio/x-m4a") {
+    return `${baseName}.m4a`;
+  }
+
+  // Telegram commonly uses .oga for voice notes; OpenAI accepts .ogg.
+  return `${baseName}.ogg`;
+}
+
 export async function transcribeAudio(params: {
   buffer: Buffer;
   fileName: string;
@@ -44,11 +77,12 @@ export async function transcribeAudio(params: {
   const models = [env.OPENAI_TRANSCRIBE_MODEL, ...fallbackModels].filter(
     (model, index, items) => Boolean(model) && items.indexOf(model) === index
   );
+  const uploadFileName = normalizeUploadFileName(params.fileName, params.mimeType);
 
   try {
     for (const model of models) {
       try {
-        const file = await toFile(params.buffer, params.fileName, {
+        const file = await toFile(params.buffer, uploadFileName, {
           type: params.mimeType || "audio/ogg"
         });
 
@@ -63,7 +97,7 @@ export async function transcribeAudio(params: {
           return text;
         }
       } catch (error) {
-        log.warn("Audio transcription attempt failed", { model, error });
+        log.warn("Audio transcription attempt failed", { model, fileName: params.fileName, uploadFileName, error });
       }
     }
   } catch (error) {
