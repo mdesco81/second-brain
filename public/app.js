@@ -2,6 +2,9 @@ const statsNode = document.getElementById("stats");
 const categoriesNode = document.getElementById("categories");
 const focusNode = document.getElementById("focus");
 const recentNode = document.getElementById("recent");
+const kanbanHighNode = document.getElementById("kanban-high");
+const kanbanMediumNode = document.getElementById("kanban-medium");
+const kanbanLowNode = document.getElementById("kanban-low");
 const statTemplate = document.getElementById("stat-template");
 
 function buildStat(label, value) {
@@ -12,12 +15,28 @@ function buildStat(label, value) {
 }
 
 function escapeHtml(value) {
-  return value
+  return String(value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function renderKanbanColumn(node, items) {
+  node.innerHTML = items.length
+    ? items
+        .map((item) => {
+          const due = item.dueAt ? ` | prazo ${escapeHtml(item.dueAt)}` : "";
+          const nextStep = item.nextStep ? `<p class="meta">Proximo passo: ${escapeHtml(item.nextStep)}</p>` : "";
+          return `<li>
+              <p class="meta">#${item.id} | ${escapeHtml(item.categoryName)} | ${escapeHtml(item.action)}${due}</p>
+              <p class="title">${escapeHtml(item.summaryPtBr)}</p>
+              ${nextStep}
+            </li>`;
+        })
+        .join("")
+    : "<li>Sem itens nesta coluna.</li>";
 }
 
 function renderDashboard(summary) {
@@ -49,6 +68,10 @@ function renderDashboard(summary) {
         })
         .join("")
     : "<li>Nenhuma prioridade aberta.</li>";
+
+  renderKanbanColumn(kanbanHighNode, summary.kanban.high);
+  renderKanbanColumn(kanbanMediumNode, summary.kanban.medium);
+  renderKanbanColumn(kanbanLowNode, summary.kanban.low);
 
   recentNode.innerHTML = summary.recentItems.length
     ? summary.recentItems

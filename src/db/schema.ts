@@ -404,7 +404,7 @@ export async function loadWeeklySummary(chatId?: number): Promise<{
 }
 
 export async function loadDashboardSummary(): Promise<DashboardSummary> {
-  const [totalItems, openActions, totalProjects, categories, recent, focusItems] = await Promise.all([
+  const [totalItems, openActions, totalProjects, categories, recent, openQueue] = await Promise.all([
     pool.query<{ total: string }>(`SELECT COUNT(*)::TEXT AS total FROM inbox_items`),
     pool.query<{ total: string }>(
       `SELECT COUNT(*)::TEXT AS total FROM inbox_items WHERE status = 'open' AND action <> 'NONE'`
@@ -441,8 +441,13 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
        ORDER BY i.created_at DESC
        LIMIT 20`
     ),
-    listOpenActionItems(undefined, 8)
+    listOpenActionItems(undefined, 30)
   ]);
+
+  const focusItems = openQueue.slice(0, 8);
+  const kanbanHigh = openQueue.filter((item) => item.priority === "ALTA");
+  const kanbanMedium = openQueue.filter((item) => item.priority === "MEDIA");
+  const kanbanLow = openQueue.filter((item) => item.priority === "BAIXA");
 
   return {
     totalItems: Number(totalItems.rows[0]?.total ?? 0),
@@ -466,7 +471,36 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
       action: item.action as DashboardSummary["focusItems"][number]["action"],
       priority: item.priority,
       dueAt: item.dueAt
-    }))
+    })),
+    kanban: {
+      high: kanbanHigh.map((item) => ({
+        id: item.id,
+        categoryName: item.categoryName,
+        summaryPtBr: item.summaryPtBr,
+        action: item.action as DashboardSummary["kanban"]["high"][number]["action"],
+        priority: item.priority,
+        dueAt: item.dueAt,
+        nextStep: item.nextStep
+      })),
+      medium: kanbanMedium.map((item) => ({
+        id: item.id,
+        categoryName: item.categoryName,
+        summaryPtBr: item.summaryPtBr,
+        action: item.action as DashboardSummary["kanban"]["medium"][number]["action"],
+        priority: item.priority,
+        dueAt: item.dueAt,
+        nextStep: item.nextStep
+      })),
+      low: kanbanLow.map((item) => ({
+        id: item.id,
+        categoryName: item.categoryName,
+        summaryPtBr: item.summaryPtBr,
+        action: item.action as DashboardSummary["kanban"]["low"][number]["action"],
+        priority: item.priority,
+        dueAt: item.dueAt,
+        nextStep: item.nextStep
+      }))
+    }
   };
 }
 

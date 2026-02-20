@@ -64,4 +64,33 @@ export interface DashboardSummary {
     priority: ActionPriority;
     dueAt?: string;
   }>;
+  kanban: {
+    high: Array<{
+      id: number;
+      categoryName: string;
+      summaryPtBr: string;
+      action: SuggestedAction;
+      priority: ActionPriority;
+      dueAt?: string;
+      nextStep?: string;
+    }>;
+    medium: Array<{
+      id: number;
+      categoryName: string;
+      summaryPtBr: string;
+      action: SuggestedAction;
+      priority: ActionPriority;
+      dueAt?: string;
+      nextStep?: string;
+    }>;
+    low: Array<{
+      id: number;
+      categoryName: string;
+      summaryPtBr: string;
+      action: SuggestedAction;
+      priority: ActionPriority;
+      dueAt?: string;
+      nextStep?: string;
+    }>;
+  };
 }
