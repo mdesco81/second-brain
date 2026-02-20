@@ -1,5 +1,7 @@
 const statsNode = document.getElementById("stats");
+const alertsNode = document.getElementById("alerts");
 const workflowNode = document.getElementById("workflow");
+const todayFocusNode = document.getElementById("today-focus");
 const categoriesNode = document.getElementById("categories");
 const captureBreakdownNode = document.getElementById("capture-breakdown");
 const recentNode = document.getElementById("recent");
@@ -51,6 +53,33 @@ function statusLabel(status) {
   return "aberto";
 }
 
+function actionLabel(action) {
+  if (action === "CREATE_PROJECT") {
+    return "Criar projeto";
+  }
+  if (action === "CREATE_TASK") {
+    return "Executar tarefa";
+  }
+  if (action === "STORE_REFERENCE") {
+    return "Registrar referencia";
+  }
+  if (action === "FOLLOW_UP") {
+    return "Fazer follow-up";
+  }
+  return "Somente registro";
+}
+
+function stageLabel(stage) {
+  if (stage === "capturado") return "capturado";
+  if (stage === "processando") return "processando";
+  if (stage === "interpretado") return "interpretado";
+  if (stage === "planejado") return "planejado";
+  if (stage === "concluido") return "concluido";
+  if (stage === "eliminado") return "eliminado";
+  if (stage === "falha") return "falha";
+  return "capturado";
+}
+
 function statusButtons(id, status) {
   if (status === "open") {
     return `<div class="actions">
@@ -74,15 +103,54 @@ function renderStats(summary) {
   );
 }
 
+function renderAlerts(summary) {
+  alertsNode.innerHTML = `
+    <article class="alert-chip critical">
+      <p class="title">${escapeHtml(summary.alerts.overdue)} atrasados</p>
+      <p class="meta">Itens com prazo vencido e ainda abertos.</p>
+    </article>
+    <article class="alert-chip warning">
+      <p class="title">${escapeHtml(summary.alerts.dueToday)} vencem hoje</p>
+      <p class="meta">Priorize antes de virar atraso.</p>
+    </article>
+    <article class="alert-chip info">
+      <p class="title">${escapeHtml(summary.alerts.missingOwner)} sem responsável claro</p>
+      <p class="meta">Defina quem cobrar/procurar para não travar.</p>
+    </article>
+  `;
+}
+
 function renderWorkflow(summary) {
   workflowNode.innerHTML = "";
   workflowNode.append(
     buildWorkflowStep("1. Captura", summary.workflow.captured),
-    buildWorkflowStep("2. Classificação", summary.workflow.classified),
+    buildWorkflowStep("2. Interpretação", summary.workflow.classified),
     buildWorkflowStep("3. Ações definidas", summary.workflow.actionable),
     buildWorkflowStep("4. Resolvidos", summary.workflow.resolved),
     buildWorkflowStep("5. Eliminados", summary.workflow.eliminated)
   );
+}
+
+function renderTodayFocus(summary) {
+  todayFocusNode.innerHTML = summary.todayFocus.length
+    ? summary.todayFocus
+        .map((item) => {
+          const due = item.dueAt ? ` | prazo ${escapeHtml(item.dueAt)}` : "";
+          const nextStep = item.nextStep ? `<p class="meta">Próximo passo: ${escapeHtml(item.nextStep)}</p>` : "";
+          const followUp = item.followUpWith ? `<p class="meta">Quem cobrar/procurar: ${escapeHtml(item.followUpWith)}</p>` : "";
+          return `<li>
+            <p class="meta">#${item.id} | ${escapeHtml(item.categoryName)} | ${escapeHtml(item.priority)}${due}</p>
+            <div class="title-line">
+              <p class="title">${escapeHtml(item.summaryPtBr)}</p>
+              <span class="action-pill">${escapeHtml(actionLabel(item.action))}</span>
+            </div>
+            ${nextStep}
+            ${followUp}
+            ${statusButtons(item.id, "open")}
+          </li>`;
+        })
+        .join("")
+    : "<li>Nenhum foco crítico aberto agora.</li>";
 }
 
 function renderCategories(summary) {
@@ -119,9 +187,9 @@ function renderKanbanColumn(node, items) {
         .map((item) => {
           const due = item.dueAt ? ` | prazo ${escapeHtml(item.dueAt)}` : "";
           const followUp = item.followUpWith ? `<p class="meta">Quem cobrar/procurar: ${escapeHtml(item.followUpWith)}</p>` : "";
-          const nextStep = item.nextStep ? `<p class="meta">Proximo passo: ${escapeHtml(item.nextStep)}</p>` : "";
+          const nextStep = item.nextStep ? `<p class="meta">Próximo passo: ${escapeHtml(item.nextStep)}</p>` : "";
           return `<li>
-            <p class="meta">#${item.id} | ${escapeHtml(item.categoryName)} | ${escapeHtml(item.action)}${due}</p>
+            <p class="meta">#${item.id} | ${escapeHtml(item.categoryName)} | ${escapeHtml(actionLabel(item.action))}${due}</p>
             <p class="title">${escapeHtml(item.summaryPtBr)}</p>
             ${followUp}
             ${nextStep}
@@ -146,17 +214,22 @@ function renderRecent(summary) {
         .map((item) => {
           const created = new Date(item.createdAt).toLocaleString("pt-BR");
           const due = item.dueAt ? ` | prazo ${escapeHtml(item.dueAt)}` : "";
-          const nextStep = item.nextStep ? `<p class="meta">Proximo passo: ${escapeHtml(item.nextStep)}</p>` : "";
+          const nextStep = item.nextStep ? `<p class="meta">Próximo passo: ${escapeHtml(item.nextStep)}</p>` : "";
           const followUp = item.followUpWith ? `<p class="meta">Quem cobrar/procurar: ${escapeHtml(item.followUpWith)}</p>` : "";
+          const errorLine = item.processingError
+            ? `<p class="processing-error">Falha/atenção: ${escapeHtml(item.processingError)}</p>`
+            : "";
           return `<li>
             <p class="meta">#${item.id} | ${escapeHtml(created)} | ${escapeHtml(item.inputType)} | ${escapeHtml(item.categoryName)}</p>
             <p class="title">${escapeHtml(item.summaryPtBr)}</p>
             <p class="meta">
-              Ação: ${escapeHtml(item.action)} | Prioridade: ${escapeHtml(item.priority)}${due}
+              Ação: ${escapeHtml(actionLabel(item.action))} | Prioridade: ${escapeHtml(item.priority)}${due}
               <span class="badge ${escapeHtml(item.status)}">${escapeHtml(statusLabel(item.status))}</span>
+              <span class="badge stage">${escapeHtml(stageLabel(item.processingStage))}</span>
             </p>
             ${nextStep}
             ${followUp}
+            ${errorLine}
             ${statusButtons(item.id, item.status)}
           </li>`;
         })
@@ -167,7 +240,9 @@ function renderRecent(summary) {
 function renderDashboard(summary) {
   state.summary = summary;
   renderStats(summary);
+  renderAlerts(summary);
   renderWorkflow(summary);
+  renderTodayFocus(summary);
   renderCategories(summary);
   renderCaptureBreakdown(summary);
   renderWeeklyDebrief(summary);

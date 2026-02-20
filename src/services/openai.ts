@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
+import { fileTypeFromBuffer } from "file-type";
 import { env } from "../config/env.js";
 import { ActionPriority } from "../types/domain.js";
 import { log } from "../utils/logger.js";
@@ -37,6 +38,17 @@ export function hasAI(): boolean {
 }
 
 const SUPPORTED_AUDIO_EXTENSIONS = new Set([".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".flac"]);
+const EXT_TO_MIME: Record<string, string> = {
+  ".mp3": "audio/mpeg",
+  ".mp4": "audio/mp4",
+  ".mpeg": "audio/mpeg",
+  ".mpga": "audio/mpeg",
+  ".m4a": "audio/x-m4a",
+  ".wav": "audio/wav",
+  ".webm": "audio/webm",
+  ".ogg": "audio/ogg",
+  ".flac": "audio/flac"
+};
 
 function normalizeUploadFileName(fileName: string, mimeType?: string): string {
   const fallbackBase = "audio";
@@ -69,6 +81,15 @@ function normalizeUploadFileName(fileName: string, mimeType?: string): string {
   return `${baseName}.ogg`;
 }
 
+function mimeFromFileName(fileName: string): string | undefined {
+  const dot = fileName.lastIndexOf(".");
+  if (dot < 0) {
+    return undefined;
+  }
+  const ext = fileName.slice(dot).toLowerCase();
+  return EXT_TO_MIME[ext];
+}
+
 export async function transcribeAudio(params: {
   buffer: Buffer;
   fileName: string;
@@ -82,27 +103,54 @@ export async function transcribeAudio(params: {
   const models = [env.OPENAI_TRANSCRIBE_MODEL, ...fallbackModels].filter(
     (model, index, items) => Boolean(model) && items.indexOf(model) === index
   );
-  const uploadFileName = normalizeUploadFileName(params.fileName, params.mimeType);
+  const detected = await fileTypeFromBuffer(params.buffer).catch(() => undefined);
+  const detectedMime = detected?.mime?.startsWith("audio/") ? detected.mime : undefined;
+  const detectedExt = detected?.ext ? `.${detected.ext.toLowerCase()}` : undefined;
+
+  const uploadCandidates: Array<{ fileName: string; mimeType: string }> = [];
+  const addCandidate = (fileName: string, mimeType?: string) => {
+    const normalizedName = normalizeUploadFileName(fileName, mimeType);
+    const normalizedMime = mimeType || mimeFromFileName(normalizedName) || "audio/ogg";
+    if (!uploadCandidates.find((item) => item.fileName === normalizedName && item.mimeType === normalizedMime)) {
+      uploadCandidates.push({ fileName: normalizedName, mimeType: normalizedMime });
+    }
+  };
+
+  if (detectedExt || detectedMime) {
+    addCandidate(`audio${detectedExt || ".ogg"}`, detectedMime);
+  }
+  addCandidate(params.fileName, params.mimeType);
+  addCandidate(normalizeUploadFileName(params.fileName, params.mimeType), params.mimeType || detectedMime);
 
   try {
     for (const model of models) {
-      try {
-        const file = await toFile(params.buffer, uploadFileName, {
-          type: params.mimeType || "audio/ogg"
-        });
+      for (const candidate of uploadCandidates) {
+        try {
+          const file = await toFile(params.buffer, candidate.fileName, {
+            type: candidate.mimeType
+          });
 
-        const transcription = await maybeClient.audio.transcriptions.create({
-          file,
-          model,
-          language: "pt"
-        });
+          const transcription = await maybeClient.audio.transcriptions.create({
+            file,
+            model,
+            language: "pt"
+          });
 
-        const text = transcription.text?.trim();
-        if (text) {
-          return text;
+          const text = transcription.text?.trim();
+          if (text) {
+            return text;
+          }
+        } catch (error) {
+          log.warn("Audio transcription attempt failed", {
+            model,
+            fileName: params.fileName,
+            uploadFileName: candidate.fileName,
+            uploadMimeType: candidate.mimeType,
+            detectedMime,
+            detectedExt,
+            error
+          });
         }
-      } catch (error) {
-        log.warn("Audio transcription attempt failed", { model, fileName: params.fileName, uploadFileName, error });
       }
     }
   } catch (error) {
@@ -212,7 +260,7 @@ export async function classifyWithAI(input: AIClassificationInput): Promise<AICl
         {
           role: "system",
           content:
-            "You classify personal knowledge inputs for a Second Brain system. Think in English for accuracy, but every textual output must be in Brazilian Portuguese. Reuse existing categories whenever possible. Create a new category only when strictly necessary. Return action-oriented outputs only: actionTitle must be a short imperative sentence, summaryPtBr must be concise and objective, nextStepPtBr must be executable, priority must be practical (ALTA, MEDIA, BAIXA), and followUpWithPtBr must name who should be contacted or charged (person, team, supplier or stakeholder) whenever action is not NONE. Only set dueDateISO when the text implies a concrete date or deadline." 
+            "You classify personal knowledge inputs for a Second Brain system. Think in English for accuracy, but every textual output must be in Brazilian Portuguese. Reuse existing categories whenever possible. Create a new category only when strictly necessary. Return action-oriented outputs only: actionTitle must be a short imperative sentence, summaryPtBr must be concise and objective, nextStepPtBr must be executable, priority must be practical (ALTA, MEDIA, BAIXA), and followUpWithPtBr must name who should be contacted or charged (person, team, supplier or stakeholder) whenever action is not NONE. Never use generic placeholders like 'responsavel interno'. If action is not NONE, always fill actionTitle, nextStepPtBr and followUpWithPtBr. Only set dueDateISO when the text implies a concrete date or deadline."
         },
         {
           role: "user",

@@ -17,7 +17,7 @@ import {
 } from "../db/schema.js";
 import { buildOpenActionsMessage, buildWeeklyMessage } from "./reports.js";
 import { appendProjectStatus, storeIncomingMedia, writeActionBoard, writeKnowledgeNote } from "./storage.js";
-import { InputType } from "../types/domain.js";
+import { InputType, ProcessingStage } from "../types/domain.js";
 import { log } from "../utils/logger.js";
 
 interface ExtractedContent {
@@ -218,6 +218,13 @@ function actionTitleFallback(text: string): string {
     .slice(0, 80);
 }
 
+function stageFromClassification(action: string): ProcessingStage {
+  if (action === "NONE") {
+    return "interpretado";
+  }
+  return "planejado";
+}
+
 function parseDoneCommand(text: string): number | null {
   const match = text.trim().match(/^\/done\s+(\d+)$/i);
   if (!match) {
@@ -290,6 +297,33 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
 
   const extracted = await extractFromMessage(message);
   if (!extracted.normalizedText) {
+    const categoryId = await upsertCategory("Inbox Geral", "Itens sem extração automatica completa", "agent");
+    const fallbackSummary = "Arquivo recebido, mas nao foi possivel extrair conteudo automaticamente.";
+    await insertInboxItem({
+      chatId,
+      messageId,
+      inputType: extracted.inputType,
+      rawText: extracted.rawText,
+      normalizedText: "Falha de extracao automatica.",
+      summaryPtBr: fallbackSummary,
+      categoryId,
+      bucket: "RESEARCH",
+      action: "FOLLOW_UP",
+      priority: "ALTA",
+      actionTitle: "Enviar resumo em texto para classificar",
+      actionDetails: "Nao foi possivel extrair conteudo do anexo. Solicitar resumo em texto.",
+      dueAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+      nextStep: "Pedir ao usuario um resumo em texto com objetivo, responsavel e prazo.",
+      followUpWith: "Usuario",
+      processingStage: "falha",
+      processingError: "Nao foi possivel extrair conteudo do anexo.",
+      confidence: 0.4,
+      metadata: {
+        ...extracted.metadata,
+        extractionFailure: true
+      }
+    });
+    await writeActionBoard(await listOpenActionItems(undefined, 40));
     await sendText(chatId, "Recebi o arquivo, mas nao consegui extrair conteudo. Pode enviar um resumo em texto?");
     return;
   }
@@ -300,6 +334,13 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
     classification.categoryDescription,
     classification.shouldCreateCategory ? "agent" : "reuse"
   );
+
+  const audioWithoutTranscription =
+    extracted.inputType === "audio" && extracted.metadata.transcriptionAvailable === false && !extracted.rawText;
+  const processingError = audioWithoutTranscription
+    ? "Transcricao indisponivel. Classificacao feita com conteudo parcial."
+    : undefined;
+  const processingStage = stageFromClassification(classification.action);
 
   const itemId = await insertInboxItem({
     chatId,
@@ -317,6 +358,8 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
     dueAt: classification.dueDateISO,
     nextStep: classification.nextStepPtBr,
     followUpWith: classification.followUpWithPtBr,
+    processingStage,
+    processingError,
     confidence: classification.confidence,
     storagePath: extracted.mediaPath,
     metadata: {

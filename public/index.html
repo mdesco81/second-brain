@@ -20,10 +20,11 @@
           <h1>Dashboard Operacional</h1>
           <p class="subtitle">Fluxo completo de captura, interpretação, priorização e acompanhamento.</p>
         </div>
-        <p class="hero-tip">Use os cards para Resolver, Eliminar ou Reabrir sem sair desta tela.</p>
+        <p class="hero-tip">A IA organiza, prioriza e sinaliza riscos para voce agir antes do prazo estourar.</p>
       </header>
 
       <section class="stats" id="stats"></section>
+      <section class="alerts" id="alerts"></section>
 
       <section class="card workflow-card">
         <div class="section-head">
@@ -35,6 +36,14 @@
 
       <section class="main-grid">
         <div class="primary">
+          <section class="card focus-card">
+            <div class="section-head">
+              <h2>Foco de Hoje</h2>
+              <p>Top 3 movimentos sugeridos pela IA agora.</p>
+            </div>
+            <ul class="list" id="today-focus"></ul>
+          </section>
+
           <section class="card kanban-card">
             <div class="section-head">
               <h2>Prioridades em Aberto</h2>

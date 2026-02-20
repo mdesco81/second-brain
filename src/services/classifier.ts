@@ -119,6 +119,19 @@ function inferDueDateFromText(text: string): string | undefined {
   return undefined;
 }
 
+function inferDueDateFromPriority(priority: ActionPriority): string {
+  const now = new Date();
+  const due = new Date(now);
+  if (priority === "ALTA") {
+    due.setDate(now.getDate() + 1);
+  } else if (priority === "MEDIA") {
+    due.setDate(now.getDate() + 3);
+  } else {
+    due.setDate(now.getDate() + 7);
+  }
+  return due.toISOString().slice(0, 10);
+}
+
 function inferFallbackPriority(text: string): ActionPriority {
   const normalized = text.toLowerCase();
   if (/\b(urgente|hoje|agora|prazo|deadline|ate amanha)\b/.test(normalized)) {
@@ -132,6 +145,7 @@ function inferFallbackPriority(text: string): ActionPriority {
 
 function inferFollowUpWith(text: string): string | undefined {
   const patterns = [
+    /@([a-zA-Z0-9_]{2,32})/,
     /\b(?:cobrar|falar com|alinhar com|aguardando|pendente com|depende de|validar com)\s+([a-zA-ZÀ-ÿ0-9 _-]{2,60})/i,
     /\b(?:cliente|fornecedor|time|squad)\s+([a-zA-ZÀ-ÿ0-9 _-]{2,60})/i
   ];
@@ -154,7 +168,23 @@ function normalizeFollowUpWith(value: string | undefined, action: Classification
   if (action === "NONE") {
     return undefined;
   }
-  return "Responsavel interno";
+  return "Definir responsavel e cobrar atualizacao";
+}
+
+function defaultNextStepByAction(action: ClassificationResult["action"]): string | undefined {
+  if (action === "CREATE_PROJECT") {
+    return "Definir escopo, responsavel e primeiro marco com prazo.";
+  }
+  if (action === "CREATE_TASK") {
+    return "Executar o primeiro passo concreto e atualizar status no board.";
+  }
+  if (action === "FOLLOW_UP") {
+    return "Enviar cobranca objetiva com prazo e confirmar proximo checkpoint.";
+  }
+  if (action === "STORE_REFERENCE") {
+    return "Registrar insight util e vincular ao contexto/projeto correto.";
+  }
+  return undefined;
 }
 
 function fallbackClassification(text: string): ClassificationResult {
@@ -163,6 +193,7 @@ function fallbackClassification(text: string): ClassificationResult {
   const priority = inferFallbackPriority(text);
 
   if (matched) {
+    const dueDateISO = inferDueDateFromText(text) || inferDueDateFromPriority(priority);
     return {
       summaryPtBr: text.slice(0, 240),
       categoryName: matched.categoryName,
@@ -171,9 +202,9 @@ function fallbackClassification(text: string): ClassificationResult {
       action: matched.action,
       actionTitle: matched.action === "CREATE_TASK" ? "Executar proxima etapa do tema" : "Registrar referencia relevante",
       actionDetails: text,
-      nextStepPtBr: matched.action === "CREATE_TASK" ? "Definir responsavel e primeiro passo objetivo." : undefined,
+      nextStepPtBr: defaultNextStepByAction(matched.action),
       followUpWithPtBr: normalizeFollowUpWith(undefined, matched.action, text),
-      dueDateISO: inferDueDateFromText(text),
+      dueDateISO,
       priority,
       confidence: 0.62,
       shouldCreateCategory: false
@@ -188,9 +219,9 @@ function fallbackClassification(text: string): ClassificationResult {
     action: "FOLLOW_UP",
     actionTitle: "Solicitar contexto",
     actionDetails: "Item precisa de mais contexto para acao concreta.",
-    nextStepPtBr: "Responder com contexto adicional: objetivo, prazo e resultado esperado.",
+    nextStepPtBr: "Responder com contexto adicional: objetivo, responsavel e prazo esperado.",
     followUpWithPtBr: normalizeFollowUpWith(undefined, "FOLLOW_UP", text),
-    dueDateISO: inferDueDateFromText(text),
+    dueDateISO: inferDueDateFromText(text) || inferDueDateFromPriority(priority),
     priority,
     confidence: 0.45,
     shouldCreateCategory: true,
@@ -215,9 +246,13 @@ export async function classifyContent(rawText: string): Promise<ClassificationRe
 
   const action = aiResult.action;
   const summaryPtBr = truncateText(aiResult.summaryPtBr || rawText, 220);
-  const nextStepPtBr = aiResult.nextStepPtBr ? truncateText(aiResult.nextStepPtBr, 160) : undefined;
-  const dueDateISO = normalizeDueDate(aiResult.dueDateISO) || inferDueDateFromText(rawText);
   const priority = normalizePriority(aiResult.priority);
+  const nextStepPtBrRaw = aiResult.nextStepPtBr ? truncateText(aiResult.nextStepPtBr, 160) : undefined;
+  const nextStepPtBr = nextStepPtBrRaw || (action === "NONE" ? undefined : defaultNextStepByAction(action));
+  const dueDateISO =
+    normalizeDueDate(aiResult.dueDateISO) ||
+    inferDueDateFromText(rawText) ||
+    (action === "NONE" ? undefined : inferDueDateFromPriority(priority));
   const actionTitle = normalizeActionTitle(aiResult.actionTitle, action, summaryPtBr);
   const followUpWithPtBr = normalizeFollowUpWith(aiResult.followUpWithPtBr, action, rawText);
 

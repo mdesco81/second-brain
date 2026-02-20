@@ -1,5 +1,5 @@
 import { pool } from "./pool.js";
-import { ActionPriority, ActionStatus, DashboardSummary } from "../types/domain.js";
+import { ActionPriority, ActionStatus, DashboardSummary, ProcessingStage } from "../types/domain.js";
 
 const DEFAULT_CATEGORIES = [
   {
@@ -53,6 +53,8 @@ export async function ensureSchema(): Promise<void> {
       action_details TEXT,
       confidence NUMERIC(4,3) NOT NULL,
       status TEXT NOT NULL DEFAULT 'open',
+      processing_stage TEXT NOT NULL DEFAULT 'capturado',
+      processing_error TEXT,
       storage_path TEXT,
       metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -83,12 +85,26 @@ export async function ensureSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'MEDIA',
       ADD COLUMN IF NOT EXISTS due_at DATE,
       ADD COLUMN IF NOT EXISTS next_step TEXT,
-      ADD COLUMN IF NOT EXISTS follow_up_with TEXT;
+      ADD COLUMN IF NOT EXISTS follow_up_with TEXT,
+      ADD COLUMN IF NOT EXISTS processing_stage TEXT NOT NULL DEFAULT 'capturado',
+      ADD COLUMN IF NOT EXISTS processing_error TEXT;
   `);
 
   await pool.query(`
     ALTER TABLE proactive_runs
       ADD COLUMN IF NOT EXISTS run_type TEXT NOT NULL DEFAULT 'daily';
+  `);
+
+  await pool.query(`
+    UPDATE inbox_items
+    SET processing_stage = CASE
+      WHEN status = 'done' THEN 'concluido'
+      WHEN status = 'eliminated' THEN 'eliminado'
+      WHEN action = 'NONE' THEN 'interpretado'
+      ELSE 'planejado'
+    END
+    WHERE processing_stage IS NULL
+       OR processing_stage = 'capturado';
   `);
 
   for (const category of DEFAULT_CATEGORIES) {
@@ -147,6 +163,8 @@ export async function insertInboxItem(params: {
   dueAt?: string;
   nextStep?: string;
   followUpWith?: string;
+  processingStage?: ProcessingStage;
+  processingError?: string;
   confidence: number;
   storagePath?: string;
   metadata: Record<string, unknown>;
@@ -168,11 +186,13 @@ export async function insertInboxItem(params: {
       due_at,
       next_step,
       follow_up_with,
+      processing_stage,
+      processing_error,
       confidence,
       storage_path,
       metadata
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20
     ) RETURNING id`,
     [
       params.chatId,
@@ -190,6 +210,8 @@ export async function insertInboxItem(params: {
       params.dueAt ?? null,
       params.nextStep ?? null,
       params.followUpWith ?? null,
+      params.processingStage ?? "capturado",
+      params.processingError ?? null,
       params.confidence,
       params.storagePath ?? null,
       JSON.stringify(params.metadata)
@@ -225,6 +247,21 @@ function normalizePriority(value: string | null | undefined): ActionPriority {
     return value;
   }
   return "MEDIA";
+}
+
+function normalizeProcessingStage(value: string | null | undefined): ProcessingStage {
+  if (
+    value === "capturado" ||
+    value === "processando" ||
+    value === "interpretado" ||
+    value === "planejado" ||
+    value === "concluido" ||
+    value === "eliminado" ||
+    value === "falha"
+  ) {
+    return value;
+  }
+  return "capturado";
 }
 
 function priorityRank(value: ActionPriority): number {
@@ -348,7 +385,12 @@ export async function listOpenActionItems(chatId?: number, limit = 10): Promise<
 export async function updateInboxItemStatus(chatId: number, itemId: number, status: ActionStatus): Promise<boolean> {
   const result = await pool.query<{ id: number }>(
     `UPDATE inbox_items
-     SET status = $3
+     SET status = $3,
+         processing_stage = CASE
+           WHEN $3 = 'done' THEN 'concluido'
+           WHEN $3 = 'eliminated' THEN 'eliminado'
+           ELSE CASE WHEN action = 'NONE' THEN 'interpretado' ELSE 'planejado' END
+         END
      WHERE id = $1
        AND chat_id = $2
      RETURNING id`,
@@ -360,7 +402,12 @@ export async function updateInboxItemStatus(chatId: number, itemId: number, stat
 export async function updateInboxItemStatusById(itemId: number, status: ActionStatus): Promise<boolean> {
   const result = await pool.query<{ id: number }>(
     `UPDATE inbox_items
-     SET status = $2
+     SET status = $2,
+         processing_stage = CASE
+           WHEN $2 = 'done' THEN 'concluido'
+           WHEN $2 = 'eliminated' THEN 'eliminado'
+           ELSE CASE WHEN action = 'NONE' THEN 'interpretado' ELSE 'planejado' END
+         END
      WHERE id = $1
      RETURNING id`,
     [itemId, status]
@@ -423,88 +470,115 @@ export async function loadWeeklySummary(chatId?: number): Promise<{
 }
 
 export async function loadDashboardSummary(): Promise<DashboardSummary> {
-  const [totalItems, openActions, totalProjects, statusBreakdown, captureBreakdown, categories, recent, openQueue, weeklyDebrief] =
+  const [totalItems, openActions, totalProjects, statusBreakdown, alerts, captureBreakdown, categories, recent, openQueue, weeklyDebrief] =
     await Promise.all([
-    pool.query<{ total: string }>(`SELECT COUNT(*)::TEXT AS total FROM inbox_items`),
-    pool.query<{ total: string }>(
-      `SELECT COUNT(*)::TEXT AS total FROM inbox_items WHERE status = 'open' AND action <> 'NONE'`
-    ),
-    pool.query<{ total: string }>(`SELECT COUNT(*)::TEXT AS total FROM projects WHERE status = 'active'`),
-    pool.query<{
-      open_total: string;
-      done_total: string;
-      eliminated_total: string;
-      open_actionable: string;
-      done_actionable: string;
-      eliminated_actionable: string;
-    }>(
-      `SELECT
-          COUNT(*) FILTER (WHERE status = 'open')::TEXT AS open_total,
-          COUNT(*) FILTER (WHERE status = 'done')::TEXT AS done_total,
-          COUNT(*) FILTER (WHERE status = 'eliminated')::TEXT AS eliminated_total,
-          COUNT(*) FILTER (WHERE status = 'open' AND action <> 'NONE')::TEXT AS open_actionable,
-          COUNT(*) FILTER (WHERE status = 'done' AND action <> 'NONE')::TEXT AS done_actionable,
-          COUNT(*) FILTER (WHERE status = 'eliminated' AND action <> 'NONE')::TEXT AS eliminated_actionable
-       FROM inbox_items`
-    ),
-    pool.query<{ input_type: string; total: string }>(
-      `SELECT input_type, COUNT(*)::TEXT AS total
-       FROM inbox_items
-       GROUP BY input_type
-       ORDER BY COUNT(*) DESC`
-    ),
-    pool.query<{ name: string; total: string }>(
-      `SELECT c.name, COUNT(*)::TEXT AS total
-       FROM inbox_items i
-       JOIN categories c ON c.id = i.category_id
-       GROUP BY c.name
-       ORDER BY COUNT(*) DESC
-       LIMIT 12`
-    ),
-    pool.query<{
-      id: number;
-      created_at: string;
-      input_type: string;
-      category_name: string;
-      summary_pt_br: string;
-      action: string;
-      priority: string;
-      status: ActionStatus;
-      due_at: string | null;
-      next_step: string | null;
-      follow_up_with: string | null;
-    }>(
-      `SELECT i.id,
-              i.created_at::TEXT,
-              i.input_type,
-              c.name AS category_name,
-              i.summary_pt_br,
-              i.action,
-              i.priority,
-              i.status,
-              i.due_at::TEXT,
-              i.next_step,
-              i.follow_up_with
-       FROM inbox_items i
-       JOIN categories c ON c.id = i.category_id
-       ORDER BY i.created_at DESC
-       LIMIT 20`
-    ),
-    listOpenActionItems(undefined, 30),
-    pool.query<{ sent_at: string; message_text: string }>(
-      `SELECT sent_at::TEXT, message_text
-       FROM proactive_runs
-       WHERE run_type = 'weekly'
-       ORDER BY sent_at DESC
-       LIMIT 1`
-    )
-  ]);
+      pool.query<{ total: string }>(`SELECT COUNT(*)::TEXT AS total FROM inbox_items`),
+      pool.query<{ total: string }>(
+        `SELECT COUNT(*)::TEXT AS total FROM inbox_items WHERE status = 'open' AND action <> 'NONE'`
+      ),
+      pool.query<{ total: string }>(`SELECT COUNT(*)::TEXT AS total FROM projects WHERE status = 'active'`),
+      pool.query<{
+        open_total: string;
+        done_total: string;
+        eliminated_total: string;
+        open_actionable: string;
+        done_actionable: string;
+        eliminated_actionable: string;
+        classified_total: string;
+      }>(
+        `SELECT
+            COUNT(*) FILTER (WHERE status = 'open')::TEXT AS open_total,
+            COUNT(*) FILTER (WHERE status = 'done')::TEXT AS done_total,
+            COUNT(*) FILTER (WHERE status = 'eliminated')::TEXT AS eliminated_total,
+            COUNT(*) FILTER (WHERE status = 'open' AND action <> 'NONE')::TEXT AS open_actionable,
+            COUNT(*) FILTER (WHERE status = 'done' AND action <> 'NONE')::TEXT AS done_actionable,
+            COUNT(*) FILTER (WHERE status = 'eliminated' AND action <> 'NONE')::TEXT AS eliminated_actionable,
+            COUNT(*) FILTER (WHERE processing_stage IN ('interpretado', 'planejado', 'concluido', 'eliminado'))::TEXT AS classified_total
+         FROM inbox_items`
+      ),
+      pool.query<{
+        overdue: string;
+        due_today: string;
+        missing_owner: string;
+      }>(
+        `SELECT
+            COUNT(*) FILTER (WHERE status = 'open' AND action <> 'NONE' AND due_at < CURRENT_DATE)::TEXT AS overdue,
+            COUNT(*) FILTER (WHERE status = 'open' AND action <> 'NONE' AND due_at = CURRENT_DATE)::TEXT AS due_today,
+            COUNT(*) FILTER (
+              WHERE status = 'open'
+                AND action <> 'NONE'
+                AND (
+                  follow_up_with IS NULL
+                  OR BTRIM(follow_up_with) = ''
+                  OR lower(BTRIM(follow_up_with)) = 'responsavel interno'
+                )
+            )::TEXT AS missing_owner
+         FROM inbox_items`
+      ),
+      pool.query<{ input_type: string; total: string }>(
+        `SELECT input_type, COUNT(*)::TEXT AS total
+         FROM inbox_items
+         GROUP BY input_type
+         ORDER BY COUNT(*) DESC`
+      ),
+      pool.query<{ name: string; total: string }>(
+        `SELECT c.name, COUNT(*)::TEXT AS total
+         FROM inbox_items i
+         JOIN categories c ON c.id = i.category_id
+         GROUP BY c.name
+         ORDER BY COUNT(*) DESC
+         LIMIT 12`
+      ),
+      pool.query<{
+        id: number;
+        created_at: string;
+        input_type: string;
+        category_name: string;
+        summary_pt_br: string;
+        action: string;
+        priority: string;
+        status: ActionStatus;
+        due_at: string | null;
+        next_step: string | null;
+        follow_up_with: string | null;
+        processing_stage: string | null;
+        processing_error: string | null;
+      }>(
+        `SELECT i.id,
+                i.created_at::TEXT,
+                i.input_type,
+                c.name AS category_name,
+                i.summary_pt_br,
+                i.action,
+                i.priority,
+                i.status,
+                i.due_at::TEXT,
+                i.next_step,
+                i.follow_up_with,
+                i.processing_stage,
+                i.processing_error
+         FROM inbox_items i
+         JOIN categories c ON c.id = i.category_id
+         ORDER BY i.created_at DESC
+         LIMIT 20`
+      ),
+      listOpenActionItems(undefined, 30),
+      pool.query<{ sent_at: string; message_text: string }>(
+        `SELECT sent_at::TEXT, message_text
+         FROM proactive_runs
+         WHERE run_type = 'weekly'
+         ORDER BY sent_at DESC
+         LIMIT 1`
+      )
+    ]);
 
   const focusItems = openQueue.slice(0, 8);
+  const todayFocus = openQueue.slice(0, 3);
   const kanbanHigh = openQueue.filter((item) => item.priority === "ALTA");
   const kanbanMedium = openQueue.filter((item) => item.priority === "MEDIA");
   const kanbanLow = openQueue.filter((item) => item.priority === "BAIXA");
   const status = statusBreakdown.rows[0];
+  const alertRow = alerts.rows[0];
   const totalCaptured = Number(totalItems.rows[0]?.total ?? 0);
   const actionable =
     Number(status?.open_actionable ?? 0) + Number(status?.done_actionable ?? 0) + Number(status?.eliminated_actionable ?? 0);
@@ -518,13 +592,18 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
       done: Number(status?.done_total ?? 0),
       eliminated: Number(status?.eliminated_total ?? 0)
     },
+    alerts: {
+      overdue: Number(alertRow?.overdue ?? 0),
+      dueToday: Number(alertRow?.due_today ?? 0),
+      missingOwner: Number(alertRow?.missing_owner ?? 0)
+    },
     captureBreakdown: captureBreakdown.rows.map((row) => ({
       inputType: row.input_type as DashboardSummary["captureBreakdown"][number]["inputType"],
       total: Number(row.total)
     })),
     workflow: {
       captured: totalCaptured,
-      classified: totalCaptured,
+      classified: Number(status?.classified_total ?? 0),
       actionable,
       resolved: Number(status?.done_actionable ?? 0),
       eliminated: Number(status?.eliminated_actionable ?? 0)
@@ -547,7 +626,19 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
       status: row.status,
       dueAt: row.due_at ?? undefined,
       nextStep: row.next_step ?? undefined,
-      followUpWith: row.follow_up_with ?? undefined
+      followUpWith: row.follow_up_with ?? undefined,
+      processingStage: normalizeProcessingStage(row.processing_stage),
+      processingError: row.processing_error ?? undefined
+    })),
+    todayFocus: todayFocus.map((item) => ({
+      id: item.id,
+      categoryName: item.categoryName,
+      summaryPtBr: item.summaryPtBr,
+      action: item.action as DashboardSummary["todayFocus"][number]["action"],
+      priority: item.priority,
+      dueAt: item.dueAt,
+      nextStep: item.nextStep,
+      followUpWith: item.followUpWith
     })),
     focusItems: focusItems.map((item) => ({
       id: item.id,

@@ -10,10 +10,12 @@ MVP para capturar entradas via Telegram (`texto`, `audio`, `PDF`, `imagem`), cla
 - Image understanding (OpenAI vision)
 - AI categorization with dynamic category creation
 - Action-oriented classification with `prioridade`, `proximo passo`, `quem cobrar/procurar` and optional `prazo`
+- Processing lifecycle per item (`capturado` -> `interpretado/planejado` -> `concluido/eliminado`) with failure visibility
 - Postgres persistence for operational state
 - Daily proactive check-in agent with focus queue
 - Weekly report with summary + next-week priorities
-- Web dashboard (`/`) with stage-by-stage workflow, capture map, Kanban, status controls, and latest weekly debrief
+- Web dashboard (`/`) with stage-by-stage workflow, "Foco de Hoje", risk alerts, capture map, Kanban, status controls, and latest weekly debrief
+- Optional basic auth for dashboard/API (`DASHBOARD_USER` + `DASHBOARD_PASSWORD`)
 
 ## Folder structure (knowledge base)
 
@@ -52,6 +54,7 @@ cp .env.example .env
 - `TELEGRAM_WEBHOOK_SECRET`
 - `OPENAI_API_KEY`
 - `APP_BASE_URL` (obrigatorio no modo webhook)
+- `DASHBOARD_USER` e `DASHBOARD_PASSWORD` (recomendado em producao)
 
 3. Run with Docker Compose:
 

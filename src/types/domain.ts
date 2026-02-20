@@ -16,6 +16,7 @@ export type SuggestedAction =
 
 export type ActionPriority = "ALTA" | "MEDIA" | "BAIXA";
 export type ActionStatus = "open" | "done" | "eliminated";
+export type ProcessingStage = "capturado" | "processando" | "interpretado" | "planejado" | "concluido" | "eliminado" | "falha";
 
 export interface IntakePayload {
   chatId: number;
@@ -52,6 +53,11 @@ export interface DashboardSummary {
     done: number;
     eliminated: number;
   };
+  alerts: {
+    overdue: number;
+    dueToday: number;
+    missingOwner: number;
+  };
   captureBreakdown: Array<{
     inputType: InputType;
     total: number;
@@ -77,6 +83,18 @@ export interface DashboardSummary {
     action: SuggestedAction;
     priority: ActionPriority;
     status: ActionStatus;
+    dueAt?: string;
+    nextStep?: string;
+    followUpWith?: string;
+    processingStage: ProcessingStage;
+    processingError?: string;
+  }>;
+  todayFocus: Array<{
+    id: number;
+    categoryName: string;
+    summaryPtBr: string;
+    action: SuggestedAction;
+    priority: ActionPriority;
     dueAt?: string;
     nextStep?: string;
     followUpWith?: string;

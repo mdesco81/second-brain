@@ -78,6 +78,42 @@ h1 {
   gap: 10px;
 }
 
+.alerts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.alert-chip {
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #fff;
+  padding: 10px 12px;
+}
+
+.alert-chip p {
+  margin: 0;
+}
+
+.alert-chip .meta {
+  margin-top: 2px;
+}
+
+.alert-chip.critical {
+  border-color: rgba(157, 47, 47, 0.35);
+  background: #fff3f3;
+}
+
+.alert-chip.warning {
+  border-color: rgba(166, 90, 0, 0.35);
+  background: #fff8ec;
+}
+
+.alert-chip.info {
+  border-color: rgba(15, 76, 92, 0.35);
+  background: #f1fbff;
+}
+
 .stat-card {
   padding: 14px;
   background: linear-gradient(180deg, #fff 0, #f7fafc 100%);
@@ -244,6 +280,23 @@ h1 {
   line-height: 1.35;
 }
 
+.title-line {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.action-pill {
+  border-radius: 999px;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  background: #ecf3f6;
+  color: #2f4650;
+}
+
 .guide-list {
   margin: 0;
   padding-left: 18px;
@@ -302,6 +355,17 @@ h1 {
   background: #fdecec;
 }
 
+.badge.stage {
+  color: #23425d;
+  background: #e8f0f8;
+}
+
+.processing-error {
+  margin-top: 6px;
+  color: var(--danger);
+  font-size: 0.76rem;
+}
+
 .debrief-card pre {
   margin: 0;
   white-space: pre-wrap;
@@ -319,6 +383,10 @@ h1 {
 @media (max-width: 1024px) {
   .stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .alerts {
+    grid-template-columns: 1fr;
   }
 
   .workflow-grid {
