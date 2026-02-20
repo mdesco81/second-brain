@@ -23,9 +23,20 @@ interface ExtractedContent {
   metadata: Record<string, unknown>;
 }
 
+const AUDIO_EXTENSIONS = new Set([".mp3", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".aac", ".flac", ".webm"]);
+
 function inferInputType(message: TelegramMessage): InputType {
   if (message.voice || message.audio) {
     return "audio";
+  }
+  if (message.document?.mime_type?.startsWith("audio/")) {
+    return "audio";
+  }
+  if (message.document?.file_name) {
+    const ext = path.extname(message.document.file_name).toLowerCase();
+    if (AUDIO_EXTENSIONS.has(ext)) {
+      return "audio";
+    }
   }
   if (message.photo?.length) {
     return "image";
@@ -56,21 +67,29 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
   }
 
   if (inputType === "audio") {
-    const fileId = message.voice?.file_id || message.audio?.file_id;
+    const fileId = message.voice?.file_id || message.audio?.file_id || message.document?.file_id;
     if (!fileId) {
       return { inputType, rawText, normalizedText: rawText, metadata: { error: "missing_audio_id" } };
     }
 
     const { buffer, filePath } = await getFileBuffer(fileId);
     const ext = path.extname(filePath) || ".ogg";
-    const fileName = message.audio?.file_name || `audio${ext}`;
-    const mimeType = message.voice?.mime_type || message.audio?.mime_type || "audio/ogg";
+    const fileName = message.audio?.file_name || message.document?.file_name || `audio${ext}`;
+    const mimeType = message.voice?.mime_type || message.audio?.mime_type || message.document?.mime_type || "audio/ogg";
     const mediaPath = await storeIncomingMedia(fileName, buffer);
     const transcription = await transcribeAudio({
       buffer,
       fileName,
       mimeType
     });
+    if (!transcription) {
+      log.warn("Audio received without transcription", {
+        fileName,
+        filePath,
+        mimeType,
+        hasCaption: Boolean(rawText)
+      });
+    }
     const normalizedText =
       [rawText, transcription].filter(Boolean).join("\n").trim() || "Audio recebido sem transcricao automatica.";
 
