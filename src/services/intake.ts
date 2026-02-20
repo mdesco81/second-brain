@@ -187,6 +187,7 @@ function buildReply(params: {
   action: string;
   priority: string;
   nextStep?: string;
+  followUpWith?: string;
   dueDateISO?: string;
   question?: string;
 }): string {
@@ -196,6 +197,7 @@ function buildReply(params: {
     `Acao: ${params.action}`,
     `Prioridade: ${params.priority}`,
     `Proximo passo: ${params.nextStep || "Nao definido"}`,
+    `Quem cobrar/procurar: ${params.followUpWith || "Nao definido"}`,
     `Prazo: ${params.dueDateISO || "Nao definido"}`,
     `Resumo: ${params.summary}`
   ];
@@ -313,13 +315,15 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
     actionDetails: classification.actionDetails,
     dueAt: classification.dueDateISO,
     nextStep: classification.nextStepPtBr,
+    followUpWith: classification.followUpWithPtBr,
     confidence: classification.confidence,
     storagePath: extracted.mediaPath,
     metadata: {
       ...extracted.metadata,
       priority: classification.priority,
       dueDateISO: classification.dueDateISO,
-      nextStepPtBr: classification.nextStepPtBr
+      nextStepPtBr: classification.nextStepPtBr,
+      followUpWithPtBr: classification.followUpWithPtBr
     }
   });
 
@@ -355,6 +359,7 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
       action: classification.action,
       priority: classification.priority,
       nextStep: classification.nextStepPtBr,
+      followUpWith: classification.followUpWithPtBr,
       dueDateISO: classification.dueDateISO,
       question: classification.followUpQuestionPtBr
     })

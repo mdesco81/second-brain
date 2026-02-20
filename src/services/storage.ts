@@ -106,6 +106,7 @@ export async function writeKnowledgeNote(params: {
     `- Acao: ${params.classification.action}`,
     `- Prioridade: ${params.classification.priority}`,
     `- Proximo passo: ${params.classification.nextStepPtBr || "Nao definido"}`,
+    `- Quem cobrar/procurar: ${params.classification.followUpWithPtBr || "Nao definido"}`,
     `- Prazo: ${params.classification.dueDateISO || "Nao definido"}`,
     `- Confianca: ${params.classification.confidence}`,
     `- Origem: ${params.sourceLabel}`,
@@ -138,16 +139,16 @@ export async function writeActionBoard(items: OpenActionItem[]): Promise<void> {
     "",
     `Atualizado em: ${new Date().toISOString()}`,
     "",
-    "| Item | Prioridade | Acao | Categoria | Prazo | Proximo passo |",
-    "|---|---|---|---|---|---|"
+    "| Item | Prioridade | Acao | Categoria | Quem cobrar/procurar | Prazo | Proximo passo |",
+    "|---|---|---|---|---|---|---|"
   ];
 
   if (items.length === 0) {
-    lines.push("| - | - | - | - | - | Nao ha acoes abertas |");
+    lines.push("| - | - | - | - | - | - | Nao ha acoes abertas |");
   } else {
     for (const item of items) {
       lines.push(
-        `| #${item.id} | ${item.priority} | ${item.action} | ${item.categoryName} | ${item.dueAt || "-"} | ${item.nextStep || item.summaryPtBr} |`
+        `| #${item.id} | ${item.priority} | ${item.action} | ${item.categoryName} | ${item.followUpWith || "-"} | ${item.dueAt || "-"} | ${item.nextStep || item.actionTitle || item.summaryPtBr} |`
       );
     }
   }

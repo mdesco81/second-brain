@@ -3,7 +3,8 @@ import { OpenActionItem } from "../db/schema.js";
 function actionLabel(item: OpenActionItem): string {
   const title = item.actionTitle || item.summaryPtBr;
   const due = item.dueAt ? ` | prazo ${item.dueAt}` : "";
-  return `#${item.id} [${item.priority}] ${title}${due}`;
+  const followUp = item.followUpWith ? ` | cobrar ${item.followUpWith}` : "";
+  return `#${item.id} [${item.priority}] ${title}${due}${followUp}`;
 }
 
 export function buildOpenActionsMessage(items: OpenActionItem[]): string {

@@ -82,7 +82,8 @@ export async function ensureSchema(): Promise<void> {
     ALTER TABLE inbox_items
       ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'MEDIA',
       ADD COLUMN IF NOT EXISTS due_at DATE,
-      ADD COLUMN IF NOT EXISTS next_step TEXT;
+      ADD COLUMN IF NOT EXISTS next_step TEXT,
+      ADD COLUMN IF NOT EXISTS follow_up_with TEXT;
   `);
 
   await pool.query(`
@@ -145,6 +146,7 @@ export async function insertInboxItem(params: {
   actionDetails?: string;
   dueAt?: string;
   nextStep?: string;
+  followUpWith?: string;
   confidence: number;
   storagePath?: string;
   metadata: Record<string, unknown>;
@@ -165,11 +167,12 @@ export async function insertInboxItem(params: {
       action_details,
       due_at,
       next_step,
+      follow_up_with,
       confidence,
       storage_path,
       metadata
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
     ) RETURNING id`,
     [
       params.chatId,
@@ -186,6 +189,7 @@ export async function insertInboxItem(params: {
       params.actionDetails ?? null,
       params.dueAt ?? null,
       params.nextStep ?? null,
+      params.followUpWith ?? null,
       params.confidence,
       params.storagePath ?? null,
       JSON.stringify(params.metadata)
@@ -241,6 +245,7 @@ export interface OpenActionItem {
   action: string;
   actionTitle?: string;
   nextStep?: string;
+  followUpWith?: string;
   dueAt?: string;
   createdAt: string;
   priority: ActionPriority;
@@ -296,6 +301,7 @@ export async function listOpenActionItems(chatId?: number, limit = 10): Promise<
     action: string;
     action_title: string | null;
     next_step: string | null;
+    follow_up_with: string | null;
     due_at: string | null;
     created_at: string;
     priority: string | null;
@@ -307,6 +313,7 @@ export async function listOpenActionItems(chatId?: number, limit = 10): Promise<
             i.action,
             i.action_title,
             i.next_step,
+            i.follow_up_with,
             i.due_at::TEXT,
             i.created_at::TEXT,
             i.priority
@@ -331,6 +338,7 @@ export async function listOpenActionItems(chatId?: number, limit = 10): Promise<
     action: row.action,
     actionTitle: row.action_title ?? undefined,
     nextStep: row.next_step ?? undefined,
+    followUpWith: row.follow_up_with ?? undefined,
     dueAt: row.due_at ?? undefined,
     createdAt: row.created_at,
     priority: normalizePriority(row.priority)
@@ -470,7 +478,8 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
       summaryPtBr: item.summaryPtBr,
       action: item.action as DashboardSummary["focusItems"][number]["action"],
       priority: item.priority,
-      dueAt: item.dueAt
+      dueAt: item.dueAt,
+      followUpWith: item.followUpWith
     })),
     kanban: {
       high: kanbanHigh.map((item) => ({
@@ -480,7 +489,8 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
         action: item.action as DashboardSummary["kanban"]["high"][number]["action"],
         priority: item.priority,
         dueAt: item.dueAt,
-        nextStep: item.nextStep
+        nextStep: item.nextStep,
+        followUpWith: item.followUpWith
       })),
       medium: kanbanMedium.map((item) => ({
         id: item.id,
@@ -489,7 +499,8 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
         action: item.action as DashboardSummary["kanban"]["medium"][number]["action"],
         priority: item.priority,
         dueAt: item.dueAt,
-        nextStep: item.nextStep
+        nextStep: item.nextStep,
+        followUpWith: item.followUpWith
       })),
       low: kanbanLow.map((item) => ({
         id: item.id,
@@ -498,7 +509,8 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
         action: item.action as DashboardSummary["kanban"]["low"][number]["action"],
         priority: item.priority,
         dueAt: item.dueAt,
-        nextStep: item.nextStep
+        nextStep: item.nextStep,
+        followUpWith: item.followUpWith
       }))
     }
   };

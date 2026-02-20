@@ -28,10 +28,12 @@ function renderKanbanColumn(node, items) {
     ? items
         .map((item) => {
           const due = item.dueAt ? ` | prazo ${escapeHtml(item.dueAt)}` : "";
+          const followUp = item.followUpWith ? `<p class="meta">Quem cobrar/procurar: ${escapeHtml(item.followUpWith)}</p>` : "";
           const nextStep = item.nextStep ? `<p class="meta">Proximo passo: ${escapeHtml(item.nextStep)}</p>` : "";
           return `<li>
               <p class="meta">#${item.id} | ${escapeHtml(item.categoryName)} | ${escapeHtml(item.action)}${due}</p>
               <p class="title">${escapeHtml(item.summaryPtBr)}</p>
+              ${followUp}
               ${nextStep}
             </li>`;
         })
@@ -60,10 +62,12 @@ function renderDashboard(summary) {
     ? summary.focusItems
         .map((item) => {
           const due = item.dueAt ? ` | prazo ${escapeHtml(item.dueAt)}` : "";
+          const followUp = item.followUpWith ? `<p class="meta">Quem cobrar/procurar: ${escapeHtml(item.followUpWith)}</p>` : "";
           return `<li>
               <p class="meta">#${item.id} | ${escapeHtml(item.categoryName)} | ${escapeHtml(item.action)}</p>
               <p class="title">[${escapeHtml(item.priority)}] ${escapeHtml(item.summaryPtBr)}</p>
               <p class="meta">${due}</p>
+              ${followUp}
             </li>`;
         })
         .join("")

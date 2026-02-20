@@ -46,6 +46,37 @@ function clampConfidence(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
 
+function cleanSpaces(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function truncateText(value: string, maxLength: number): string {
+  const cleaned = cleanSpaces(value);
+  if (cleaned.length <= maxLength) {
+    return cleaned;
+  }
+  return `${cleaned.slice(0, Math.max(0, maxLength - 3)).trim()}...`;
+}
+
+function normalizeActionTitle(value: string | undefined, action: ClassificationResult["action"], fallbackText: string): string {
+  if (value && cleanSpaces(value)) {
+    return truncateText(value, 90);
+  }
+  if (action === "CREATE_PROJECT") {
+    return "Definir escopo e proximo marco do projeto";
+  }
+  if (action === "CREATE_TASK") {
+    return "Executar tarefa prioritaria";
+  }
+  if (action === "FOLLOW_UP") {
+    return "Fazer follow-up para destravar";
+  }
+  if (action === "STORE_REFERENCE") {
+    return "Registrar referencia util";
+  }
+  return truncateText(fallbackText, 90);
+}
+
 function normalizePriority(priority?: string): ActionPriority {
   if (priority === "ALTA" || priority === "MEDIA" || priority === "BAIXA") {
     return priority;
@@ -67,6 +98,27 @@ function normalizeDueDate(value?: string | null): string | undefined {
   return value;
 }
 
+function inferDueDateFromText(text: string): string | undefined {
+  const normalized = text.toLowerCase();
+  const now = new Date();
+
+  if (/\b(hoje)\b/.test(normalized)) {
+    return now.toISOString().slice(0, 10);
+  }
+  if (/\b(amanha)\b/.test(normalized)) {
+    const tomorrow = new Date(now);
+    tomorrow.setDate(now.getDate() + 1);
+    return tomorrow.toISOString().slice(0, 10);
+  }
+  if (/\b(esta semana|essa semana|ate sexta)\b/.test(normalized)) {
+    const weekEnd = new Date(now);
+    weekEnd.setDate(now.getDate() + 5);
+    return weekEnd.toISOString().slice(0, 10);
+  }
+
+  return undefined;
+}
+
 function inferFallbackPriority(text: string): ActionPriority {
   const normalized = text.toLowerCase();
   if (/\b(urgente|hoje|agora|prazo|deadline|ate amanha)\b/.test(normalized)) {
@@ -76,6 +128,33 @@ function inferFallbackPriority(text: string): ActionPriority {
     return "BAIXA";
   }
   return "MEDIA";
+}
+
+function inferFollowUpWith(text: string): string | undefined {
+  const patterns = [
+    /\b(?:cobrar|falar com|alinhar com|aguardando|pendente com|depende de|validar com)\s+([a-zA-ZÀ-ÿ0-9 _-]{2,60})/i,
+    /\b(?:cliente|fornecedor|time|squad)\s+([a-zA-ZÀ-ÿ0-9 _-]{2,60})/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      return truncateText(match[1], 60);
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeFollowUpWith(value: string | undefined, action: ClassificationResult["action"], rawText: string): string | undefined {
+  const inferred = value && cleanSpaces(value) ? value : inferFollowUpWith(rawText);
+  if (inferred) {
+    return truncateText(inferred, 60);
+  }
+  if (action === "NONE") {
+    return undefined;
+  }
+  return "Responsavel interno";
 }
 
 function fallbackClassification(text: string): ClassificationResult {
@@ -90,9 +169,11 @@ function fallbackClassification(text: string): ClassificationResult {
       categoryDescription: matched.description,
       bucket: matched.bucket,
       action: matched.action,
-      actionTitle: matched.action === "CREATE_TASK" ? "Nova acao sugerida" : "Referencia registrada",
+      actionTitle: matched.action === "CREATE_TASK" ? "Executar proxima etapa do tema" : "Registrar referencia relevante",
       actionDetails: text,
       nextStepPtBr: matched.action === "CREATE_TASK" ? "Definir responsavel e primeiro passo objetivo." : undefined,
+      followUpWithPtBr: normalizeFollowUpWith(undefined, matched.action, text),
+      dueDateISO: inferDueDateFromText(text),
       priority,
       confidence: 0.62,
       shouldCreateCategory: false
@@ -108,6 +189,8 @@ function fallbackClassification(text: string): ClassificationResult {
     actionTitle: "Solicitar contexto",
     actionDetails: "Item precisa de mais contexto para acao concreta.",
     nextStepPtBr: "Responder com contexto adicional: objetivo, prazo e resultado esperado.",
+    followUpWithPtBr: normalizeFollowUpWith(undefined, "FOLLOW_UP", text),
+    dueDateISO: inferDueDateFromText(text),
     priority,
     confidence: 0.45,
     shouldCreateCategory: true,
@@ -130,17 +213,26 @@ export async function classifyContent(rawText: string): Promise<ClassificationRe
     return fallbackClassification(rawText);
   }
 
+  const action = aiResult.action;
+  const summaryPtBr = truncateText(aiResult.summaryPtBr || rawText, 220);
+  const nextStepPtBr = aiResult.nextStepPtBr ? truncateText(aiResult.nextStepPtBr, 160) : undefined;
+  const dueDateISO = normalizeDueDate(aiResult.dueDateISO) || inferDueDateFromText(rawText);
+  const priority = normalizePriority(aiResult.priority);
+  const actionTitle = normalizeActionTitle(aiResult.actionTitle, action, summaryPtBr);
+  const followUpWithPtBr = normalizeFollowUpWith(aiResult.followUpWithPtBr, action, rawText);
+
   return {
-    summaryPtBr: aiResult.summaryPtBr,
+    summaryPtBr,
     categoryName: aiResult.categoryName,
     categoryDescription: aiResult.categoryDescription,
     bucket: aiResult.bucket,
-    action: aiResult.action,
-    actionTitle: aiResult.actionTitle,
+    action,
+    actionTitle,
     actionDetails: aiResult.actionDetails,
-    nextStepPtBr: aiResult.nextStepPtBr,
-    dueDateISO: normalizeDueDate(aiResult.dueDateISO),
-    priority: normalizePriority(aiResult.priority),
+    nextStepPtBr,
+    followUpWithPtBr,
+    dueDateISO,
+    priority,
     confidence: clampConfidence(aiResult.confidence),
     shouldCreateCategory: aiResult.shouldCreateCategory,
     followUpQuestionPtBr: aiResult.followUpQuestionPtBr

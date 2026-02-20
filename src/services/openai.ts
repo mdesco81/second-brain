@@ -18,6 +18,7 @@ export interface AIClassificationOutput {
   actionTitle?: string;
   actionDetails?: string;
   nextStepPtBr?: string;
+  followUpWithPtBr?: string;
   dueDateISO?: string | null;
   priority: ActionPriority;
   confidence: number;
@@ -186,6 +187,7 @@ export async function classifyWithAI(input: AIClassificationInput): Promise<AICl
               actionTitle: { type: "string" },
               actionDetails: { type: "string" },
               nextStepPtBr: { type: "string" },
+              followUpWithPtBr: { type: "string" },
               dueDateISO: {
                 anyOf: [
                   {
@@ -210,7 +212,7 @@ export async function classifyWithAI(input: AIClassificationInput): Promise<AICl
         {
           role: "system",
           content:
-            "You classify personal knowledge inputs for a Second Brain system. Think in English for accuracy, but every textual output must be in Brazilian Portuguese. Reuse existing categories whenever possible. Create a new category only when strictly necessary. Always propose a concrete next step for actionable items and assign a practical priority (ALTA, MEDIA, BAIXA). Only set dueDateISO when the text implies a date or deadline." 
+            "You classify personal knowledge inputs for a Second Brain system. Think in English for accuracy, but every textual output must be in Brazilian Portuguese. Reuse existing categories whenever possible. Create a new category only when strictly necessary. Return action-oriented outputs only: actionTitle must be a short imperative sentence, summaryPtBr must be concise and objective, nextStepPtBr must be executable, priority must be practical (ALTA, MEDIA, BAIXA), and followUpWithPtBr must name who should be contacted or charged (person, team, supplier or stakeholder) whenever action is not NONE. Only set dueDateISO when the text implies a concrete date or deadline." 
         },
         {
           role: "user",

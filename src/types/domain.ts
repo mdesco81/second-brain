@@ -34,6 +34,7 @@ export interface ClassificationResult {
   actionTitle?: string;
   actionDetails?: string;
   nextStepPtBr?: string;
+  followUpWithPtBr?: string;
   dueDateISO?: string;
   priority: ActionPriority;
   confidence: number;
@@ -63,6 +64,7 @@ export interface DashboardSummary {
     action: SuggestedAction;
     priority: ActionPriority;
     dueAt?: string;
+    followUpWith?: string;
   }>;
   kanban: {
     high: Array<{
@@ -73,6 +75,7 @@ export interface DashboardSummary {
       priority: ActionPriority;
       dueAt?: string;
       nextStep?: string;
+      followUpWith?: string;
     }>;
     medium: Array<{
       id: number;
@@ -82,6 +85,7 @@ export interface DashboardSummary {
       priority: ActionPriority;
       dueAt?: string;
       nextStep?: string;
+      followUpWith?: string;
     }>;
     low: Array<{
       id: number;
@@ -91,6 +95,7 @@ export interface DashboardSummary {
       priority: ActionPriority;
       dueAt?: string;
       nextStep?: string;
+      followUpWith?: string;
     }>;
   };
 }

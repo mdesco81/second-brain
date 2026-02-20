@@ -9,7 +9,7 @@ MVP para capturar entradas via Telegram (`texto`, `audio`, `PDF`, `imagem`), cla
 - PDF text extraction (`pdf-parse`)
 - Image understanding (OpenAI vision)
 - AI categorization with dynamic category creation
-- Action-oriented classification with `prioridade`, `proximo passo` and optional `prazo`
+- Action-oriented classification with `prioridade`, `proximo passo`, `quem cobrar/procurar` and optional `prazo`
 - Postgres persistence for operational state
 - Daily proactive check-in agent with focus queue
 - Weekly report with summary + next-week priorities
