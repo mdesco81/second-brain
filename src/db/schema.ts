@@ -288,6 +288,20 @@ export interface OpenActionItem {
   priority: ActionPriority;
 }
 
+export interface ContinuationContextItem {
+  id: number;
+  categoryName: string;
+  categoryDescription: string;
+  summaryPtBr: string;
+  action: string;
+  actionTitle?: string;
+  nextStep?: string;
+  followUpWith?: string;
+  dueAt?: string;
+  priority: ActionPriority;
+  createdAt: string;
+}
+
 export async function insertProactiveRun(
   chatId: number,
   messageText: string,
@@ -380,6 +394,61 @@ export async function listOpenActionItems(chatId?: number, limit = 10): Promise<
     createdAt: row.created_at,
     priority: normalizePriority(row.priority)
   }));
+}
+
+export async function loadLatestOpenItemForChat(chatId: number): Promise<ContinuationContextItem | null> {
+  const result = await pool.query<{
+    id: number;
+    category_name: string;
+    category_description: string;
+    summary_pt_br: string;
+    action: string;
+    action_title: string | null;
+    next_step: string | null;
+    follow_up_with: string | null;
+    due_at: string | null;
+    priority: string | null;
+    created_at: string;
+  }>(
+    `SELECT i.id,
+            c.name AS category_name,
+            c.description AS category_description,
+            i.summary_pt_br,
+            i.action,
+            i.action_title,
+            i.next_step,
+            i.follow_up_with,
+            i.due_at::TEXT,
+            i.priority,
+            i.created_at::TEXT
+     FROM inbox_items i
+     JOIN categories c ON c.id = i.category_id
+     WHERE i.chat_id = $1
+       AND i.status = 'open'
+       AND i.action <> 'NONE'
+     ORDER BY i.created_at DESC
+     LIMIT 1`,
+    [chatId]
+  );
+
+  const row = result.rows[0];
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    categoryName: row.category_name,
+    categoryDescription: row.category_description,
+    summaryPtBr: row.summary_pt_br,
+    action: row.action,
+    actionTitle: row.action_title ?? undefined,
+    nextStep: row.next_step ?? undefined,
+    followUpWith: row.follow_up_with ?? undefined,
+    dueAt: row.due_at ?? undefined,
+    priority: normalizePriority(row.priority),
+    createdAt: row.created_at
+  };
 }
 
 export async function updateInboxItemStatus(chatId: number, itemId: number, status: ActionStatus): Promise<boolean> {

@@ -5,9 +5,11 @@ import { describeImage, transcribeAudio } from "./openai.js";
 import { getFileBuffer, sendText } from "./telegram.js";
 import { TelegramMessage } from "../types/telegram.js";
 import {
+  ContinuationContextItem,
   ensureProject,
   insertProactiveRun,
   insertInboxItem,
+  loadLatestOpenItemForChat,
   listOpenActionItems,
   loadWeeklySummary,
   updateInboxItemStatus,
@@ -29,6 +31,18 @@ interface ExtractedContent {
 }
 
 const AUDIO_EXTENSIONS = new Set([".mp3", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".aac", ".flac", ".webm"]);
+const CONTINUATION_MARKERS = [
+  "sobre o tema anterior",
+  "sobre o assunto anterior",
+  "complementando",
+  "continuando",
+  "como falei",
+  "em complemento",
+  "sobre isso",
+  "sobre aquilo",
+  "esse tema",
+  "esse assunto"
+];
 
 function inferInputType(message: TelegramMessage): InputType {
   if (message.voice || message.audio) {
@@ -225,6 +239,74 @@ function stageFromClassification(action: string): ProcessingStage {
   return "planejado";
 }
 
+function isLikelyContinuation(message: TelegramMessage, extracted: ExtractedContent, latestOpenItem: ContinuationContextItem | null): boolean {
+  if (!latestOpenItem) {
+    return false;
+  }
+
+  if (message.reply_to_message?.message_id) {
+    return true;
+  }
+
+  const normalized = extracted.normalizedText.toLowerCase().trim();
+  if (CONTINUATION_MARKERS.some((marker) => normalized.includes(marker))) {
+    return true;
+  }
+
+  const itemAgeMs = Date.now() - new Date(latestOpenItem.createdAt).getTime();
+  const isRecentOpenItem = Number.isFinite(itemAgeMs) && itemAgeMs >= 0 && itemAgeMs <= 30 * 60 * 1000;
+  if (isRecentOpenItem && extracted.inputType === "audio" && !extracted.rawText.trim()) {
+    return true;
+  }
+
+  return false;
+}
+
+function buildContinuationClassificationInput(extractedText: string, context: ContinuationContextItem): string {
+  const contextLines = [
+    "Contexto de continuidade (item aberto anterior):",
+    `- Item anterior: #${context.id}`,
+    `- Categoria: ${context.categoryName}`,
+    `- Acao atual: ${context.action}`,
+    `- Prioridade atual: ${context.priority}`,
+    `- Resumo anterior: ${context.summaryPtBr}`,
+    `- Proximo passo anterior: ${context.nextStep || "Nao definido"}`,
+    `- Quem cobrar/procurar: ${context.followUpWith || "Nao definido"}`,
+    `- Prazo atual: ${context.dueAt || "Nao definido"}`,
+    "",
+    "Novo complemento do usuario:",
+    extractedText
+  ];
+  return contextLines.join("\n");
+}
+
+function isGenericContinuationMiss(classification: Awaited<ReturnType<typeof classifyContent>>): boolean {
+  return classification.categoryName === "Inbox Geral" && classification.action === "FOLLOW_UP";
+}
+
+function adaptClassificationWithContinuation(
+  classification: Awaited<ReturnType<typeof classifyContent>>,
+  context: ContinuationContextItem
+): Awaited<ReturnType<typeof classifyContent>> {
+  if (!isGenericContinuationMiss(classification)) {
+    return classification;
+  }
+
+  return {
+    ...classification,
+    categoryName: context.categoryName,
+    categoryDescription: context.categoryDescription,
+    action: (context.action as Awaited<ReturnType<typeof classifyContent>>["action"]) || classification.action,
+    actionTitle: context.actionTitle || classification.actionTitle,
+    nextStepPtBr: context.nextStep || classification.nextStepPtBr,
+    followUpWithPtBr: context.followUpWith || classification.followUpWithPtBr,
+    dueDateISO: context.dueAt || classification.dueDateISO,
+    priority: context.priority,
+    shouldCreateCategory: false,
+    followUpQuestionPtBr: undefined
+  };
+}
+
 function parseDoneCommand(text: string): number | null {
   const match = text.trim().match(/^\/done\s+(\d+)$/i);
   if (!match) {
@@ -328,7 +410,17 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
     return;
   }
 
-  const classification = await classifyContent(extracted.normalizedText);
+  const latestOpenItem = await loadLatestOpenItemForChat(chatId);
+  const continuationDetected = isLikelyContinuation(message, extracted, latestOpenItem);
+  const classificationInput =
+    continuationDetected && latestOpenItem
+      ? buildContinuationClassificationInput(extracted.normalizedText, latestOpenItem)
+      : extracted.normalizedText;
+
+  let classification = await classifyContent(classificationInput);
+  if (continuationDetected && latestOpenItem) {
+    classification = adaptClassificationWithContinuation(classification, latestOpenItem);
+  }
   const categoryId = await upsertCategory(
     classification.categoryName,
     classification.categoryDescription,
@@ -367,7 +459,9 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
       priority: classification.priority,
       dueDateISO: classification.dueDateISO,
       nextStepPtBr: classification.nextStepPtBr,
-      followUpWithPtBr: classification.followUpWithPtBr
+      followUpWithPtBr: classification.followUpWithPtBr,
+      continuationDetected,
+      continuationFromItemId: continuationDetected && latestOpenItem ? latestOpenItem.id : undefined
     }
   });
 
