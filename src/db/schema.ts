@@ -78,6 +78,24 @@ export async function ensureSchema(): Promise<void> {
       run_type TEXT NOT NULL DEFAULT 'daily',
       sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS item_embeddings (
+      item_id INTEGER PRIMARY KEY REFERENCES inbox_items(id) ON DELETE CASCADE,
+      chat_id BIGINT NOT NULL,
+      model TEXT NOT NULL,
+      vector JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS intake_pending_decisions (
+      id SERIAL PRIMARY KEY,
+      chat_id BIGINT NOT NULL,
+      decision_type TEXT NOT NULL,
+      payload JSONB NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      resolved_at TIMESTAMPTZ
+    );
   `);
 
   await pool.query(`
@@ -93,6 +111,11 @@ export async function ensureSchema(): Promise<void> {
   await pool.query(`
     ALTER TABLE proactive_runs
       ADD COLUMN IF NOT EXISTS run_type TEXT NOT NULL DEFAULT 'daily';
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_intake_pending_decisions_chat_status
+      ON intake_pending_decisions(chat_id, status, created_at DESC);
   `);
 
   await pool.query(`
@@ -289,16 +312,28 @@ export interface OpenActionItem {
 }
 
 export interface ContinuationContextItem {
+  chatId: number;
   id: number;
   categoryName: string;
   categoryDescription: string;
   summaryPtBr: string;
+  normalizedText: string;
   action: string;
   actionTitle?: string;
   nextStep?: string;
   followUpWith?: string;
   dueAt?: string;
   priority: ActionPriority;
+  createdAt: string;
+  embedding?: number[];
+}
+
+export interface PendingDecision {
+  id: number;
+  chatId: number;
+  decisionType: string;
+  payload: Record<string, unknown>;
+  status: string;
   createdAt: string;
 }
 
@@ -398,10 +433,12 @@ export async function listOpenActionItems(chatId?: number, limit = 10): Promise<
 
 export async function loadLatestOpenItemForChat(chatId: number): Promise<ContinuationContextItem | null> {
   const result = await pool.query<{
+    chat_id: string;
     id: number;
     category_name: string;
     category_description: string;
     summary_pt_br: string;
+    normalized_text: string;
     action: string;
     action_title: string | null;
     next_step: string | null;
@@ -409,20 +446,25 @@ export async function loadLatestOpenItemForChat(chatId: number): Promise<Continu
     due_at: string | null;
     priority: string | null;
     created_at: string;
+    embedding: number[] | null;
   }>(
     `SELECT i.id,
+            i.chat_id::TEXT AS chat_id,
             c.name AS category_name,
             c.description AS category_description,
             i.summary_pt_br,
+            i.normalized_text,
             i.action,
             i.action_title,
             i.next_step,
             i.follow_up_with,
             i.due_at::TEXT,
             i.priority,
-            i.created_at::TEXT
+            i.created_at::TEXT,
+            e.vector::jsonb AS embedding
      FROM inbox_items i
      JOIN categories c ON c.id = i.category_id
+     LEFT JOIN item_embeddings e ON e.item_id = i.id
      WHERE i.chat_id = $1
        AND i.status = 'open'
        AND i.action <> 'NONE'
@@ -437,18 +479,240 @@ export async function loadLatestOpenItemForChat(chatId: number): Promise<Continu
   }
 
   return {
+    chatId: Number(row.chat_id),
     id: row.id,
     categoryName: row.category_name,
     categoryDescription: row.category_description,
     summaryPtBr: row.summary_pt_br,
+    normalizedText: row.normalized_text,
     action: row.action,
     actionTitle: row.action_title ?? undefined,
     nextStep: row.next_step ?? undefined,
     followUpWith: row.follow_up_with ?? undefined,
     dueAt: row.due_at ?? undefined,
     priority: normalizePriority(row.priority),
+    createdAt: row.created_at,
+    embedding: Array.isArray(row.embedding) ? row.embedding : undefined
+  };
+}
+
+export async function listOpenContextCandidates(chatId: number, limit = 30): Promise<ContinuationContextItem[]> {
+  const result = await pool.query<{
+    chat_id: string;
+    id: number;
+    category_name: string;
+    category_description: string;
+    summary_pt_br: string;
+    normalized_text: string;
+    action: string;
+    action_title: string | null;
+    next_step: string | null;
+    follow_up_with: string | null;
+    due_at: string | null;
+    priority: string | null;
+    created_at: string;
+    embedding: number[] | null;
+  }>(
+    `SELECT i.chat_id::TEXT AS chat_id,
+            i.id,
+            c.name AS category_name,
+            c.description AS category_description,
+            i.summary_pt_br,
+            i.normalized_text,
+            i.action,
+            i.action_title,
+            i.next_step,
+            i.follow_up_with,
+            i.due_at::TEXT,
+            i.priority,
+            i.created_at::TEXT,
+            e.vector::jsonb AS embedding
+     FROM inbox_items i
+     JOIN categories c ON c.id = i.category_id
+     LEFT JOIN item_embeddings e ON e.item_id = i.id
+     WHERE i.chat_id = $1
+       AND i.status = 'open'
+       AND i.action <> 'NONE'
+     ORDER BY
+       CASE i.priority WHEN 'ALTA' THEN 3 WHEN 'MEDIA' THEN 2 ELSE 1 END DESC,
+       i.due_at ASC NULLS LAST,
+       i.created_at DESC
+     LIMIT $2`,
+    [chatId, limit]
+  );
+
+  return result.rows.map((row) => ({
+    chatId: Number(row.chat_id),
+    id: row.id,
+    categoryName: row.category_name,
+    categoryDescription: row.category_description,
+    summaryPtBr: row.summary_pt_br,
+    normalizedText: row.normalized_text,
+    action: row.action,
+    actionTitle: row.action_title ?? undefined,
+    nextStep: row.next_step ?? undefined,
+    followUpWith: row.follow_up_with ?? undefined,
+    dueAt: row.due_at ?? undefined,
+    priority: normalizePriority(row.priority),
+    createdAt: row.created_at,
+    embedding: Array.isArray(row.embedding) ? row.embedding : undefined
+  }));
+}
+
+export async function upsertItemEmbedding(params: {
+  itemId: number;
+  chatId: number;
+  model: string;
+  vector: number[];
+}): Promise<void> {
+  await pool.query(
+    `INSERT INTO item_embeddings(item_id, chat_id, model, vector, updated_at)
+     VALUES ($1, $2, $3, $4::jsonb, NOW())
+     ON CONFLICT (item_id)
+     DO UPDATE SET
+       chat_id = EXCLUDED.chat_id,
+       model = EXCLUDED.model,
+       vector = EXCLUDED.vector,
+       updated_at = NOW()`,
+    [params.itemId, params.chatId, params.model, JSON.stringify(params.vector)]
+  );
+}
+
+export async function updateInboxItemOwnerById(itemId: number, owner: string): Promise<boolean> {
+  const result = await pool.query<{ id: number }>(
+    `UPDATE inbox_items
+     SET follow_up_with = $2,
+         processing_error = NULL
+     WHERE id = $1
+     RETURNING id`,
+    [itemId, owner]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function mergeIntoInboxItem(params: {
+  chatId: number;
+  targetItemId: number;
+  categoryId: number;
+  bucket: string;
+  action: string;
+  summaryPtBr: string;
+  actionTitle?: string;
+  actionDetails?: string;
+  priority: ActionPriority;
+  dueAt?: string;
+  nextStep?: string;
+  followUpWith?: string;
+  normalizedTextAppend: string;
+}): Promise<boolean> {
+  const result = await pool.query<{ id: number }>(
+    `UPDATE inbox_items
+     SET category_id = $3,
+         bucket = $4,
+         action = $5,
+         summary_pt_br = $6,
+         action_title = $7,
+         action_details = COALESCE(action_details, '') || CASE WHEN action_details IS NULL OR action_details = '' THEN '' ELSE E'\n\n' END || $8,
+         priority = $9,
+         due_at = COALESCE($10::DATE, due_at),
+         next_step = COALESCE($11, next_step),
+         follow_up_with = COALESCE($12, follow_up_with),
+         normalized_text = normalized_text || E'\n\n[Complemento ' || NOW()::TEXT || E']\n' || $13,
+         processing_stage = 'planejado',
+         processing_error = NULL
+     WHERE id = $1
+       AND chat_id = $2
+       AND status = 'open'
+     RETURNING id`,
+    [
+      params.targetItemId,
+      params.chatId,
+      params.categoryId,
+      params.bucket,
+      params.action,
+      params.summaryPtBr,
+      params.actionTitle ?? null,
+      params.actionDetails ?? params.summaryPtBr,
+      params.priority,
+      params.dueAt ?? null,
+      params.nextStep ?? null,
+      params.followUpWith ?? null,
+      params.normalizedTextAppend
+    ]
+  );
+
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function createPendingDecision(params: {
+  chatId: number;
+  decisionType: string;
+  payload: Record<string, unknown>;
+}): Promise<void> {
+  await pool.query(
+    `UPDATE intake_pending_decisions
+     SET status = 'resolved',
+         resolved_at = NOW()
+     WHERE chat_id = $1
+       AND decision_type = $2
+       AND status = 'pending'`,
+    [params.chatId, params.decisionType]
+  );
+
+  await pool.query(
+    `INSERT INTO intake_pending_decisions(chat_id, decision_type, payload, status)
+     VALUES ($1, $2, $3::jsonb, 'pending')`,
+    [params.chatId, params.decisionType, JSON.stringify(params.payload)]
+  );
+}
+
+export async function getPendingDecision(chatId: number, decisionType: string): Promise<PendingDecision | null> {
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    decision_type: string;
+    payload: Record<string, unknown>;
+    status: string;
+    created_at: string;
+  }>(
+    `SELECT id,
+            chat_id::TEXT AS chat_id,
+            decision_type,
+            payload,
+            status,
+            created_at::TEXT
+     FROM intake_pending_decisions
+     WHERE chat_id = $1
+       AND decision_type = $2
+       AND status = 'pending'
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [chatId, decisionType]
+  );
+
+  const row = result.rows[0];
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    chatId: Number(row.chat_id),
+    decisionType: row.decision_type,
+    payload: row.payload,
+    status: row.status,
     createdAt: row.created_at
   };
+}
+
+export async function resolvePendingDecision(id: number): Promise<void> {
+  await pool.query(
+    `UPDATE intake_pending_decisions
+     SET status = 'resolved',
+         resolved_at = NOW()
+     WHERE id = $1`,
+    [id]
+  );
 }
 
 export async function updateInboxItemStatus(chatId: number, itemId: number, status: ActionStatus): Promise<boolean> {

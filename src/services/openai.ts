@@ -27,6 +27,28 @@ export interface AIClassificationOutput {
   followUpQuestionPtBr?: string;
 }
 
+export interface PlannerContextCandidate {
+  id: number;
+  categoryName: string;
+  summaryPtBr: string;
+  action: string;
+  priority: ActionPriority;
+  nextStep?: string;
+  followUpWith?: string;
+  dueAt?: string;
+  similarityScore?: number;
+}
+
+export interface AIIntakePlannerOutput {
+  decision: {
+    mode: "merge" | "new" | "split";
+    confidence: number;
+    targetItemId?: number;
+    reasonPtBr: string;
+  };
+  cards: AIClassificationOutput[];
+}
+
 const maybeClient = env.OPENAI_API_KEY
   ? new OpenAI({
       apiKey: env.OPENAI_API_KEY
@@ -35,6 +57,10 @@ const maybeClient = env.OPENAI_API_KEY
 
 export function hasAI(): boolean {
   return Boolean(maybeClient);
+}
+
+export function embeddingModel(): string {
+  return env.OPENAI_EMBED_MODEL;
 }
 
 const SUPPORTED_AUDIO_EXTENSIONS = new Set([".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".flac"]);
@@ -190,6 +216,161 @@ export async function describeImage(base64DataUrl: string): Promise<string | nul
     return response.output_text?.trim() || null;
   } catch (error) {
     log.error("Image description failed", { error });
+    return null;
+  }
+}
+
+export async function embedText(text: string): Promise<number[] | null> {
+  if (!maybeClient) {
+    return null;
+  }
+  const normalized = text.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  try {
+    const response = await maybeClient.embeddings.create({
+      model: env.OPENAI_EMBED_MODEL,
+      input: normalized
+    });
+    const vector = response.data?.[0]?.embedding;
+    return Array.isArray(vector) ? vector : null;
+  } catch (error) {
+    log.warn("Embedding generation failed", { error });
+    return null;
+  }
+}
+
+export async function planIntakeWithContext(input: {
+  text: string;
+  knownCategories: Array<{ name: string; description: string }>;
+  openContext: PlannerContextCandidate[];
+}): Promise<AIIntakePlannerOutput | null> {
+  if (!maybeClient) {
+    return null;
+  }
+
+  try {
+    const response = await maybeClient.responses.create({
+      model: env.OPENAI_MODEL,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "second_brain_intake_plan",
+          strict: true,
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["decision", "cards"],
+            properties: {
+              decision: {
+                type: "object",
+                additionalProperties: false,
+                required: ["mode", "confidence", "reasonPtBr"],
+                properties: {
+                  mode: {
+                    type: "string",
+                    enum: ["merge", "new", "split"]
+                  },
+                  confidence: {
+                    type: "number",
+                    minimum: 0,
+                    maximum: 1
+                  },
+                  targetItemId: {
+                    type: "integer"
+                  },
+                  reasonPtBr: {
+                    type: "string"
+                  }
+                }
+              },
+              cards: {
+                type: "array",
+                minItems: 1,
+                maxItems: 6,
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: [
+                    "summaryPtBr",
+                    "categoryName",
+                    "categoryDescription",
+                    "bucket",
+                    "action",
+                    "priority",
+                    "confidence",
+                    "shouldCreateCategory"
+                  ],
+                  properties: {
+                    summaryPtBr: { type: "string" },
+                    categoryName: { type: "string" },
+                    categoryDescription: { type: "string" },
+                    bucket: {
+                      type: "string",
+                      enum: ["PROJECTS", "AREAS", "RESOURCES", "RESEARCH", "ARCHIVE"]
+                    },
+                    action: {
+                      type: "string",
+                      enum: ["CREATE_PROJECT", "CREATE_TASK", "STORE_REFERENCE", "FOLLOW_UP", "NONE"]
+                    },
+                    actionTitle: { type: "string" },
+                    actionDetails: { type: "string" },
+                    nextStepPtBr: { type: "string" },
+                    followUpWithPtBr: { type: "string" },
+                    dueDateISO: {
+                      anyOf: [
+                        {
+                          type: "string",
+                          pattern: "^\\d{4}-\\d{2}-\\d{2}$"
+                        },
+                        { type: "null" }
+                      ]
+                    },
+                    priority: {
+                      type: "string",
+                      enum: ["ALTA", "MEDIA", "BAIXA"]
+                    },
+                    confidence: { type: "number", minimum: 0, maximum: 1 },
+                    shouldCreateCategory: { type: "boolean" },
+                    followUpQuestionPtBr: { type: "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      input: [
+        {
+          role: "system",
+          content:
+            "You are an orchestration planner for a Brazilian Portuguese AI-first second brain. You must decide if the new message should merge into an existing open item, create a new item, or split into multiple items. Use only open context candidates provided. If the message clearly continues an existing open item, choose merge and set targetItemId. If it contains multiple independent actionable intents, choose split. Every card must be actionable and concise, never a raw transcript. Always provide: actionTitle, nextStepPtBr, followUpWithPtBr, and practical priority. If owner is unknown, write exactly 'PENDENTE_DONO'. Do not invent targetItemId outside provided candidates."
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: `Known categories:\n${JSON.stringify(input.knownCategories, null, 2)}\n\nOpen context candidates:\n${JSON.stringify(
+                input.openContext,
+                null,
+                2
+              )}\n\nIncoming content:\n${input.text}`
+            }
+          ]
+        }
+      ]
+    });
+
+    const raw = response.output_text;
+    if (!raw) {
+      return null;
+    }
+    return JSON.parse(raw) as AIIntakePlannerOutput;
+  } catch (error) {
+    log.error("AI intake planning failed", { error });
     return null;
   }
 }

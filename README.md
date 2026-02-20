@@ -11,6 +11,12 @@ MVP para capturar entradas via Telegram (`texto`, `audio`, `PDF`, `imagem`), cla
 - AI categorization with dynamic category creation
 - Action-oriented classification with `prioridade`, `proximo passo`, `quem cobrar/procurar` and optional `prazo`
 - Processing lifecycle per item (`capturado` -> `interpretado/planejado` -> `concluido/eliminado`) with failure visibility
+- Multi-agent intake orchestration:
+  - context retrieval over open cards
+  - merge/new/split decision with confidence
+  - low-confidence confirmation by user
+  - actionable card planner (avoid raw transcript cards)
+- Embedding-based similarity over open cards
 - Postgres persistence for operational state
 - Daily proactive check-in agent with focus queue
 - Weekly report with summary + next-week priorities
@@ -53,6 +59,7 @@ cp .env.example .env
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_WEBHOOK_SECRET`
 - `OPENAI_API_KEY`
+- `OPENAI_EMBED_MODEL`
 - `APP_BASE_URL` (obrigatorio no modo webhook)
 - `DASHBOARD_USER` e `DASHBOARD_PASSWORD` (recomendado em producao)
 
@@ -99,6 +106,7 @@ Comandos Telegram:
 
 - `/prioridades`: mostra itens abertos com prioridade
 - `/done <id>`: marca item como concluido
+- `/owner <id> Nome`: define dono responsavel para o card
 - `/weekly`: gera resumo semanal sob demanda
 
 ## Operational flow

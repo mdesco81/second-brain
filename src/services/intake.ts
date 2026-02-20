@@ -1,19 +1,35 @@
 import path from "node:path";
 import pdfParse from "pdf-parse";
 import { classifyContent } from "./classifier.js";
-import { describeImage, transcribeAudio } from "./openai.js";
+import {
+  AIClassificationOutput,
+  AIIntakePlannerOutput,
+  PlannerContextCandidate,
+  describeImage,
+  embedText,
+  embeddingModel,
+  planIntakeWithContext,
+  transcribeAudio
+} from "./openai.js";
 import { getFileBuffer, sendText } from "./telegram.js";
 import { TelegramMessage } from "../types/telegram.js";
 import {
   ContinuationContextItem,
+  createPendingDecision,
   ensureProject,
+  getPendingDecision,
   insertProactiveRun,
   insertInboxItem,
-  loadLatestOpenItemForChat,
+  listCategories,
+  listOpenContextCandidates,
   listOpenActionItems,
+  mergeIntoInboxItem,
   loadWeeklySummary,
+  resolvePendingDecision,
+  updateInboxItemOwnerById,
   updateInboxItemStatus,
   updateInboxItemStoragePath,
+  upsertItemEmbedding,
   upsertCategory,
   upsertChatSubscription
 } from "../db/schema.js";
@@ -195,34 +211,6 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
   };
 }
 
-function buildReply(params: {
-  summary: string;
-  category: string;
-  action: string;
-  priority: string;
-  nextStep?: string;
-  followUpWith?: string;
-  dueDateISO?: string;
-  question?: string;
-}): string {
-  const lines = [
-    "Registro feito no Second Brain.",
-    `Categoria: ${params.category}`,
-    `Acao: ${params.action}`,
-    `Prioridade: ${params.priority}`,
-    `Proximo passo: ${params.nextStep || "Nao definido"}`,
-    `Quem cobrar/procurar: ${params.followUpWith || "Nao definido"}`,
-    `Prazo: ${params.dueDateISO || "Nao definido"}`,
-    `Resumo: ${params.summary}`
-  ];
-
-  if (params.question) {
-    lines.push(`Pergunta: ${params.question}`);
-  }
-
-  return lines.join("\n");
-}
-
 function actionTitleFallback(text: string): string {
   return text
     .trim()
@@ -239,72 +227,372 @@ function stageFromClassification(action: string): ProcessingStage {
   return "planejado";
 }
 
-function isLikelyContinuation(message: TelegramMessage, extracted: ExtractedContent, latestOpenItem: ContinuationContextItem | null): boolean {
-  if (!latestOpenItem) {
-    return false;
-  }
+const AUTO_DECISION_THRESHOLD = 0.72;
+const PENDING_OWNER_TOKEN = "PENDENTE_DONO";
 
-  if (message.reply_to_message?.message_id) {
-    return true;
-  }
-
-  const normalized = extracted.normalizedText.toLowerCase().trim();
-  if (CONTINUATION_MARKERS.some((marker) => normalized.includes(marker))) {
-    return true;
-  }
-
-  const itemAgeMs = Date.now() - new Date(latestOpenItem.createdAt).getTime();
-  const isRecentOpenItem = Number.isFinite(itemAgeMs) && itemAgeMs >= 0 && itemAgeMs <= 30 * 60 * 1000;
-  if (isRecentOpenItem && extracted.inputType === "audio" && !extracted.rawText.trim()) {
-    return true;
-  }
-
-  return false;
+interface PendingRelationPayload {
+  sourceMessageId: number;
+  extracted: ExtractedContent;
+  plan: AIIntakePlannerOutput;
+  contextCandidates: PlannerContextCandidate[];
 }
 
-function buildContinuationClassificationInput(extractedText: string, context: ContinuationContextItem): string {
-  const contextLines = [
-    "Contexto de continuidade (item aberto anterior):",
-    `- Item anterior: #${context.id}`,
-    `- Categoria: ${context.categoryName}`,
-    `- Acao atual: ${context.action}`,
-    `- Prioridade atual: ${context.priority}`,
-    `- Resumo anterior: ${context.summaryPtBr}`,
-    `- Proximo passo anterior: ${context.nextStep || "Nao definido"}`,
-    `- Quem cobrar/procurar: ${context.followUpWith || "Nao definido"}`,
-    `- Prazo atual: ${context.dueAt || "Nao definido"}`,
-    "",
-    "Novo complemento do usuario:",
-    extractedText
-  ];
-  return contextLines.join("\n");
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (!a.length || !b.length || a.length !== b.length) {
+    return 0;
+  }
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  if (!na || !nb) {
+    return 0;
+  }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
-function isGenericContinuationMiss(classification: Awaited<ReturnType<typeof classifyContent>>): boolean {
-  return classification.categoryName === "Inbox Geral" && classification.action === "FOLLOW_UP";
+function lexicalOverlapScore(a: string, b: string): number {
+  const ta = new Set(
+    a
+      .toLowerCase()
+      .replace(/[^a-zA-ZÀ-ÿ0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((token) => token.length >= 4)
+  );
+  const tb = new Set(
+    b
+      .toLowerCase()
+      .replace(/[^a-zA-ZÀ-ÿ0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((token) => token.length >= 4)
+  );
+  if (!ta.size || !tb.size) {
+    return 0;
+  }
+  let overlap = 0;
+  for (const token of ta) {
+    if (tb.has(token)) {
+      overlap += 1;
+    }
+  }
+  return overlap / Math.max(ta.size, tb.size);
 }
 
-function adaptClassificationWithContinuation(
-  classification: Awaited<ReturnType<typeof classifyContent>>,
-  context: ContinuationContextItem
-): Awaited<ReturnType<typeof classifyContent>> {
-  if (!isGenericContinuationMiss(classification)) {
-    return classification;
+function buildCandidateSearchText(candidate: ContinuationContextItem): string {
+  return [
+    candidate.categoryName,
+    candidate.summaryPtBr,
+    candidate.normalizedText,
+    candidate.nextStep || "",
+    candidate.followUpWith || ""
+  ]
+    .join("\n")
+    .trim();
+}
+
+function buildIncomingSearchText(extracted: ExtractedContent): string {
+  return [extracted.rawText, extracted.normalizedText].filter(Boolean).join("\n").trim();
+}
+
+function isLikelyContinuationText(text: string): boolean {
+  const normalized = text.toLowerCase().trim();
+  return CONTINUATION_MARKERS.some((marker) => normalized.includes(marker));
+}
+
+function normalizePlannerCard(card: AIClassificationOutput): AIClassificationOutput {
+  return {
+    ...card,
+    actionTitle: card.actionTitle?.trim() || "Definir acao objetiva",
+    nextStepPtBr: card.nextStepPtBr?.trim() || "Executar o primeiro passo concreto e atualizar o status.",
+    followUpWithPtBr: card.followUpWithPtBr?.trim() || PENDING_OWNER_TOKEN,
+    actionDetails: card.actionDetails?.trim() || card.summaryPtBr
+  };
+}
+
+function normalizeDecisionMode(mode: string | undefined): "merge" | "new" | "split" {
+  if (mode === "merge" || mode === "new" || mode === "split") {
+    return mode;
+  }
+  return "new";
+}
+
+function parseOwnerCommand(text: string): { itemId: number; owner: string } | null {
+  const match = text.trim().match(/^\/owner\s+(\d+)\s+(.+)$/i);
+  if (!match) {
+    return null;
+  }
+  const itemId = Number(match[1]);
+  const owner = match[2].trim();
+  if (!Number.isInteger(itemId) || itemId <= 0 || !owner) {
+    return null;
+  }
+  return { itemId, owner };
+}
+
+function parseRelationDecisionAnswer(text: string): { mode: "merge" | "new"; targetItemId?: number } | null {
+  const normalized = text.trim().toLowerCase();
+  const mergeMatch = normalized.match(/^(1|complemento)(?:\s+#?(\d+))?$/i);
+  if (mergeMatch) {
+    const target = mergeMatch[2] ? Number(mergeMatch[2]) : undefined;
+    return { mode: "merge", targetItemId: Number.isInteger(target) ? target : undefined };
+  }
+  if (/^(2|novo)$/.test(normalized)) {
+    return { mode: "new" };
+  }
+  return null;
+}
+
+function isOwnerMissing(value?: string): boolean {
+  if (!value) {
+    return true;
+  }
+  const normalized = value.trim().toLowerCase();
+  return !normalized || normalized === "responsavel interno" || normalized === "definir responsavel e cobrar atualizacao" || normalized === PENDING_OWNER_TOKEN.toLowerCase();
+}
+
+async function rankContextCandidates(chatId: number, extracted: ExtractedContent): Promise<PlannerContextCandidate[]> {
+  const candidates = await listOpenContextCandidates(chatId, 30);
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  const incomingText = buildIncomingSearchText(extracted);
+  const incomingEmbedding = await embedText(incomingText);
+
+  if (incomingEmbedding) {
+    const missingEmbeddings = candidates.filter((item) => !item.embedding).slice(0, 8);
+    for (const candidate of missingEmbeddings) {
+      const candidateEmbedding = await embedText(buildCandidateSearchText(candidate));
+      if (candidateEmbedding) {
+        candidate.embedding = candidateEmbedding;
+        await upsertItemEmbedding({
+          itemId: candidate.id,
+          chatId: candidate.chatId,
+          model: embeddingModel(),
+          vector: candidateEmbedding
+        });
+      }
+    }
+  }
+
+  const ranked = candidates
+    .map((candidate) => {
+      const lexical = lexicalOverlapScore(incomingText, buildCandidateSearchText(candidate));
+      const semantic = incomingEmbedding && candidate.embedding ? cosineSimilarity(incomingEmbedding, candidate.embedding) : 0;
+      const continuationBoost = isLikelyContinuationText(incomingText) ? 0.08 : 0;
+      const score = Math.max(lexical * 0.7, semantic) + continuationBoost;
+
+      return {
+        id: candidate.id,
+        categoryName: candidate.categoryName,
+        summaryPtBr: candidate.summaryPtBr,
+        action: candidate.action,
+        priority: candidate.priority,
+        nextStep: candidate.nextStep,
+        followUpWith: candidate.followUpWith,
+        dueAt: candidate.dueAt,
+        similarityScore: Number(score.toFixed(4))
+      } satisfies PlannerContextCandidate;
+    })
+    .sort((a, b) => (b.similarityScore ?? 0) - (a.similarityScore ?? 0));
+
+  return ranked.slice(0, 8);
+}
+
+async function persistCard(params: {
+  chatId: number;
+  messageId: number;
+  extracted: ExtractedContent;
+  card: AIClassificationOutput;
+  metadata: Record<string, unknown>;
+}): Promise<{ itemId: number; categoryName: string; summaryPtBr: string; followUpWith?: string }> {
+  const card = normalizePlannerCard(params.card);
+  const categoryId = await upsertCategory(card.categoryName, card.categoryDescription, card.shouldCreateCategory ? "agent" : "reuse");
+
+  const processingStage = stageFromClassification(card.action);
+  const itemId = await insertInboxItem({
+    chatId: params.chatId,
+    messageId: params.messageId,
+    inputType: params.extracted.inputType,
+    rawText: params.extracted.rawText,
+    normalizedText: params.extracted.normalizedText,
+    summaryPtBr: card.summaryPtBr,
+    categoryId,
+    bucket: card.bucket,
+    action: card.action,
+    priority: card.priority,
+    actionTitle: card.actionTitle,
+    actionDetails: card.actionDetails,
+    dueAt: card.dueDateISO ?? undefined,
+    nextStep: card.nextStepPtBr,
+    followUpWith: card.followUpWithPtBr,
+    processingStage,
+    confidence: card.confidence,
+    storagePath: params.extracted.mediaPath,
+    metadata: params.metadata
+  });
+
+  const sourceLabel = `telegram:${params.chatId}#${params.messageId}`;
+  const notePath = await writeKnowledgeNote({
+    classification: {
+      summaryPtBr: card.summaryPtBr,
+      categoryName: card.categoryName,
+      categoryDescription: card.categoryDescription,
+      bucket: card.bucket,
+      action: card.action,
+      actionTitle: card.actionTitle,
+      actionDetails: card.actionDetails,
+      nextStepPtBr: card.nextStepPtBr,
+      followUpWithPtBr: card.followUpWithPtBr,
+      dueDateISO: card.dueDateISO ?? undefined,
+      priority: card.priority,
+      confidence: card.confidence,
+      shouldCreateCategory: card.shouldCreateCategory,
+      followUpQuestionPtBr: card.followUpQuestionPtBr
+    },
+    rawText: params.extracted.rawText,
+    normalizedText: params.extracted.normalizedText,
+    createdAt: new Date(),
+    sourceLabel,
+    itemId
+  });
+  await updateInboxItemStoragePath(itemId, notePath);
+
+  const embedding = await embedText(`${card.summaryPtBr}\n${params.extracted.normalizedText}`);
+  if (embedding) {
+    await upsertItemEmbedding({
+      itemId,
+      chatId: params.chatId,
+      model: embeddingModel(),
+      vector: embedding
+    });
+  }
+
+  if (card.action === "CREATE_PROJECT") {
+    const projectTitle = card.actionTitle || actionTitleFallback(card.summaryPtBr);
+    await ensureProject({
+      title: projectTitle,
+      categoryId,
+      sourceItemId: itemId,
+      notes: card.actionDetails
+    });
+    await appendProjectStatus(projectTitle, "active", sourceLabel);
   }
 
   return {
-    ...classification,
-    categoryName: context.categoryName,
-    categoryDescription: context.categoryDescription,
-    action: (context.action as Awaited<ReturnType<typeof classifyContent>>["action"]) || classification.action,
-    actionTitle: context.actionTitle || classification.actionTitle,
-    nextStepPtBr: context.nextStep || classification.nextStepPtBr,
-    followUpWithPtBr: context.followUpWith || classification.followUpWithPtBr,
-    dueDateISO: context.dueAt || classification.dueDateISO,
-    priority: context.priority,
-    shouldCreateCategory: false,
-    followUpQuestionPtBr: undefined
+    itemId,
+    categoryName: card.categoryName,
+    summaryPtBr: card.summaryPtBr,
+    followUpWith: card.followUpWithPtBr ?? undefined
   };
+}
+
+async function executePlan(params: {
+  chatId: number;
+  messageId: number;
+  extracted: ExtractedContent;
+  plan: AIIntakePlannerOutput;
+  forcedMode?: "merge" | "new";
+  forcedTargetItemId?: number;
+}): Promise<void> {
+  const mode = params.forcedMode || normalizeDecisionMode(params.plan.decision.mode);
+  const cards = params.plan.cards.map(normalizePlannerCard);
+
+  const audioWithoutTranscription =
+    params.extracted.inputType === "audio" && params.extracted.metadata.transcriptionAvailable === false && !params.extracted.rawText;
+  const baseMetadata = {
+    ...params.extracted.metadata,
+    plannerDecision: params.plan.decision,
+    splitCount: cards.length
+  };
+
+  const createdItems: Array<{ itemId: number; followUpWith?: string }> = [];
+
+  if (mode === "merge" && cards.length > 0) {
+    const targetId = params.forcedTargetItemId || params.plan.decision.targetItemId;
+    if (!targetId) {
+      throw new Error("merge_target_missing");
+    }
+    const mergeCard = cards[0];
+    const categoryId = await upsertCategory(
+      mergeCard.categoryName,
+      mergeCard.categoryDescription,
+      mergeCard.shouldCreateCategory ? "agent" : "reuse"
+    );
+    const merged = await mergeIntoInboxItem({
+      chatId: params.chatId,
+      targetItemId: targetId,
+      categoryId,
+      bucket: mergeCard.bucket,
+      action: mergeCard.action,
+      summaryPtBr: mergeCard.summaryPtBr,
+      actionTitle: mergeCard.actionTitle,
+      actionDetails: mergeCard.actionDetails,
+      priority: mergeCard.priority,
+      dueAt: mergeCard.dueDateISO ?? undefined,
+      nextStep: mergeCard.nextStepPtBr,
+      followUpWith: mergeCard.followUpWithPtBr,
+      normalizedTextAppend: params.extracted.normalizedText
+    });
+    if (!merged) {
+      throw new Error(`merge_target_not_found:${targetId}`);
+    }
+
+    const mergedEmbedding = await embedText(`${mergeCard.summaryPtBr}\n${params.extracted.normalizedText}`);
+    if (mergedEmbedding) {
+      await upsertItemEmbedding({
+        itemId: targetId,
+        chatId: params.chatId,
+        model: embeddingModel(),
+        vector: mergedEmbedding
+      });
+    }
+
+    await sendText(
+      params.chatId,
+      `Atualização integrada automaticamente ao card #${targetId}.\nResumo atualizado: ${mergeCard.summaryPtBr}`
+    );
+
+    if (isOwnerMissing(mergeCard.followUpWithPtBr)) {
+      await sendText(params.chatId, `Card #${targetId} sem dono claro. Responda: /owner ${targetId} NomeDoResponsavel`);
+    }
+  } else {
+    for (const card of cards) {
+      const created = await persistCard({
+        chatId: params.chatId,
+        messageId: params.messageId,
+        extracted: params.extracted,
+        card,
+        metadata: {
+          ...baseMetadata,
+          audioWithoutTranscription,
+          processingError: audioWithoutTranscription
+            ? "Transcricao indisponivel. Classificacao feita com conteudo parcial."
+            : undefined
+        }
+      });
+      createdItems.push(created);
+    }
+
+    const createdSummaryLines = createdItems.map((item) => `- Card #${item.itemId} criado.`);
+    const splitNotice =
+      mode === "split" && cards.length > 1
+        ? `Separei automaticamente em ${cards.length} cards para manter execucao clara.`
+        : "Registro concluido.";
+    await sendText(params.chatId, [splitNotice, ...createdSummaryLines].join("\n"));
+
+    for (const item of createdItems) {
+      if (isOwnerMissing(item.followUpWith)) {
+        await sendText(params.chatId, `Card #${item.itemId} sem dono claro. Responda: /owner ${item.itemId} NomeDoResponsavel`);
+      }
+    }
+  }
+
+  await writeActionBoard(await listOpenActionItems(undefined, 40));
 }
 
 function parseDoneCommand(text: string): number | null {
@@ -332,6 +620,7 @@ async function handleTextCommand(chatId: number, text: string): Promise<boolean>
         "Comandos:",
         "- /prioridades -> lista acoes abertas",
         "- /done <id> -> marca acao como concluida",
+        "- /owner <id> Nome -> define dono/responsavel do card",
         "- /weekly -> gera resumo semanal agora"
       ].join("\n")
     );
@@ -341,6 +630,18 @@ async function handleTextCommand(chatId: number, text: string): Promise<boolean>
   if (normalized === "/prioridades") {
     const items = await listOpenActionItems(chatId, 12);
     await sendText(chatId, buildOpenActionsMessage(items));
+    return true;
+  }
+
+  const ownerCommand = parseOwnerCommand(normalized);
+  if (ownerCommand) {
+    const updated = await updateInboxItemOwnerById(ownerCommand.itemId, ownerCommand.owner);
+    if (updated) {
+      await writeActionBoard(await listOpenActionItems(undefined, 40));
+      await sendText(chatId, `Owner atualizado no card #${ownerCommand.itemId}: ${ownerCommand.owner}`);
+    } else {
+      await sendText(chatId, `Nao encontrei card #${ownerCommand.itemId} para atualizar owner.`);
+    }
     return true;
   }
 
@@ -367,11 +668,53 @@ async function handleTextCommand(chatId: number, text: string): Promise<boolean>
   return false;
 }
 
+async function tryResolvePendingRelation(chatId: number, message: TelegramMessage): Promise<boolean> {
+  const text = message.text?.trim();
+  if (!text) {
+    return false;
+  }
+
+  const pending = await getPendingDecision(chatId, "relation");
+  if (!pending) {
+    return false;
+  }
+
+  const answer = parseRelationDecisionAnswer(text);
+  if (!answer) {
+    await sendText(
+      chatId,
+      "Ainda estou aguardando sua confirmacao de relacao.\nResponda: `complemento` (ou `complemento #id`) ou `novo`."
+    );
+    return true;
+  }
+
+  const payload = pending.payload as unknown as Partial<PendingRelationPayload>;
+  if (!payload?.sourceMessageId || !payload?.extracted || !payload?.plan) {
+    await resolvePendingDecision(pending.id);
+    await sendText(chatId, "Nao consegui recuperar a decisao pendente anterior. Pode reenviar o contexto?");
+    return true;
+  }
+  await executePlan({
+    chatId,
+    messageId: payload.sourceMessageId,
+    extracted: payload.extracted,
+    plan: payload.plan,
+    forcedMode: answer.mode,
+    forcedTargetItemId: answer.targetItemId
+  });
+  await resolvePendingDecision(pending.id);
+  return true;
+}
+
 export async function processTelegramMessage(message: TelegramMessage): Promise<void> {
   const chatId = message.chat.id;
   const messageId = message.message_id;
 
   await upsertChatSubscription(chatId);
+
+  if (message.text && (await tryResolvePendingRelation(chatId, message))) {
+    return;
+  }
 
   if (message.text && (await handleTextCommand(chatId, message.text))) {
     return;
@@ -410,96 +753,63 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
     return;
   }
 
-  const latestOpenItem = await loadLatestOpenItemForChat(chatId);
-  const continuationDetected = isLikelyContinuation(message, extracted, latestOpenItem);
-  const classificationInput =
-    continuationDetected && latestOpenItem
-      ? buildContinuationClassificationInput(extracted.normalizedText, latestOpenItem)
-      : extracted.normalizedText;
+  const knownCategories = await listCategories();
+  const contextCandidates = await rankContextCandidates(chatId, extracted);
 
-  let classification = await classifyContent(classificationInput);
-  if (continuationDetected && latestOpenItem) {
-    classification = adaptClassificationWithContinuation(classification, latestOpenItem);
+  let plan: AIIntakePlannerOutput | null = await planIntakeWithContext({
+    text: extracted.normalizedText,
+    knownCategories: knownCategories.map((category) => ({
+      name: category.name,
+      description: category.description
+    })),
+    openContext: contextCandidates
+  });
+
+  if (!plan) {
+    const fallback = await classifyContent(extracted.normalizedText);
+    plan = {
+      decision: {
+        mode: "new",
+        confidence: 0.55,
+        reasonPtBr: "Fallback de planejamento por indisponibilidade do planner principal."
+      },
+      cards: [fallback as AIClassificationOutput]
+    };
   }
-  const categoryId = await upsertCategory(
-    classification.categoryName,
-    classification.categoryDescription,
-    classification.shouldCreateCategory ? "agent" : "reuse"
-  );
 
-  const audioWithoutTranscription =
-    extracted.inputType === "audio" && extracted.metadata.transcriptionAvailable === false && !extracted.rawText;
-  const processingError = audioWithoutTranscription
-    ? "Transcricao indisponivel. Classificacao feita com conteudo parcial."
-    : undefined;
-  const processingStage = stageFromClassification(classification.action);
+  const decisionMode = normalizeDecisionMode(plan.decision.mode);
+  const hasLowConfidence = decisionMode !== "split" && (plan.decision.confidence ?? 0) < AUTO_DECISION_THRESHOLD;
 
-  const itemId = await insertInboxItem({
+  if (hasLowConfidence) {
+    await createPendingDecision({
+      chatId,
+      decisionType: "relation",
+      payload: {
+        sourceMessageId: messageId,
+        extracted,
+        plan,
+        contextCandidates
+      }
+    });
+
+    const suggestedTarget = plan.decision.targetItemId ? `#${plan.decision.targetItemId}` : "nenhum card especifico";
+    await sendText(
+      chatId,
+      [
+        "Estou com baixa confianca para decidir relacao com o historico aberto.",
+        `Sugestao atual: ${decisionMode === "merge" ? `complementar ${suggestedTarget}` : "novo card"}.`,
+        "Responda agora com:",
+        "- `complemento` (ou `complemento #id`)",
+        "- `novo`"
+      ].join("\n")
+    );
+    return;
+  }
+
+  await executePlan({
     chatId,
     messageId,
-    inputType: extracted.inputType,
-    rawText: extracted.rawText,
-    normalizedText: extracted.normalizedText,
-    summaryPtBr: classification.summaryPtBr,
-    categoryId,
-    bucket: classification.bucket,
-    action: classification.action,
-    priority: classification.priority,
-    actionTitle: classification.actionTitle,
-    actionDetails: classification.actionDetails,
-    dueAt: classification.dueDateISO,
-    nextStep: classification.nextStepPtBr,
-    followUpWith: classification.followUpWithPtBr,
-    processingStage,
-    processingError,
-    confidence: classification.confidence,
-    storagePath: extracted.mediaPath,
-    metadata: {
-      ...extracted.metadata,
-      priority: classification.priority,
-      dueDateISO: classification.dueDateISO,
-      nextStepPtBr: classification.nextStepPtBr,
-      followUpWithPtBr: classification.followUpWithPtBr,
-      continuationDetected,
-      continuationFromItemId: continuationDetected && latestOpenItem ? latestOpenItem.id : undefined
-    }
+    extracted,
+    plan
   });
-
-  const sourceLabel = `telegram:${chatId}#${messageId}`;
-  const notePath = await writeKnowledgeNote({
-    classification,
-    rawText: extracted.rawText,
-    normalizedText: extracted.normalizedText,
-    createdAt: new Date(),
-    sourceLabel,
-    itemId
-  });
-
-  await updateInboxItemStoragePath(itemId, notePath);
-  await writeActionBoard(await listOpenActionItems(undefined, 40));
-
-  if (classification.action === "CREATE_PROJECT") {
-    const projectTitle = classification.actionTitle || actionTitleFallback(classification.summaryPtBr);
-    await ensureProject({
-      title: projectTitle,
-      categoryId,
-      sourceItemId: itemId,
-      notes: classification.actionDetails
-    });
-    await appendProjectStatus(projectTitle, "active", sourceLabel);
-  }
-
-  await sendText(
-    chatId,
-    buildReply({
-      summary: classification.summaryPtBr,
-      category: classification.categoryName,
-      action: classification.action,
-      priority: classification.priority,
-      nextStep: classification.nextStepPtBr,
-      followUpWith: classification.followUpWithPtBr,
-      dueDateISO: classification.dueDateISO,
-      question: classification.followUpQuestionPtBr
-    })
-  );
 }
