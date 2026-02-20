@@ -63,16 +63,25 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
 
     const { buffer, filePath } = await getFileBuffer(fileId);
     const ext = path.extname(filePath) || ".ogg";
-    const mediaPath = await storeIncomingMedia(`audio${ext}`, buffer);
-    const transcription = await transcribeAudio(mediaPath);
+    const fileName = message.audio?.file_name || `audio${ext}`;
+    const mimeType = message.voice?.mime_type || message.audio?.mime_type || "audio/ogg";
+    const mediaPath = await storeIncomingMedia(fileName, buffer);
+    const transcription = await transcribeAudio({
+      buffer,
+      fileName,
+      mimeType
+    });
+    const normalizedText =
+      [rawText, transcription].filter(Boolean).join("\n").trim() || "Audio recebido sem transcricao automatica.";
 
     return {
       inputType,
       rawText,
-      normalizedText: [rawText, transcription].filter(Boolean).join("\n").trim(),
+      normalizedText,
       mediaPath,
       metadata: {
         telegramFilePath: filePath,
+        mimeType,
         transcriptionAvailable: Boolean(transcription)
       }
     };

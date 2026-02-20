@@ -1,5 +1,5 @@
-import fs from "node:fs/promises";
 import OpenAI from "openai";
+import { toFile } from "openai/uploads";
 import { env } from "../config/env.js";
 import { log } from "../utils/logger.js";
 
@@ -31,24 +31,47 @@ export function hasAI(): boolean {
   return Boolean(maybeClient);
 }
 
-export async function transcribeAudio(filePath: string): Promise<string | null> {
+export async function transcribeAudio(params: {
+  buffer: Buffer;
+  fileName: string;
+  mimeType?: string;
+}): Promise<string | null> {
   if (!maybeClient) {
     return null;
   }
 
+  const fallbackModels = ["gpt-4o-mini-transcribe", "gpt-4o-transcribe"];
+  const models = [env.OPENAI_TRANSCRIBE_MODEL, ...fallbackModels].filter(
+    (model, index, items) => Boolean(model) && items.indexOf(model) === index
+  );
+
   try {
-    const stream = await fs.open(filePath, "r");
-    const transcription = await maybeClient.audio.transcriptions.create({
-      file: stream.createReadStream(),
-      model: env.OPENAI_TRANSCRIBE_MODEL,
-      language: "pt"
-    });
-    await stream.close();
-    return transcription.text;
+    for (const model of models) {
+      try {
+        const file = await toFile(params.buffer, params.fileName, {
+          type: params.mimeType || "audio/ogg"
+        });
+
+        const transcription = await maybeClient.audio.transcriptions.create({
+          file,
+          model,
+          language: "pt"
+        });
+
+        const text = transcription.text?.trim();
+        if (text) {
+          return text;
+        }
+      } catch (error) {
+        log.warn("Audio transcription attempt failed", { model, error });
+      }
+    }
   } catch (error) {
-    log.error("Audio transcription failed", { error });
+    log.error("Unexpected audio transcription error", { error });
     return null;
   }
+
+  return null;
 }
 
 export async function describeImage(base64DataUrl: string): Promise<string | null> {
