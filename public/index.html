@@ -13,54 +13,92 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <div class="bg-glow"></div>
     <main class="layout">
-      <header class="hero card reveal">
-        <p class="eyebrow">Second Brain MVP</p>
-        <h1>Painel de Operacoes</h1>
-        <p class="subtitle">
-          Captura via Telegram ativa para texto, audio, PDF e imagens. Este painel mostra classificacao, backlog e ritmo diario.
-        </p>
+      <header class="card hero">
+        <div>
+          <p class="eyebrow">Second Brain</p>
+          <h1>Dashboard Operacional</h1>
+          <p class="subtitle">Fluxo completo de captura, interpretação, priorização e acompanhamento.</p>
+        </div>
+        <p class="hero-tip">Use os cards para Resolver, Eliminar ou Reabrir sem sair desta tela.</p>
       </header>
 
-      <section class="stats reveal" id="stats"></section>
+      <section class="stats" id="stats"></section>
 
-      <section class="card kanban reveal" style="animation-delay: 60ms">
-        <div class="kanban-header">
-          <h2>Kanban de Prioridades</h2>
-          <p>Fila de execucao ordenada por urgencia.</p>
+      <section class="card workflow-card">
+        <div class="section-head">
+          <h2>Fluxo por Etapas</h2>
+          <p>O que já entrou, foi interpretado e virou execução.</p>
         </div>
-        <div class="kanban-board">
-          <article class="kanban-column high">
-            <h3>Alta</h3>
-            <ul class="list" id="kanban-high"></ul>
-          </article>
-          <article class="kanban-column medium">
-            <h3>Media</h3>
-            <ul class="list" id="kanban-medium"></ul>
-          </article>
-          <article class="kanban-column low">
-            <h3>Baixa</h3>
-            <ul class="list" id="kanban-low"></ul>
-          </article>
-        </div>
+        <div class="workflow-grid" id="workflow"></div>
       </section>
 
-      <section class="grid">
-        <article class="card reveal" style="animation-delay: 80ms">
-          <h2>Categorias</h2>
-          <ul class="list" id="categories"></ul>
-        </article>
+      <section class="main-grid">
+        <div class="primary">
+          <section class="card kanban-card">
+            <div class="section-head">
+              <h2>Prioridades em Aberto</h2>
+              <p>Organizado por urgência e pronto para ação.</p>
+            </div>
+            <div class="kanban-board">
+              <article class="kanban-column high">
+                <h3>Alta</h3>
+                <ul class="list" id="kanban-high"></ul>
+              </article>
+              <article class="kanban-column medium">
+                <h3>Média</h3>
+                <ul class="list" id="kanban-medium"></ul>
+              </article>
+              <article class="kanban-column low">
+                <h3>Baixa</h3>
+                <ul class="list" id="kanban-low"></ul>
+              </article>
+            </div>
+          </section>
 
-        <article class="card reveal" style="animation-delay: 110ms">
-          <h2>Foco Atual</h2>
-          <ul class="list" id="focus"></ul>
-        </article>
+          <section class="card recent-card">
+            <div class="section-head">
+              <h2>Capturas Recentes</h2>
+              <div class="filters" id="recent-filters">
+                <button type="button" class="filter-btn active" data-filter="all">Todos</button>
+                <button type="button" class="filter-btn" data-filter="open">Abertos</button>
+                <button type="button" class="filter-btn" data-filter="done">Resolvidos</button>
+                <button type="button" class="filter-btn" data-filter="eliminated">Eliminados</button>
+              </div>
+            </div>
+            <ul class="list" id="recent"></ul>
+          </section>
+        </div>
 
-        <article class="card reveal" style="animation-delay: 140ms">
-          <h2>Ultimos Registros</h2>
-          <ul class="list" id="recent"></ul>
-        </article>
+        <aside class="secondary">
+          <section class="card guide-card">
+            <h2>Guia Rápido</h2>
+            <ul class="guide-list">
+              <li>1) Valide prioridade e prazo no Kanban.</li>
+              <li>2) Defina “Resolver” quando concluído.</li>
+              <li>3) Use “Eliminar” para itens sem valor.</li>
+              <li>4) Reabra se o contexto mudar.</li>
+            </ul>
+          </section>
+
+          <section class="card">
+            <h2>Mapa de Captura</h2>
+            <ul class="list" id="capture-breakdown"></ul>
+          </section>
+
+          <section class="card">
+            <h2>Categorias</h2>
+            <ul class="list" id="categories"></ul>
+          </section>
+
+          <section class="card debrief-card">
+            <div class="section-head">
+              <h2>Debrief Semanal</h2>
+              <p id="weekly-meta">Sem relatório ainda.</p>
+            </div>
+            <pre id="weekly-debrief"></pre>
+          </section>
+        </aside>
       </section>
     </main>
 
@@ -68,6 +106,14 @@
       <article class="card stat-card">
         <p class="label"></p>
         <p class="value"></p>
+        <p class="hint"></p>
+      </article>
+    </template>
+
+    <template id="workflow-template">
+      <article class="workflow-step">
+        <p class="step-label"></p>
+        <p class="step-value"></p>
       </article>
     </template>
 

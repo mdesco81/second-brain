@@ -13,7 +13,7 @@ MVP para capturar entradas via Telegram (`texto`, `audio`, `PDF`, `imagem`), cla
 - Postgres persistence for operational state
 - Daily proactive check-in agent with focus queue
 - Weekly report with summary + next-week priorities
-- Web dashboard (`/`) with counts, focus queue, Kanban by priority, and controls to resolve/eliminate/reopen cards
+- Web dashboard (`/`) with stage-by-stage workflow, capture map, Kanban, status controls, and latest weekly debrief
 
 ## Folder structure (knowledge base)
 

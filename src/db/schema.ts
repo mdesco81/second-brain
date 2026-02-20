@@ -423,12 +423,36 @@ export async function loadWeeklySummary(chatId?: number): Promise<{
 }
 
 export async function loadDashboardSummary(): Promise<DashboardSummary> {
-  const [totalItems, openActions, totalProjects, categories, recent, openQueue] = await Promise.all([
+  const [totalItems, openActions, totalProjects, statusBreakdown, captureBreakdown, categories, recent, openQueue, weeklyDebrief] =
+    await Promise.all([
     pool.query<{ total: string }>(`SELECT COUNT(*)::TEXT AS total FROM inbox_items`),
     pool.query<{ total: string }>(
       `SELECT COUNT(*)::TEXT AS total FROM inbox_items WHERE status = 'open' AND action <> 'NONE'`
     ),
     pool.query<{ total: string }>(`SELECT COUNT(*)::TEXT AS total FROM projects WHERE status = 'active'`),
+    pool.query<{
+      open_total: string;
+      done_total: string;
+      eliminated_total: string;
+      open_actionable: string;
+      done_actionable: string;
+      eliminated_actionable: string;
+    }>(
+      `SELECT
+          COUNT(*) FILTER (WHERE status = 'open')::TEXT AS open_total,
+          COUNT(*) FILTER (WHERE status = 'done')::TEXT AS done_total,
+          COUNT(*) FILTER (WHERE status = 'eliminated')::TEXT AS eliminated_total,
+          COUNT(*) FILTER (WHERE status = 'open' AND action <> 'NONE')::TEXT AS open_actionable,
+          COUNT(*) FILTER (WHERE status = 'done' AND action <> 'NONE')::TEXT AS done_actionable,
+          COUNT(*) FILTER (WHERE status = 'eliminated' AND action <> 'NONE')::TEXT AS eliminated_actionable
+       FROM inbox_items`
+    ),
+    pool.query<{ input_type: string; total: string }>(
+      `SELECT input_type, COUNT(*)::TEXT AS total
+       FROM inbox_items
+       GROUP BY input_type
+       ORDER BY COUNT(*) DESC`
+    ),
     pool.query<{ name: string; total: string }>(
       `SELECT c.name, COUNT(*)::TEXT AS total
        FROM inbox_items i
@@ -446,6 +470,9 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
       action: string;
       priority: string;
       status: ActionStatus;
+      due_at: string | null;
+      next_step: string | null;
+      follow_up_with: string | null;
     }>(
       `SELECT i.id,
               i.created_at::TEXT,
@@ -454,24 +481,60 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
               i.summary_pt_br,
               i.action,
               i.priority,
-              i.status
+              i.status,
+              i.due_at::TEXT,
+              i.next_step,
+              i.follow_up_with
        FROM inbox_items i
        JOIN categories c ON c.id = i.category_id
        ORDER BY i.created_at DESC
        LIMIT 20`
     ),
-    listOpenActionItems(undefined, 30)
+    listOpenActionItems(undefined, 30),
+    pool.query<{ sent_at: string; message_text: string }>(
+      `SELECT sent_at::TEXT, message_text
+       FROM proactive_runs
+       WHERE run_type = 'weekly'
+       ORDER BY sent_at DESC
+       LIMIT 1`
+    )
   ]);
 
   const focusItems = openQueue.slice(0, 8);
   const kanbanHigh = openQueue.filter((item) => item.priority === "ALTA");
   const kanbanMedium = openQueue.filter((item) => item.priority === "MEDIA");
   const kanbanLow = openQueue.filter((item) => item.priority === "BAIXA");
+  const status = statusBreakdown.rows[0];
+  const totalCaptured = Number(totalItems.rows[0]?.total ?? 0);
+  const actionable =
+    Number(status?.open_actionable ?? 0) + Number(status?.done_actionable ?? 0) + Number(status?.eliminated_actionable ?? 0);
 
   return {
     totalItems: Number(totalItems.rows[0]?.total ?? 0),
     openActions: Number(openActions.rows[0]?.total ?? 0),
     totalProjects: Number(totalProjects.rows[0]?.total ?? 0),
+    statusBreakdown: {
+      open: Number(status?.open_total ?? 0),
+      done: Number(status?.done_total ?? 0),
+      eliminated: Number(status?.eliminated_total ?? 0)
+    },
+    captureBreakdown: captureBreakdown.rows.map((row) => ({
+      inputType: row.input_type as DashboardSummary["captureBreakdown"][number]["inputType"],
+      total: Number(row.total)
+    })),
+    workflow: {
+      captured: totalCaptured,
+      classified: totalCaptured,
+      actionable,
+      resolved: Number(status?.done_actionable ?? 0),
+      eliminated: Number(status?.eliminated_actionable ?? 0)
+    },
+    latestWeeklyDebrief: weeklyDebrief.rows[0]
+      ? {
+          sentAt: weeklyDebrief.rows[0].sent_at,
+          message: weeklyDebrief.rows[0].message_text
+        }
+      : undefined,
     categories: categories.rows.map((row) => ({ name: row.name, total: Number(row.total) })),
     recentItems: recent.rows.map((row) => ({
       id: row.id,
@@ -481,7 +544,10 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
       summaryPtBr: row.summary_pt_br,
       action: row.action as DashboardSummary["recentItems"][number]["action"],
       priority: normalizePriority(row.priority),
-      status: row.status
+      status: row.status,
+      dueAt: row.due_at ?? undefined,
+      nextStep: row.next_step ?? undefined,
+      followUpWith: row.follow_up_with ?? undefined
     })),
     focusItems: focusItems.map((item) => ({
       id: item.id,

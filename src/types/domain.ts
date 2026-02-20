@@ -47,6 +47,26 @@ export interface DashboardSummary {
   totalItems: number;
   openActions: number;
   totalProjects: number;
+  statusBreakdown: {
+    open: number;
+    done: number;
+    eliminated: number;
+  };
+  captureBreakdown: Array<{
+    inputType: InputType;
+    total: number;
+  }>;
+  workflow: {
+    captured: number;
+    classified: number;
+    actionable: number;
+    resolved: number;
+    eliminated: number;
+  };
+  latestWeeklyDebrief?: {
+    sentAt: string;
+    message: string;
+  };
   categories: Array<{ name: string; total: number }>;
   recentItems: Array<{
     id: number;
@@ -57,6 +77,9 @@ export interface DashboardSummary {
     action: SuggestedAction;
     priority: ActionPriority;
     status: ActionStatus;
+    dueAt?: string;
+    nextStep?: string;
+    followUpWith?: string;
   }>;
   focusItems: Array<{
     id: number;
