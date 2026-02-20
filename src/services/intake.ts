@@ -259,6 +259,7 @@ async function handleTextCommand(chatId: number, text: string): Promise<boolean>
   if (doneId !== null) {
     const updated = await updateInboxItemStatus(chatId, doneId, "done");
     if (updated) {
+      await writeActionBoard(await listOpenActionItems(undefined, 40));
       await sendText(chatId, `Item #${doneId} marcado como concluido.`);
     } else {
       await sendText(chatId, `Nao encontrei item aberto com id #${doneId} neste chat.`);

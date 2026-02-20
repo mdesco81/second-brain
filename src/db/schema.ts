@@ -1,5 +1,5 @@
 import { pool } from "./pool.js";
-import { ActionPriority, DashboardSummary } from "../types/domain.js";
+import { ActionPriority, ActionStatus, DashboardSummary } from "../types/domain.js";
 
 const DEFAULT_CATEGORIES = [
   {
@@ -345,7 +345,7 @@ export async function listOpenActionItems(chatId?: number, limit = 10): Promise<
   }));
 }
 
-export async function updateInboxItemStatus(chatId: number, itemId: number, status: "open" | "done"): Promise<boolean> {
+export async function updateInboxItemStatus(chatId: number, itemId: number, status: ActionStatus): Promise<boolean> {
   const result = await pool.query<{ id: number }>(
     `UPDATE inbox_items
      SET status = $3
@@ -353,6 +353,17 @@ export async function updateInboxItemStatus(chatId: number, itemId: number, stat
        AND chat_id = $2
      RETURNING id`,
     [itemId, chatId, status]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function updateInboxItemStatusById(itemId: number, status: ActionStatus): Promise<boolean> {
+  const result = await pool.query<{ id: number }>(
+    `UPDATE inbox_items
+     SET status = $2
+     WHERE id = $1
+     RETURNING id`,
+    [itemId, status]
   );
   return (result.rowCount ?? 0) > 0;
 }
@@ -434,7 +445,7 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
       summary_pt_br: string;
       action: string;
       priority: string;
-      status: string;
+      status: ActionStatus;
     }>(
       `SELECT i.id,
               i.created_at::TEXT,

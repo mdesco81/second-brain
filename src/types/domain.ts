@@ -15,6 +15,7 @@ export type SuggestedAction =
   | "NONE";
 
 export type ActionPriority = "ALTA" | "MEDIA" | "BAIXA";
+export type ActionStatus = "open" | "done" | "eliminated";
 
 export interface IntakePayload {
   chatId: number;
@@ -55,7 +56,7 @@ export interface DashboardSummary {
     summaryPtBr: string;
     action: SuggestedAction;
     priority: ActionPriority;
-    status: string;
+    status: ActionStatus;
   }>;
   focusItems: Array<{
     id: number;
