@@ -492,6 +492,105 @@ dialog::backdrop { background: rgba(0,0,0,0.4); }
   margin-top: 16px;
 }
 
+/* ---- FAB (Floating Action Button) ---- */
+.fab {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 1.6rem;
+  font-weight: 300;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(37,99,235,0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.15s, box-shadow 0.15s;
+  z-index: 100;
+  line-height: 1;
+}
+
+.fab:hover {
+  transform: scale(1.08);
+  box-shadow: 0 6px 20px rgba(37,99,235,0.45);
+}
+
+.fab:active { transform: scale(0.96); }
+
+/* ---- File Attachment (inside expanded card) ---- */
+.file-attachment {
+  background: #f9fafb;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+
+.file-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.file-icon { font-size: 1rem; }
+
+.file-label {
+  flex: 1;
+  color: var(--muted);
+}
+
+.btn-file-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 0.85rem;
+  font-weight: 700;
+  transition: background 0.12s;
+}
+
+.btn-file-open:hover {
+  background: #dbeafe;
+}
+
+.file-preview {
+  margin-top: 8px;
+}
+
+.file-preview-img {
+  max-width: 100%;
+  max-height: 240px;
+  border-radius: 6px;
+  object-fit: contain;
+  display: block;
+}
+
+.file-audio-player {
+  width: 100%;
+  margin-top: 6px;
+  height: 36px;
+  border-radius: 6px;
+}
+
+.tag.file-tag {
+  background: #fef3c7;
+  font-size: 0.7rem;
+  padding: 2px 5px;
+}
+
 /* ---- Responsive ---- */
 @media (max-width: 900px) {
   .kanban-board {
@@ -512,4 +611,5 @@ dialog::backdrop { background: rgba(0,0,0,0.4); }
   .filters-bar { gap: 8px; }
   .filter-group { flex-wrap: wrap; }
   .field-row { grid-template-columns: 1fr; }
+  .fab { bottom: 16px; right: 16px; width: 50px; height: 50px; font-size: 1.4rem; }
 }

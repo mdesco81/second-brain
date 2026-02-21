@@ -91,6 +91,7 @@ export interface DashboardSummary {
     followUpWith?: string;
     processingStage: ProcessingStage;
     processingError?: string;
+    hasFile?: boolean;
   }>;
   todayFocus: Array<{
     id: number;
