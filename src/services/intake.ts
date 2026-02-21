@@ -616,9 +616,10 @@ async function persistCard(params: {
     inputType: params.extracted.inputType
   });
 
-  // For PDFs, keep storage_path pointing to the original PDF file (not the note).
-  // For other types, update to the knowledge note path.
-  if (params.extracted.inputType !== "pdf" || !params.extracted.mediaPath) {
+  // When the item has an original media file (PDF, audio, image, etc.), keep
+  // storage_path pointing to it so the dashboard can serve it.  Only overwrite
+  // with the knowledge-note path for text-only items that have no media.
+  if (!params.extracted.mediaPath) {
     await updateInboxItemStoragePath(itemId, notePath);
   }
 

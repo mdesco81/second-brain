@@ -980,7 +980,7 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
       followUpWith: row.follow_up_with ?? undefined,
       processingStage: normalizeProcessingStage(row.processing_stage),
       processingError: row.processing_error ?? undefined,
-      hasFile: Boolean(row.storage_path)
+      hasFile: Boolean(row.storage_path && !row.storage_path.endsWith(".md"))
     })),
     todayFocus: todayFocus.map((item) => ({
       id: item.id,
@@ -1256,7 +1256,7 @@ export async function getItemFileInfo(itemId: number): Promise<{
     [itemId]
   );
   const row = result.rows[0];
-  if (!row?.storage_path) return null;
+  if (!row?.storage_path || row.storage_path.endsWith(".md")) return null;
   return { storagePath: row.storage_path, inputType: row.input_type };
 }
 
