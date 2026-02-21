@@ -25,12 +25,6 @@
 
       <nav class="filters-bar">
         <div class="filter-group">
-          <button type="button" class="chip active" data-filter-status="open">Abertos</button>
-          <button type="button" class="chip" data-filter-status="all">Todos</button>
-          <button type="button" class="chip" data-filter-status="done">Resolvidos</button>
-          <button type="button" class="chip" data-filter-status="eliminated">Eliminados</button>
-        </div>
-        <div class="filter-group">
           <button type="button" class="chip active" data-filter-priority="all">Todas</button>
           <button type="button" class="chip pri-alta" data-filter-priority="ALTA">Alta</button>
           <button type="button" class="chip pri-media" data-filter-priority="MEDIA">Media</button>
@@ -45,7 +39,30 @@
 
       <section class="stats-strip" id="stats"></section>
 
-      <section class="cards-list" id="cards-list"></section>
+      <section class="kanban-board" id="kanban-board">
+        <div class="kanban-column" data-status="open">
+          <div class="kanban-header">
+            <h2>Abertos</h2>
+            <span class="kanban-count" id="count-open">0</span>
+          </div>
+          <div class="kanban-cards" id="col-open"></div>
+        </div>
+        <div class="kanban-column" data-status="done">
+          <div class="kanban-header">
+            <h2>Resolvidos</h2>
+            <span class="kanban-count" id="count-done">0</span>
+          </div>
+          <div class="kanban-cards" id="col-done"></div>
+        </div>
+        <div class="kanban-column" data-status="eliminated">
+          <div class="kanban-header">
+            <h2>Eliminados</h2>
+            <span class="kanban-count" id="count-eliminated">0</span>
+          </div>
+          <div class="kanban-cards" id="col-eliminated"></div>
+        </div>
+      </section>
+
       <div class="empty-state" id="empty-state" style="display:none">
         Nenhum card encontrado com os filtros atuais.
       </div>
@@ -59,7 +76,7 @@
         </header>
 
         <div class="field">
-          <label for="edit-summary">Resumo</label>
+          <label for="edit-summary">Interpretacao / Resumo</label>
           <textarea id="edit-summary" rows="2"></textarea>
         </div>
 

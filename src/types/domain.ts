@@ -80,6 +80,8 @@ export interface DashboardSummary {
     inputType: InputType;
     categoryName: string;
     summaryPtBr: string;
+    rawText?: string;
+    actionDetails?: string;
     action: SuggestedAction;
     actionTitle?: string;
     priority: ActionPriority;

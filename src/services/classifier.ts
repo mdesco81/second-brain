@@ -195,7 +195,7 @@ function fallbackClassification(text: string): ClassificationResult {
   if (matched) {
     const dueDateISO = inferDueDateFromText(text) || inferDueDateFromPriority(priority);
     return {
-      summaryPtBr: text.slice(0, 240),
+      summaryPtBr: `[Classificacao automatica] ${truncateText(text, 200)} — requer revisao e interpretacao da IA.`,
       categoryName: matched.categoryName,
       categoryDescription: matched.description,
       bucket: matched.bucket,
@@ -212,7 +212,7 @@ function fallbackClassification(text: string): ClassificationResult {
   }
 
   return {
-    summaryPtBr: text.slice(0, 240),
+    summaryPtBr: `[Classificacao automatica] ${truncateText(text, 200)} — requer contexto adicional para interpretacao.`,
     categoryName: "Inbox Geral",
     categoryDescription: "Itens ainda sem classificacao especifica",
     bucket: "RESEARCH",
@@ -245,7 +245,7 @@ export async function classifyContent(rawText: string): Promise<ClassificationRe
   }
 
   const action = aiResult.action;
-  const summaryPtBr = truncateText(aiResult.summaryPtBr || rawText, 220);
+  const summaryPtBr = truncateText(aiResult.summaryPtBr || rawText, 400);
   const priority = normalizePriority(aiResult.priority);
   const nextStepPtBrRaw = aiResult.nextStepPtBr ? truncateText(aiResult.nextStepPtBr, 160) : undefined;
   const nextStepPtBr = nextStepPtBrRaw || (action === "NONE" ? undefined : defaultNextStepByAction(action));
