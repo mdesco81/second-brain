@@ -47,6 +47,101 @@ interface ExtractedContent {
 }
 
 const AUDIO_EXTENSIONS = new Set([".mp3", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".aac", ".flac", ".webm"]);
+
+const URL_REGEX = /https?:\/\/[^\s<>"')\]]+/gi;
+
+function extractUrls(text: string): string[] {
+  return text.match(URL_REGEX) || [];
+}
+
+async function fetchUrlMetadata(url: string): Promise<{ title?: string; description?: string; url: string } | null> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; SecondBrain/1.0)",
+        "Accept": "text/html"
+      },
+      redirect: "follow",
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      return { url };
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("text/html")) {
+      return { url };
+    }
+
+    // Read only first 32KB to avoid downloading huge pages
+    const reader = response.body?.getReader();
+    if (!reader) {
+      return { url };
+    }
+    let html = "";
+    const decoder = new TextDecoder();
+    let bytesRead = 0;
+    const maxBytes = 32768;
+
+    while (bytesRead < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      html += decoder.decode(value, { stream: true });
+      bytesRead += value.length;
+    }
+    reader.cancel().catch(() => {});
+
+    const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+    const title = titleMatch?.[1]?.trim()?.replace(/\s+/g, " ");
+
+    const descMatch =
+      html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["']/i) ||
+      html.match(/<meta[^>]*content=["']([^"']*)["'][^>]*name=["']description["']/i);
+    const ogDescMatch =
+      html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']*)["']/i) ||
+      html.match(/<meta[^>]*content=["']([^"']*)["'][^>]*property=["']og:description["']/i);
+
+    return {
+      title: title || undefined,
+      description: (descMatch?.[1] || ogDescMatch?.[1])?.trim() || undefined,
+      url
+    };
+  } catch {
+    return { url };
+  }
+}
+
+async function enrichTextWithUrls(text: string): Promise<{ enrichedText: string; urls: Array<{ title?: string; description?: string; url: string }> }> {
+  const urls = extractUrls(text);
+  if (urls.length === 0) {
+    return { enrichedText: text, urls: [] };
+  }
+
+  const metadataResults = await Promise.all(
+    urls.slice(0, 3).map((u) => fetchUrlMetadata(u))
+  );
+  const validMetadata = metadataResults.filter((m): m is NonNullable<typeof m> => m !== null);
+
+  if (validMetadata.length === 0) {
+    return { enrichedText: text, urls: [] };
+  }
+
+  const enrichmentLines = validMetadata.map((m) => {
+    const parts = [`Link: ${m.url}`];
+    if (m.title) parts.push(`Titulo: ${m.title}`);
+    if (m.description) parts.push(`Descricao: ${m.description}`);
+    return parts.join("\n");
+  });
+
+  return {
+    enrichedText: `${text}\n\n---\n${enrichmentLines.join("\n\n")}`,
+    urls: validMetadata
+  };
+}
 const CONTINUATION_MARKERS = [
   "sobre o tema anterior",
   "sobre o assunto anterior",
@@ -111,11 +206,12 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
   const rawText = (message.text || message.caption || "").trim();
 
   if (inputType === "text") {
+    const { enrichedText, urls } = await enrichTextWithUrls(rawText);
     return {
       inputType,
       rawText,
-      normalizedText: rawText,
-      metadata: {}
+      normalizedText: enrichedText,
+      metadata: urls.length > 0 ? { urls, hasLinks: true } : {}
     };
   }
 

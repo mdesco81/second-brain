@@ -1017,6 +1017,20 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
   };
 }
 
+export async function loadDoneToday(chatId?: number): Promise<number> {
+  const result = await pool.query<{ total: string }>(
+    `SELECT COUNT(*)::TEXT AS total
+     FROM inbox_items
+     WHERE status = 'done'
+       AND action <> 'NONE'
+       AND processing_stage = 'concluido'
+       AND created_at >= CURRENT_DATE
+       AND ($1::BIGINT IS NULL OR chat_id = $1)`,
+    [chatId ?? null]
+  );
+  return Number(result.rows[0]?.total ?? 0);
+}
+
 export async function listOverdueItems(chatId?: number, limit = 10): Promise<OpenActionItem[]> {
   const result = await pool.query<{
     id: number;
