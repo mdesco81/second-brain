@@ -10,6 +10,7 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
     "dotenv": "^17.2.2",
     "express": "^4.21.2",
     "file-type": "^21.3.0",

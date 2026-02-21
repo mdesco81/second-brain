@@ -1,3 +1,4 @@
+import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { toFile } from "openai/uploads";
 import { fileTypeFromBuffer } from "file-type";
@@ -49,19 +50,27 @@ export interface AIIntakePlannerOutput {
   cards: AIClassificationOutput[];
 }
 
-const maybeClient = env.OPENAI_API_KEY
-  ? new OpenAI({
-      apiKey: env.OPENAI_API_KEY
-    })
+// ── Clients ──────────────────────────────────────────────────────────
+// Claude handles text generation (classification, planning, vision).
+// OpenAI is still used for audio transcription and embeddings.
+
+const anthropicClient = env.ANTHROPIC_API_KEY
+  ? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY })
+  : null;
+
+const openaiClient = env.OPENAI_API_KEY
+  ? new OpenAI({ apiKey: env.OPENAI_API_KEY })
   : null;
 
 export function hasAI(): boolean {
-  return Boolean(maybeClient);
+  return Boolean(anthropicClient);
 }
 
 export function embeddingModel(): string {
   return env.OPENAI_EMBED_MODEL;
 }
+
+// ── Audio helpers (OpenAI) ───────────────────────────────────────────
 
 const SUPPORTED_AUDIO_EXTENSIONS = new Set([".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".flac"]);
 const EXT_TO_MIME: Record<string, string> = {
@@ -121,7 +130,7 @@ export async function transcribeAudio(params: {
   fileName: string;
   mimeType?: string;
 }): Promise<string | null> {
-  if (!maybeClient) {
+  if (!openaiClient) {
     return null;
   }
 
@@ -156,7 +165,7 @@ export async function transcribeAudio(params: {
             type: candidate.mimeType
           });
 
-          const transcription = await maybeClient.audio.transcriptions.create({
+          const transcription = await openaiClient.audio.transcriptions.create({
             file,
             model,
             language: "pt"
@@ -187,41 +196,69 @@ export async function transcribeAudio(params: {
   return null;
 }
 
+// ── Image description (Claude) ───────────────────────────────────────
+
+type ImageMediaType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+
+function parseDataUrl(dataUrl: string): { mediaType: ImageMediaType; data: string } | null {
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) {
+    return null;
+  }
+  return {
+    mediaType: match[1] as ImageMediaType,
+    data: match[2]
+  };
+}
+
 export async function describeImage(base64DataUrl: string): Promise<string | null> {
-  if (!maybeClient) {
+  if (!anthropicClient) {
+    return null;
+  }
+
+  const parsed = parseDataUrl(base64DataUrl);
+  if (!parsed) {
+    log.error("Image description failed: invalid data URL format");
     return null;
   }
 
   try {
-    const response = await maybeClient.responses.create({
-      model: env.OPENAI_MODEL,
-      input: [
+    const response = await anthropicClient.messages.create({
+      model: env.ANTHROPIC_MODEL,
+      max_tokens: 1024,
+      messages: [
         {
           role: "user",
           content: [
             {
-              type: "input_text",
+              type: "text",
               text: "Extract the most relevant text and meaning from this image. Return in plain text in Portuguese (Brazil)."
             },
             {
-              type: "input_image",
-              image_url: base64DataUrl,
-              detail: "auto"
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: parsed.mediaType,
+                data: parsed.data
+              }
             }
           ]
         }
       ]
     });
 
-    return response.output_text?.trim() || null;
+    const textBlock = response.content.find((block) => block.type === "text");
+    return textBlock?.text?.trim() || null;
   } catch (error) {
     log.error("Image description failed", { error });
     return null;
   }
 }
 
+// ── Embeddings (OpenAI) ──────────────────────────────────────────────
+
 export async function embedText(text: string): Promise<number[] | null> {
-  if (!maybeClient) {
+  if (!openaiClient) {
     return null;
   }
   const normalized = text.trim();
@@ -230,7 +267,7 @@ export async function embedText(text: string): Promise<number[] | null> {
   }
 
   try {
-    const response = await maybeClient.embeddings.create({
+    const response = await openaiClient.embeddings.create({
       model: env.OPENAI_EMBED_MODEL,
       input: normalized
     });
@@ -242,166 +279,111 @@ export async function embedText(text: string): Promise<number[] | null> {
   }
 }
 
+// ── JSON schema description (shared by planner & classifier) ─────────
+
+const CLASSIFICATION_SCHEMA_DESCRIPTION = `You MUST respond with ONLY a valid JSON object (no markdown, no backticks, no explanation).
+
+JSON schema for each card object:
+{
+  "summaryPtBr": string (required),
+  "categoryName": string (required),
+  "categoryDescription": string (required),
+  "bucket": "PROJECTS" | "AREAS" | "RESOURCES" | "RESEARCH" | "ARCHIVE" (required),
+  "action": "CREATE_PROJECT" | "CREATE_TASK" | "STORE_REFERENCE" | "FOLLOW_UP" | "NONE" (required),
+  "actionTitle": string (optional),
+  "actionDetails": string (optional),
+  "nextStepPtBr": string (optional),
+  "followUpWithPtBr": string (optional),
+  "dueDateISO": string "YYYY-MM-DD" or null (optional),
+  "priority": "ALTA" | "MEDIA" | "BAIXA" (required),
+  "confidence": number 0-1 (required),
+  "shouldCreateCategory": boolean (required),
+  "followUpQuestionPtBr": string (optional)
+}`;
+
+// ── Intake planner (Claude) ──────────────────────────────────────────
+
 export async function planIntakeWithContext(input: {
   text: string;
   knownCategories: Array<{ name: string; description: string }>;
   openContext: PlannerContextCandidate[];
 }): Promise<AIIntakePlannerOutput | null> {
-  if (!maybeClient) {
+  if (!anthropicClient) {
     return null;
   }
 
+  const systemPrompt = [
+    "You are the orchestration planner of a personal Second Brain for a busy professional who sends quick voice notes and texts throughout the day.",
+    "",
+    "YOUR PRIMARY ROLE: You are an EXECUTIVE ASSISTANT who interprets, synthesizes and organizes — NEVER just echo or transcribe what was said.",
+    "The user sends raw, messy, informal messages. Your job is to extract the MEANING, identify ACTIONS, and produce clean professional records.",
+    "",
+    "CRITICAL ANTI-ECHO RULE:",
+    "- NEVER copy or paraphrase the raw input. ALWAYS transform it into structured, professional notes.",
+    "- If the input says 'preciso falar com joao sobre o projeto do site', your summaryPtBr should NOT be 'Precisa falar com Joao sobre o projeto do site'.",
+    "- Instead: 'Alinhamento pendente com Joao sobre andamento do projeto do site — definir escopo e cronograma'.",
+    "- The difference: you ADD INTERPRETATION, CONTEXT, and ACTIONABILITY.",
+    "",
+    "OUTPUT FIELD RULES:",
+    "- actionTitle (MOST IMPORTANT — this is the card headline): Short imperative verb phrase (5-10 words). Must start with a verb. Examples: 'Agendar reuniao com fornecedor de TI', 'Revisar proposta comercial da empresa X', 'Cobrar retorno do Joao sobre orcamento'. NEVER just describe the topic — describe WHAT TO DO.",
+    "- summaryPtBr: PROFESSIONAL INTERPRETATION in 1-2 sentences. Explain the CONTEXT and WHY this matters. Think: 'If I read this in 2 weeks, will I instantly understand the context and importance?'",
+    "- nextStepPtBr: The SINGLE, CONCRETE first step. Must be executable without thinking. Bad: 'Dar andamento'. Good: 'Enviar email para Joao pedindo reuniao quarta as 14h'.",
+    "- actionDetails: Extract and organize ALL key facts: names, dates, amounts, decisions, dependencies. This is the structured record.",
+    "- followUpWithPtBr: Name the specific person or team mentioned. ALWAYS capture names.",
+    "",
+    "VOICE NOTE / AUDIO INTERPRETATION:",
+    "- Voice transcriptions are messy — filler words, repetitions, incomplete thoughts.",
+    "- You MUST heavily interpret: extract core message, identify action, name people, clarify intent.",
+    "",
+    "LINKS AND ARTICLES:",
+    "- When the input contains URLs/links, set action=STORE_REFERENCE, bucket=RESOURCES (unless tied to active project).",
+    "- summaryPtBr should describe WHY relevant. Keep URL in actionDetails.",
+    "",
+    "MERGE/NEW/SPLIT DECISION (prefer merge when in doubt):",
+    "- MERGE: Same TOPIC, PERSON, PROJECT, or CONTEXT as any open candidate. Be aggressive about merging. Set targetItemId.",
+    "- NEW: Only if clearly DIFFERENT subject with no overlap.",
+    "- SPLIT: Only if message contains 2+ clearly INDEPENDENT actionable topics.",
+    "",
+    "CONFIDENCE: If ANY open candidate could relate (same category, person, project), set confidence >= 0.75 and merge.",
+    "Only set confidence < 0.72 if genuinely uncertain.",
+    "",
+    "LANGUAGE: Think in English for accuracy, ALL output in Brazilian Portuguese.",
+    "OWNER: If unknown, write exactly 'PENDENTE_DONO'.",
+    "CONSTRAINT: Do not invent targetItemId outside provided candidates.",
+    "",
+    CLASSIFICATION_SCHEMA_DESCRIPTION,
+    "",
+    `The top-level JSON must be:
+{
+  "decision": {
+    "mode": "merge" | "new" | "split",
+    "confidence": number 0-1,
+    "targetItemId": integer (optional, for merge),
+    "reasonPtBr": string
+  },
+  "cards": [ ...card objects (1-6 items) ]
+}`
+  ].join("\n");
+
   try {
-    const response = await maybeClient.responses.create({
-      model: env.OPENAI_MODEL,
-      text: {
-        format: {
-          type: "json_schema",
-          name: "second_brain_intake_plan",
-          strict: true,
-          schema: {
-            type: "object",
-            additionalProperties: false,
-            required: ["decision", "cards"],
-            properties: {
-              decision: {
-                type: "object",
-                additionalProperties: false,
-                required: ["mode", "confidence", "reasonPtBr"],
-                properties: {
-                  mode: {
-                    type: "string",
-                    enum: ["merge", "new", "split"]
-                  },
-                  confidence: {
-                    type: "number",
-                    minimum: 0,
-                    maximum: 1
-                  },
-                  targetItemId: {
-                    type: "integer"
-                  },
-                  reasonPtBr: {
-                    type: "string"
-                  }
-                }
-              },
-              cards: {
-                type: "array",
-                minItems: 1,
-                maxItems: 6,
-                items: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: [
-                    "summaryPtBr",
-                    "categoryName",
-                    "categoryDescription",
-                    "bucket",
-                    "action",
-                    "priority",
-                    "confidence",
-                    "shouldCreateCategory"
-                  ],
-                  properties: {
-                    summaryPtBr: { type: "string" },
-                    categoryName: { type: "string" },
-                    categoryDescription: { type: "string" },
-                    bucket: {
-                      type: "string",
-                      enum: ["PROJECTS", "AREAS", "RESOURCES", "RESEARCH", "ARCHIVE"]
-                    },
-                    action: {
-                      type: "string",
-                      enum: ["CREATE_PROJECT", "CREATE_TASK", "STORE_REFERENCE", "FOLLOW_UP", "NONE"]
-                    },
-                    actionTitle: { type: "string" },
-                    actionDetails: { type: "string" },
-                    nextStepPtBr: { type: "string" },
-                    followUpWithPtBr: { type: "string" },
-                    dueDateISO: {
-                      anyOf: [
-                        {
-                          type: "string",
-                          pattern: "^\\d{4}-\\d{2}-\\d{2}$"
-                        },
-                        { type: "null" }
-                      ]
-                    },
-                    priority: {
-                      type: "string",
-                      enum: ["ALTA", "MEDIA", "BAIXA"]
-                    },
-                    confidence: { type: "number", minimum: 0, maximum: 1 },
-                    shouldCreateCategory: { type: "boolean" },
-                    followUpQuestionPtBr: { type: "string" }
-                  }
-                }
-              }
-            }
-          }
-        }
-      },
-      input: [
-        {
-          role: "system",
-          content: [
-            "You are the orchestration planner of a personal Second Brain for a busy professional who sends quick voice notes and texts throughout the day.",
-            "",
-            "YOUR PRIMARY ROLE: You are an EXECUTIVE ASSISTANT who interprets, synthesizes and organizes — NEVER just echo or transcribe what was said.",
-            "The user sends raw, messy, informal messages. Your job is to extract the MEANING, identify ACTIONS, and produce clean professional records.",
-            "",
-            "CRITICAL ANTI-ECHO RULE:",
-            "- NEVER copy or paraphrase the raw input. ALWAYS transform it into structured, professional notes.",
-            "- If the input says 'preciso falar com joao sobre o projeto do site', your summaryPtBr should NOT be 'Precisa falar com Joao sobre o projeto do site'.",
-            "- Instead: 'Alinhamento pendente com Joao sobre andamento do projeto do site — definir escopo e cronograma'.",
-            "- The difference: you ADD INTERPRETATION, CONTEXT, and ACTIONABILITY.",
-            "",
-            "OUTPUT FIELD RULES:",
-            "- actionTitle (MOST IMPORTANT — this is the card headline): Short imperative verb phrase (5-10 words). Must start with a verb. Examples: 'Agendar reuniao com fornecedor de TI', 'Revisar proposta comercial da empresa X', 'Cobrar retorno do Joao sobre orcamento'. NEVER just describe the topic — describe WHAT TO DO.",
-            "- summaryPtBr: PROFESSIONAL INTERPRETATION in 1-2 sentences. Explain the CONTEXT and WHY this matters. Think: 'If I read this in 2 weeks, will I instantly understand the context and importance?'",
-            "- nextStepPtBr: The SINGLE, CONCRETE first step. Must be executable without thinking. Bad: 'Dar andamento'. Good: 'Enviar email para Joao pedindo reuniao quarta as 14h'.",
-            "- actionDetails: Extract and organize ALL key facts: names, dates, amounts, decisions, dependencies. This is the structured record.",
-            "- followUpWithPtBr: Name the specific person or team mentioned. ALWAYS capture names.",
-            "",
-            "VOICE NOTE / AUDIO INTERPRETATION:",
-            "- Voice transcriptions are messy — filler words, repetitions, incomplete thoughts.",
-            "- You MUST heavily interpret: extract core message, identify action, name people, clarify intent.",
-            "",
-            "LINKS AND ARTICLES:",
-            "- When the input contains URLs/links, set action=STORE_REFERENCE, bucket=RESOURCES (unless tied to active project).",
-            "- summaryPtBr should describe WHY relevant. Keep URL in actionDetails.",
-            "",
-            "MERGE/NEW/SPLIT DECISION (prefer merge when in doubt):",
-            "- MERGE: Same TOPIC, PERSON, PROJECT, or CONTEXT as any open candidate. Be aggressive about merging. Set targetItemId.",
-            "- NEW: Only if clearly DIFFERENT subject with no overlap.",
-            "- SPLIT: Only if message contains 2+ clearly INDEPENDENT actionable topics.",
-            "",
-            "CONFIDENCE: If ANY open candidate could relate (same category, person, project), set confidence >= 0.75 and merge.",
-            "Only set confidence < 0.72 if genuinely uncertain.",
-            "",
-            "LANGUAGE: Think in English for accuracy, ALL output in Brazilian Portuguese.",
-            "OWNER: If unknown, write exactly 'PENDENTE_DONO'.",
-            "CONSTRAINT: Do not invent targetItemId outside provided candidates."
-          ].join("\n")
-        },
+    const response = await anthropicClient.messages.create({
+      model: env.ANTHROPIC_MODEL,
+      max_tokens: 4096,
+      system: systemPrompt,
+      messages: [
         {
           role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: `Known categories:\n${JSON.stringify(input.knownCategories, null, 2)}\n\nOpen context candidates:\n${JSON.stringify(
-                input.openContext,
-                null,
-                2
-              )}\n\nIncoming content:\n${input.text}`
-            }
-          ]
+          content: `Known categories:\n${JSON.stringify(input.knownCategories, null, 2)}\n\nOpen context candidates:\n${JSON.stringify(
+            input.openContext,
+            null,
+            2
+          )}\n\nIncoming content:\n${input.text}`
         }
       ]
     });
 
-    const raw = response.output_text;
+    const textBlock = response.content.find((block) => block.type === "text");
+    const raw = textBlock?.text?.trim();
     if (!raw) {
       return null;
     }
@@ -412,112 +394,60 @@ export async function planIntakeWithContext(input: {
   }
 }
 
+// ── Fallback classifier (Claude) ─────────────────────────────────────
+
 export async function classifyWithAI(input: AIClassificationInput): Promise<AIClassificationOutput | null> {
-  if (!maybeClient) {
+  if (!anthropicClient) {
     return null;
   }
 
+  const systemPrompt = [
+    "You classify personal knowledge inputs for a Second Brain system used by a busy professional.",
+    "",
+    "CRITICAL: You are an EXECUTIVE ASSISTANT and INTERPRETER, not a transcriber.",
+    "The user sends quick voice notes, messy texts, and informal messages.",
+    "Your job is to extract the MEANING and produce clean, professional, actionable records.",
+    "",
+    "ANTI-ECHO RULE (MANDATORY):",
+    "- NEVER copy, paraphrase, or lightly rephrase the raw input.",
+    "- ALWAYS add interpretation, context, and structure that wasn't in the original.",
+    "- Bad summaryPtBr: 'Usuario precisa falar com Joao sobre projeto' (this is just echoing!).",
+    "- Good summaryPtBr: 'Alinhamento de escopo pendente com Joao para o projeto do site — risco de atraso se nao resolvido esta semana'.",
+    "",
+    "OUTPUT RULES:",
+    "- actionTitle (CARD HEADLINE): Imperative verb phrase, 5-10 words. Must start with verb. Examples: 'Revisar contrato do fornecedor ABC', 'Cobrar aprovacao do orcamento com diretoria'.",
+    "- summaryPtBr: PROFESSIONAL interpretation (1-2 sentences). Explain context and importance. Think: 'In 2 weeks, will I understand why this matters?'",
+    "- nextStepPtBr: ONE concrete, executable step. Bad: 'Dar andamento'. Good: 'Ligar para Joao (11-9999-0000) e agendar reuniao para esta semana'.",
+    "- actionDetails: ALL key facts organized: names, dates, amounts, decisions, dependencies.",
+    "- followUpWithPtBr: The SPECIFIC person or team. Never 'responsavel interno'.",
+    "",
+    "VOICE NOTES: Transcriptions are messy. You MUST heavily interpret — extract core message, identify action, name people.",
+    "",
+    "LINKS/URLs: Set action=STORE_REFERENCE, bucket=RESOURCES. Explain WHY relevant. Keep URL in actionDetails.",
+    "",
+    "ALL output in Brazilian Portuguese. Reuse categories. Fill actionTitle, nextStepPtBr, followUpWithPtBr for any action != NONE.",
+    "Only set dueDateISO for concrete dates/deadlines mentioned.",
+    "",
+    CLASSIFICATION_SCHEMA_DESCRIPTION,
+    "",
+    "Respond with a single JSON card object (not wrapped in an array)."
+  ].join("\n");
+
   try {
-    const response = await maybeClient.responses.create({
-      model: env.OPENAI_MODEL,
-      text: {
-        format: {
-          type: "json_schema",
-          name: "second_brain_classification",
-          strict: true,
-          schema: {
-            type: "object",
-            additionalProperties: false,
-            required: [
-              "summaryPtBr",
-              "categoryName",
-              "categoryDescription",
-              "bucket",
-              "action",
-              "priority",
-              "confidence",
-              "shouldCreateCategory"
-            ],
-            properties: {
-              summaryPtBr: { type: "string" },
-              categoryName: { type: "string" },
-              categoryDescription: { type: "string" },
-              bucket: {
-                type: "string",
-                enum: ["PROJECTS", "AREAS", "RESOURCES", "RESEARCH", "ARCHIVE"]
-              },
-              action: {
-                type: "string",
-                enum: ["CREATE_PROJECT", "CREATE_TASK", "STORE_REFERENCE", "FOLLOW_UP", "NONE"]
-              },
-              actionTitle: { type: "string" },
-              actionDetails: { type: "string" },
-              nextStepPtBr: { type: "string" },
-              followUpWithPtBr: { type: "string" },
-              dueDateISO: {
-                anyOf: [
-                  {
-                    type: "string",
-                    pattern: "^\\d{4}-\\d{2}-\\d{2}$"
-                  },
-                  { type: "null" }
-                ]
-              },
-              priority: {
-                type: "string",
-                enum: ["ALTA", "MEDIA", "BAIXA"]
-              },
-              confidence: { type: "number", minimum: 0, maximum: 1 },
-              shouldCreateCategory: { type: "boolean" },
-              followUpQuestionPtBr: { type: "string" }
-            }
-          }
-        }
-      },
-      input: [
-        {
-          role: "system",
-          content: [
-            "You classify personal knowledge inputs for a Second Brain system used by a busy professional.",
-            "",
-            "CRITICAL: You are an EXECUTIVE ASSISTANT and INTERPRETER, not a transcriber.",
-            "The user sends quick voice notes, messy texts, and informal messages.",
-            "Your job is to extract the MEANING and produce clean, professional, actionable records.",
-            "",
-            "ANTI-ECHO RULE (MANDATORY):",
-            "- NEVER copy, paraphrase, or lightly rephrase the raw input.",
-            "- ALWAYS add interpretation, context, and structure that wasn't in the original.",
-            "- Bad summaryPtBr: 'Usuario precisa falar com Joao sobre projeto' (this is just echoing!).",
-            "- Good summaryPtBr: 'Alinhamento de escopo pendente com Joao para o projeto do site — risco de atraso se nao resolvido esta semana'.",
-            "",
-            "OUTPUT RULES:",
-            "- actionTitle (CARD HEADLINE): Imperative verb phrase, 5-10 words. Must start with verb. Examples: 'Revisar contrato do fornecedor ABC', 'Cobrar aprovacao do orcamento com diretoria'.",
-            "- summaryPtBr: PROFESSIONAL interpretation (1-2 sentences). Explain context and importance. Think: 'In 2 weeks, will I understand why this matters?'",
-            "- nextStepPtBr: ONE concrete, executable step. Bad: 'Dar andamento'. Good: 'Ligar para Joao (11-9999-0000) e agendar reuniao para esta semana'.",
-            "- actionDetails: ALL key facts organized: names, dates, amounts, decisions, dependencies.",
-            "- followUpWithPtBr: The SPECIFIC person or team. Never 'responsavel interno'.",
-            "",
-            "VOICE NOTES: Transcriptions are messy. You MUST heavily interpret — extract core message, identify action, name people.",
-            "",
-            "LINKS/URLs: Set action=STORE_REFERENCE, bucket=RESOURCES. Explain WHY relevant. Keep URL in actionDetails.",
-            "",
-            "ALL output in Brazilian Portuguese. Reuse categories. Fill actionTitle, nextStepPtBr, followUpWithPtBr for any action != NONE.",
-            "Only set dueDateISO for concrete dates/deadlines mentioned."
-          ].join("\n")
-        },
+    const response = await anthropicClient.messages.create({
+      model: env.ANTHROPIC_MODEL,
+      max_tokens: 4096,
+      system: systemPrompt,
+      messages: [
         {
           role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: `Known categories:\n${JSON.stringify(input.knownCategories, null, 2)}\n\nInput content:\n${input.text}`
-            }
-          ]
+          content: `Known categories:\n${JSON.stringify(input.knownCategories, null, 2)}\n\nInput content:\n${input.text}`
         }
       ]
     });
 
-    const raw = response.output_text;
+    const textBlock = response.content.find((block) => block.type === "text");
+    const raw = textBlock?.text?.trim();
     if (!raw) {
       return null;
     }
