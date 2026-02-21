@@ -892,6 +892,7 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
 
   let plan: AIIntakePlannerOutput | null = await planIntakeWithContext({
     text: extracted.normalizedText,
+    inputType: extracted.inputType,
     knownCategories: knownCategories.map((category) => ({
       name: category.name,
       description: category.description
@@ -900,7 +901,23 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
   });
 
   if (!plan) {
-    log.warn("AI planner returned null — falling back to classifyContent", {
+    log.warn("AI planner returned null on first attempt — retrying once", {
+      textLength: extracted.normalizedText.length,
+      inputType: extracted.inputType
+    });
+    plan = await planIntakeWithContext({
+      text: extracted.normalizedText,
+      inputType: extracted.inputType,
+      knownCategories: knownCategories.map((category) => ({
+        name: category.name,
+        description: category.description
+      })),
+      openContext: contextCandidates
+    });
+  }
+
+  if (!plan) {
+    log.warn("AI planner returned null on retry — falling back to classifyContent", {
       textLength: extracted.normalizedText.length
     });
     const fallback = await classifyContent(extracted.normalizedText);

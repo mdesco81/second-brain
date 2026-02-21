@@ -312,6 +312,7 @@ JSON schema for each card object:
 
 export async function planIntakeWithContext(input: {
   text: string;
+  inputType?: string;
   knownCategories: Array<{ name: string; description: string }>;
   openContext: PlannerContextCandidate[];
 }): Promise<AIIntakePlannerOutput | null> {
@@ -373,16 +374,40 @@ export async function planIntakeWithContext(input: {
     "",
     "MERGE/NEW/SPLIT DECISION:",
     "- MERGE: Same TOPIC, PERSON, PROJECT, or CONTEXT as any open candidate. Be aggressive about merging. Set targetItemId.",
-    "- NEW: Only if clearly DIFFERENT subject with no overlap.",
-    "- SPLIT: When the message contains 2+ DISTINCT topics, actions, or requests — even if they share some context.",
+    "- NEW: Only if clearly DIFFERENT subject with no overlap AND the message has only ONE topic/action.",
+    "- SPLIT: When the message contains 2+ DISTINCT topics, actions, or requests — even if they share some context. THIS IS THE MOST COMMON MODE FOR VOICE NOTES.",
     "",
-    "SPLIT DETECTION (IMPORTANT — users often pack multiple requests in one message or voice note):",
-    "- Look for topic transitions: 'outra coisa', 'alem disso', 'ah e tambem', 'mudando de assunto', 'outro ponto', or simply a shift in subject/person/project.",
-    "- Look for multiple action verbs targeting DIFFERENT outcomes: 'preciso ligar pro Joao' AND 'tenho que revisar o contrato' = 2 cards.",
-    "- Look for enumeration: 'primeiro... segundo...', 'uma coisa... outra coisa...', numbered items.",
-    "- Voice notes are especially prone to topic-hopping — a single audio may contain 2-4 unrelated requests. ALWAYS check for this.",
-    "- When in doubt between NEW and SPLIT, prefer SPLIT. Each card should have ONE clear action and ONE clear responsible.",
-    "- Each split card must be self-contained with its own actionTitle, nextStep, followUpWith, and priority.",
+    "SPLIT DETECTION (HIGHEST PRIORITY — THIS IS A CRITICAL SYSTEM FEATURE):",
+    "Before doing ANYTHING else, read the entire input and COUNT how many distinct action items, requests, or topics exist.",
+    "If you find 2 or more, you MUST use mode='split' and return one card per topic. This is NON-NEGOTIABLE.",
+    "",
+    "HOW TO DETECT MULTIPLE TOPICS:",
+    "1. DIFFERENT PEOPLE: 'cobrar Joao' + 'falar com Maria' = 2 cards, even if same project.",
+    "2. DIFFERENT ACTIONS: 'revisar contrato' + 'agendar reuniao' = 2 cards, even if same person.",
+    "3. DIFFERENT SUBJECTS/PROJECTS: 'site do cliente' + 'contratacao do estagiario' = 2 cards.",
+    "4. TOPIC TRANSITIONS — common in Portuguese voice notes:",
+    "   'outra coisa', 'alem disso', 'ah e tambem', 'mudando de assunto', 'outro ponto',",
+    "   'e tem mais', 'aproveitando', 'lembrando', 'ah esqueci', 'sobre outro assunto',",
+    "   or simply a SHIFT in subject/person/project without any explicit marker.",
+    "5. ENUMERATION: 'primeiro... segundo...', 'uma coisa... outra coisa...', numbered items.",
+    "6. IMPLICIT BREAKS: Even without transition words, if the speaker jumps from topic A to topic B, split.",
+    "",
+    "SPLIT EXAMPLES (study these carefully):",
+    "Input: 'Preciso ligar pro Joao sobre o site, e tambem tem que revisar aquele contrato do fornecedor, ah e agenda uma reuniao com a Maria pra semana que vem'",
+    "-> mode='split', 3 cards: [Ligar pro Joao sobre site] [Revisar contrato do fornecedor] [Agendar reuniao com Maria]",
+    "",
+    "Input: 'O Marcos falou que vai atrasar a entrega, preciso cobrar ele, e outra coisa, tenho que pagar a fatura da AWS ate sexta'",
+    "-> mode='split', 2 cards: [Cobrar Marcos sobre entrega] [Pagar fatura AWS]",
+    "",
+    "Input: 'Falar com time de vendas sobre a meta do mes'",
+    "-> mode='new', 1 card (single topic, single action)",
+    "",
+    "SPLIT RULES:",
+    "- When in doubt between NEW and SPLIT, ALWAYS prefer SPLIT. Over-splitting is better than under-splitting.",
+    "- Each split card MUST be self-contained: its own actionTitle, summaryPtBr, nextStepPtBr, followUpWithPtBr, priority.",
+    "- A split card should make perfect sense if read in isolation, without seeing the other cards.",
+    "- mode='split' REQUIRES cards array to have 2+ items. NEVER return mode='split' with only 1 card.",
+    "- For split mode, set confidence >= 0.85 (you are confident about the separation).",
     "",
     "CONFIDENCE RULES:",
     "- If the open candidates list is EMPTY (no cards exist), ALWAYS set mode='new' and confidence >= 0.90. There is nothing to merge with.",
@@ -408,17 +433,30 @@ export async function planIntakeWithContext(input: {
   "decision": {
     "mode": "merge" | "new" | "split",
     "confidence": number 0-1,
-    "targetItemId": integer (optional, for merge),
+    "targetItemId": integer (optional, required for merge),
     "reasonPtBr": string
   },
-  "cards": [ ...card objects (1-6 items) ]
-}`
+  "cards": [ ...card objects ]
+}
+
+CRITICAL CARD COUNT RULES:
+- mode="new": cards array MUST have exactly 1 item.
+- mode="merge": cards array MUST have exactly 1 item (the merged update).
+- mode="split": cards array MUST have 2-6 items (one per distinct topic/action). If you wrote only 1 card, you MUST reconsider — is there really only one topic?`
   ].join("\n");
+
+  const inputTypeLabel = input.inputType === "audio"
+    ? "VOICE NOTE / AUDIO TRANSCRIPTION (high probability of multiple topics — be extra vigilant about splitting)"
+    : input.inputType === "image"
+      ? "IMAGE (with extracted description)"
+      : input.inputType === "pdf"
+        ? "PDF DOCUMENT"
+        : "TEXT MESSAGE";
 
   try {
     const response = await anthropicClient.messages.create({
       model: env.ANTHROPIC_MODEL,
-      max_tokens: 4096,
+      max_tokens: 8192,
       system: systemPrompt,
       messages: [
         {
@@ -427,17 +465,37 @@ export async function planIntakeWithContext(input: {
             input.openContext,
             null,
             2
-          )}\n\nIncoming content:\n${input.text}`
+          )}\n\nInput type: ${inputTypeLabel}\n\nIncoming content:\n${input.text}`
         }
       ]
     });
 
     const textBlock = response.content.find((block) => block.type === "text");
-    const raw = textBlock?.text?.trim();
+    let raw = textBlock?.text?.trim();
     if (!raw) {
       return null;
     }
-    return JSON.parse(raw) as AIIntakePlannerOutput;
+
+    // Strip markdown code fences if present (models sometimes wrap JSON in ```json...```)
+    raw = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?\s*```$/i, "").trim();
+
+    const parsed = JSON.parse(raw) as AIIntakePlannerOutput;
+
+    // Validate: if mode is "split" but only 1 card, fix to "new"
+    if (parsed.decision.mode === "split" && parsed.cards.length < 2) {
+      log.warn("Planner returned split with <2 cards, correcting to 'new'", { cardCount: parsed.cards.length });
+      parsed.decision.mode = "new";
+    }
+    // Validate: if mode is "new"/"merge" but multiple cards, fix to "split"
+    if ((parsed.decision.mode === "new" || parsed.decision.mode === "merge") && parsed.cards.length > 1) {
+      log.warn("Planner returned new/merge with multiple cards, correcting to 'split'", {
+        originalMode: parsed.decision.mode,
+        cardCount: parsed.cards.length
+      });
+      parsed.decision.mode = "split";
+    }
+
+    return parsed;
   } catch (error) {
     log.error("AI intake planning failed", { error });
     return null;
