@@ -900,6 +900,9 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
   });
 
   if (!plan) {
+    log.warn("AI planner returned null — falling back to classifyContent", {
+      textLength: extracted.normalizedText.length
+    });
     const fallback = await classifyContent(extracted.normalizedText);
     plan = {
       decision: {

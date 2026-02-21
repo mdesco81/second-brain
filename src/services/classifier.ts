@@ -1,6 +1,7 @@
 import { ActionPriority, ClassificationResult } from "../types/domain.js";
 import { listCategories } from "../db/schema.js";
 import { classifyWithAI } from "./openai.js";
+import { log } from "../utils/logger.js";
 
 const KEYWORD_RULES: Array<{
   keywords: string[];
@@ -292,6 +293,7 @@ export async function classifyContent(rawText: string): Promise<ClassificationRe
   });
 
   if (!aiResult) {
+    log.warn("classifyContent: AI returned null — using keyword-only fallback classification");
     return fallbackClassification(rawText);
   }
 

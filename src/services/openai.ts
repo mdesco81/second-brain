@@ -62,6 +62,13 @@ const openaiClient = env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: env.OPENAI_API_KEY })
   : null;
 
+if (!anthropicClient) {
+  log.warn("ANTHROPIC_API_KEY not set — Claude AI is DISABLED. All classification will use keyword fallback only.");
+}
+if (!openaiClient) {
+  log.warn("OPENAI_API_KEY not set — audio transcription and embeddings are DISABLED.");
+}
+
 export function hasAI(): boolean {
   return Boolean(anthropicClient);
 }
@@ -309,6 +316,7 @@ export async function planIntakeWithContext(input: {
   openContext: PlannerContextCandidate[];
 }): Promise<AIIntakePlannerOutput | null> {
   if (!anthropicClient) {
+    log.warn("planIntakeWithContext skipped — anthropicClient is null (ANTHROPIC_API_KEY missing)");
     return null;
   }
 
@@ -398,6 +406,7 @@ export async function planIntakeWithContext(input: {
 
 export async function classifyWithAI(input: AIClassificationInput): Promise<AIClassificationOutput | null> {
   if (!anthropicClient) {
+    log.warn("classifyWithAI skipped — anthropicClient is null (ANTHROPIC_API_KEY missing)");
     return null;
   }
 
