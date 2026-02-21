@@ -1220,6 +1220,27 @@ export async function listStaleItems(chatId?: number, staleDays = 3, limit = 10)
   }));
 }
 
+export async function loadVocabularyTerms(limit = 80): Promise<string[]> {
+  const result = await pool.query<{ term: string }>(
+    `SELECT DISTINCT term FROM (
+       SELECT DISTINCT BTRIM(follow_up_with) AS term
+         FROM inbox_items
+         WHERE follow_up_with IS NOT NULL
+           AND BTRIM(follow_up_with) <> ''
+           AND lower(BTRIM(follow_up_with)) NOT IN ('pendente_dono', 'responsavel interno', 'usuario', 'definir responsavel e cobrar atualizacao')
+       UNION
+       SELECT DISTINCT name AS term FROM categories
+       UNION
+       SELECT DISTINCT title AS term FROM projects WHERE status = 'active'
+     ) sub
+     WHERE term IS NOT NULL AND length(term) >= 2
+     ORDER BY term
+     LIMIT $1`,
+    [limit]
+  );
+  return result.rows.map((row) => row.term);
+}
+
 export async function closePool(): Promise<void> {
   await pool.end();
 }

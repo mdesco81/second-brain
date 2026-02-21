@@ -23,6 +23,7 @@ import {
   listCategories,
   listOpenContextCandidates,
   listOpenActionItems,
+  loadVocabularyTerms,
   mergeIntoInboxItem,
   loadWeeklySummary,
   resolvePendingDecision,
@@ -227,10 +228,20 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
     const fileName = message.audio?.file_name || message.document?.file_name || `audio${ext}`;
     const mimeType = message.voice?.mime_type || message.audio?.mime_type || message.document?.mime_type || "audio/ogg";
     const mediaPath = await storeIncomingMedia(fileName, buffer);
+
+    // Build dynamic vocabulary prompt for Whisper from existing cards
+    const vocabularyTerms = await loadVocabularyTerms(80).catch(() => [] as string[]);
+    const whisperPrompt = vocabularyTerms.length > 0
+      ? vocabularyTerms.join(", ")
+      : undefined;
+
+    const audioDurationSeconds = message.voice?.duration || message.audio?.duration || 0;
+
     const transcription = await transcribeAudio({
       buffer,
       fileName,
-      mimeType
+      mimeType,
+      whisperPrompt
     });
     if (!transcription) {
       log.warn("Audio received without transcription", {
@@ -251,7 +262,8 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
       metadata: {
         telegramFilePath: filePath,
         mimeType,
-        transcriptionAvailable: Boolean(transcription)
+        transcriptionAvailable: Boolean(transcription),
+        audioDurationSeconds
       }
     };
   }
@@ -890,9 +902,14 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
   const knownCategories = await listCategories();
   const contextCandidates = await rankContextCandidates(chatId, extracted);
 
+  const audioDuration = typeof extracted.metadata.audioDurationSeconds === "number"
+    ? extracted.metadata.audioDurationSeconds
+    : undefined;
+
   let plan: AIIntakePlannerOutput | null = await planIntakeWithContext({
     text: extracted.normalizedText,
     inputType: extracted.inputType,
+    audioDurationSeconds: audioDuration,
     knownCategories: knownCategories.map((category) => ({
       name: category.name,
       description: category.description
@@ -908,6 +925,7 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
     plan = await planIntakeWithContext({
       text: extracted.normalizedText,
       inputType: extracted.inputType,
+      audioDurationSeconds: audioDuration,
       knownCategories: knownCategories.map((category) => ({
         name: category.name,
         description: category.description

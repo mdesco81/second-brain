@@ -136,6 +136,7 @@ export async function transcribeAudio(params: {
   buffer: Buffer;
   fileName: string;
   mimeType?: string;
+  whisperPrompt?: string;
 }): Promise<string | null> {
   if (!openaiClient) {
     return null;
@@ -175,7 +176,8 @@ export async function transcribeAudio(params: {
           const transcription = await openaiClient.audio.transcriptions.create({
             file,
             model,
-            language: "pt"
+            language: "pt",
+            ...(params.whisperPrompt ? { prompt: params.whisperPrompt } : {})
           });
 
           const text = transcription.text?.trim();
@@ -313,6 +315,7 @@ JSON schema for each card object:
 export async function planIntakeWithContext(input: {
   text: string;
   inputType?: string;
+  audioDurationSeconds?: number;
   knownCategories: Array<{ name: string; description: string }>;
   openContext: PlannerContextCandidate[];
 }): Promise<AIIntakePlannerOutput | null> {
@@ -445,13 +448,23 @@ CRITICAL CARD COUNT RULES:
 - mode="split": cards array MUST have 2-6 items (one per distinct topic/action). If you wrote only 1 card, you MUST reconsider — is there really only one topic?`
   ].join("\n");
 
-  const inputTypeLabel = input.inputType === "audio"
-    ? "VOICE NOTE / AUDIO TRANSCRIPTION (high probability of multiple topics — be extra vigilant about splitting)"
-    : input.inputType === "image"
-      ? "IMAGE (with extracted description)"
-      : input.inputType === "pdf"
-        ? "PDF DOCUMENT"
-        : "TEXT MESSAGE";
+  let inputTypeLabel: string;
+  if (input.inputType === "audio") {
+    const dur = input.audioDurationSeconds ?? 0;
+    const durLabel = dur > 0 ? `${dur}s duration` : "unknown duration";
+    const splitHint = dur >= 45
+      ? "LONG voice note — VERY HIGH probability of multiple topics. Split aggressively."
+      : dur >= 20
+        ? "Medium voice note — likely contains 2+ topics. Check carefully for splits."
+        : "Short voice note — may be single topic, but still check for splits.";
+    inputTypeLabel = `VOICE NOTE / AUDIO TRANSCRIPTION (${durLabel}). ${splitHint}`;
+  } else if (input.inputType === "image") {
+    inputTypeLabel = "IMAGE (with extracted description)";
+  } else if (input.inputType === "pdf") {
+    inputTypeLabel = "PDF DOCUMENT";
+  } else {
+    inputTypeLabel = "TEXT MESSAGE";
+  }
 
   try {
     const response = await anthropicClient.messages.create({
