@@ -875,6 +875,8 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
         input_type: string;
         category_name: string;
         summary_pt_br: string;
+        raw_text: string | null;
+        action_details: string | null;
         action: string;
         action_title: string | null;
         priority: string;
@@ -890,6 +892,8 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
                 i.input_type,
                 c.name AS category_name,
                 i.summary_pt_br,
+                i.raw_text,
+                i.action_details,
                 i.action,
                 i.action_title,
                 i.priority,
@@ -963,6 +967,8 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
       inputType: row.input_type as DashboardSummary["recentItems"][number]["inputType"],
       categoryName: row.category_name,
       summaryPtBr: row.summary_pt_br,
+      rawText: row.raw_text ?? undefined,
+      actionDetails: row.action_details ?? undefined,
       action: row.action as DashboardSummary["recentItems"][number]["action"],
       actionTitle: row.action_title ?? undefined,
       priority: normalizePriority(row.priority),

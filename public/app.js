@@ -2,23 +2,32 @@
 const searchInput = document.getElementById("search");
 const alertsNode = document.getElementById("alerts");
 const statsNode = document.getElementById("stats");
-const cardsListNode = document.getElementById("cards-list");
 const emptyNode = document.getElementById("empty-state");
 const categoryFilter = document.getElementById("filter-category");
 const editModal = document.getElementById("edit-modal");
 const editForm = document.getElementById("edit-form");
 
+const colOpen = document.getElementById("col-open");
+const colDone = document.getElementById("col-done");
+const colEliminated = document.getElementById("col-eliminated");
+const countOpen = document.getElementById("count-open");
+const countDone = document.getElementById("count-done");
+const countEliminated = document.getElementById("count-eliminated");
+
+const columns = { open: colOpen, done: colDone, eliminated: colEliminated };
+const counts = { open: countOpen, done: countDone, eliminated: countEliminated };
+
 // --- State ---
 const state = {
   summary: null,
   categories: [],
-  filterStatus: "open",
   filterPriority: "all",
   filterCategory: "all",
   search: "",
   expandedId: null,
   editingItem: null,
-  loading: false
+  loading: false,
+  draggedId: null
 };
 
 // --- Helpers ---
@@ -48,6 +57,14 @@ function actionLabel(a) {
   if (a === "STORE_REFERENCE") return "Referencia";
   if (a === "FOLLOW_UP") return "Follow-up";
   return "Registro";
+}
+
+function inputTypeLabel(t) {
+  if (t === "audio") return "Audio";
+  if (t === "image") return "Imagem";
+  if (t === "pdf") return "PDF";
+  if (t === "file") return "Arquivo";
+  return "Texto";
 }
 
 // --- API ---
@@ -122,14 +139,9 @@ function renderCategoryFilter(summary) {
   categoryFilter.innerHTML = html;
 }
 
-// --- Render: Cards ---
+// --- Filter items ---
 function getFilteredItems(summary) {
   let items = summary.recentItems || [];
-
-  // Status filter
-  if (state.filterStatus !== "all") {
-    items = items.filter((i) => i.status === state.filterStatus);
-  }
 
   // Priority filter
   if (state.filterPriority !== "all") {
@@ -150,28 +162,33 @@ function getFilteredItems(summary) {
       (i.categoryName || "").toLowerCase().includes(q) ||
       (i.nextStep || "").toLowerCase().includes(q) ||
       (i.followUpWith || "").toLowerCase().includes(q) ||
+      (i.rawText || "").toLowerCase().includes(q) ||
       String(i.id).includes(q)
     );
   }
 
-  // Sort: open first, then by priority (ALTA > MEDIA > BAIXA), then by due date
+  // Sort: priority (ALTA > MEDIA > BAIXA), then by due date, then newest
   const priOrder = { ALTA: 3, MEDIA: 2, BAIXA: 1 };
-  const statusOrder = { open: 3, done: 2, eliminated: 1 };
   items.sort((a, b) => {
-    const sd = (statusOrder[b.status] || 0) - (statusOrder[a.status] || 0);
-    if (sd !== 0) return sd;
     const pd = (priOrder[b.priority] || 0) - (priOrder[a.priority] || 0);
     if (pd !== 0) return pd;
+    // Due date: items with due date first, earliest first
+    if (a.dueAt && !b.dueAt) return -1;
+    if (!a.dueAt && b.dueAt) return 1;
+    if (a.dueAt && b.dueAt) {
+      const dd = new Date(a.dueAt) - new Date(b.dueAt);
+      if (dd !== 0) return dd;
+    }
     return new Date(b.createdAt) - new Date(a.createdAt);
   });
 
   return items;
 }
 
+// --- Render: Single Card ---
 function renderCard(item) {
   const isExpanded = state.expandedId === item.id;
   const expandedClass = isExpanded ? " expanded" : "";
-  const statusClass = item.status;
   const priClass = `pri-${item.priority}`;
 
   // Due tag
@@ -187,13 +204,41 @@ function renderCard(item) {
     }
   }
 
-  // Detail section
+  // PRIMARY: Action title (what to do)
+  const actionTitle = item.actionTitle
+    ? `<h3 class="card-action-title">${esc(item.actionTitle)}</h3>`
+    : "";
+
+  // SECONDARY: AI interpretation
+  const interpretation = item.summaryPtBr
+    ? `<p class="card-interpretation">${esc(item.summaryPtBr)}</p>`
+    : "";
+
+  // Key info visible without expand
+  const keyInfoRows = [];
+  if (item.nextStep) {
+    keyInfoRows.push(`<div class="key-info-row"><span class="key-info-label">Proximo:</span><span class="key-info-value">${esc(item.nextStep)}</span></div>`);
+  }
+  if (item.followUpWith && item.followUpWith !== "PENDENTE_DONO" && item.followUpWith.toLowerCase() !== "definir responsavel e cobrar atualizacao") {
+    keyInfoRows.push(`<div class="key-info-row"><span class="key-info-label">Responsavel:</span><span class="key-info-value">${esc(item.followUpWith)}</span></div>`);
+  }
+  const keyInfo = keyInfoRows.length > 0
+    ? `<div class="card-key-info">${keyInfoRows.join("")}</div>`
+    : "";
+
+  // Raw text reference (shown in expanded detail)
+  const hasRawText = item.rawText && item.rawText.trim() && item.rawText.trim() !== item.summaryPtBr?.trim();
+  const rawTextSection = hasRawText
+    ? `<button type="button" class="raw-text-toggle" data-raw-toggle="${item.id}">Mensagem original</button>
+       <div class="raw-text-content" id="raw-${item.id}">${esc(item.rawText)}</div>`
+    : "";
+
+  // Detail section (expanded)
   const detail = `
     <div class="card-detail">
-      ${item.actionTitle ? `<div class="detail-row"><span class="detail-label">Titulo</span><span class="detail-value">${esc(item.actionTitle)}</span></div>` : ""}
-      ${item.nextStep ? `<div class="detail-row"><span class="detail-label">Proximo passo</span><span class="detail-value">${esc(item.nextStep)}</span></div>` : ""}
-      ${item.followUpWith ? `<div class="detail-row"><span class="detail-label">Responsavel</span><span class="detail-value">${esc(item.followUpWith)}</span></div>` : ""}
-      <div class="detail-row"><span class="detail-label">Acao</span><span class="detail-value">${esc(actionLabel(item.action))}</span></div>
+      ${rawTextSection}
+      ${item.actionDetails ? `<div class="detail-row"><span class="detail-label">Detalhes</span><span class="detail-value">${esc(item.actionDetails)}</span></div>` : ""}
+      <div class="detail-row"><span class="detail-label">Tipo</span><span class="detail-value">${esc(actionLabel(item.action))}</span></div>
       <div class="detail-row"><span class="detail-label">Criado</span><span class="detail-value">${new Date(item.createdAt).toLocaleString("pt-BR")}</span></div>
       ${item.processingError ? `<div class="detail-row"><span class="detail-label" style="color:var(--danger)">Erro</span><span class="detail-value" style="color:var(--danger)">${esc(item.processingError)}</span></div>` : ""}
       <div class="card-actions">
@@ -209,14 +254,15 @@ function renderCard(item) {
   `;
 
   return `
-    <article class="item-card ${statusClass} ${priClass}${expandedClass}" data-card-id="${item.id}">
-      <div class="card-top">
-        <p class="card-summary">${esc(item.summaryPtBr)}</p>
-      </div>
+    <article class="item-card ${priClass}${expandedClass}" draggable="true" data-card-id="${item.id}" data-card-status="${item.status}">
+      ${actionTitle}
+      ${interpretation}
+      ${keyInfo}
       <div class="card-meta">
         <span class="tag id-tag">#${item.id}</span>
         <span class="tag priority-${item.priority}">${priorityLabel(item.priority)}</span>
         <span class="tag category">${esc(item.categoryName)}</span>
+        <span class="tag type-tag">${inputTypeLabel(item.inputType)}</span>
         ${dueTag}
       </div>
       ${detail}
@@ -224,17 +270,33 @@ function renderCard(item) {
   `;
 }
 
-function renderCards(summary) {
+// --- Render: Kanban ---
+function renderKanban(summary) {
   const items = getFilteredItems(summary);
 
-  if (items.length === 0) {
-    cardsListNode.innerHTML = "";
-    emptyNode.style.display = "block";
-    return;
+  const grouped = { open: [], done: [], eliminated: [] };
+  for (const item of items) {
+    const bucket = grouped[item.status];
+    if (bucket) {
+      bucket.push(item);
+    }
   }
 
-  emptyNode.style.display = "none";
-  cardsListNode.innerHTML = items.map(renderCard).join("");
+  const totalFiltered = items.length;
+
+  for (const status of ["open", "done", "eliminated"]) {
+    const col = columns[status];
+    const group = grouped[status];
+    counts[status].textContent = group.length;
+
+    if (group.length === 0) {
+      col.innerHTML = `<div class="empty-state" style="padding:20px 10px;font-size:0.78rem">Nenhum card</div>`;
+    } else {
+      col.innerHTML = group.map(renderCard).join("");
+    }
+  }
+
+  emptyNode.style.display = totalFiltered === 0 ? "block" : "none";
 }
 
 // --- Full render ---
@@ -243,7 +305,7 @@ function renderAll() {
   renderAlerts(state.summary);
   renderStats(state.summary);
   renderCategoryFilter(state.summary);
-  renderCards(state.summary);
+  renderKanban(state.summary);
 }
 
 // --- Load data ---
@@ -256,9 +318,8 @@ async function load() {
     state.categories = categories;
     renderAll();
   } catch (error) {
-    // Only show error if we have no data yet; otherwise keep stale data visible
     if (!state.summary) {
-      cardsListNode.innerHTML = `<div class="empty-state">Erro ao carregar: ${esc(String(error))}</div>`;
+      colOpen.innerHTML = `<div class="empty-state">Erro ao carregar: ${esc(String(error))}</div>`;
     }
   } finally {
     state.loading = false;
@@ -270,21 +331,12 @@ setInterval(load, 30000);
 
 // --- Events: Filters ---
 document.addEventListener("click", (e) => {
-  const statusChip = e.target.closest("[data-filter-status]");
-  if (statusChip) {
-    state.filterStatus = statusChip.dataset.filterStatus;
-    document.querySelectorAll("[data-filter-status]").forEach((b) => b.classList.remove("active"));
-    statusChip.classList.add("active");
-    renderCards(state.summary);
-    return;
-  }
-
   const priChip = e.target.closest("[data-filter-priority]");
   if (priChip) {
     state.filterPriority = priChip.dataset.filterPriority;
     document.querySelectorAll("[data-filter-priority]").forEach((b) => b.classList.remove("active"));
     priChip.classList.add("active");
-    renderCards(state.summary);
+    renderKanban(state.summary);
     return;
   }
 
@@ -293,7 +345,7 @@ document.addEventListener("click", (e) => {
   if (card && !e.target.closest("button")) {
     const id = Number(card.dataset.cardId);
     state.expandedId = state.expandedId === id ? null : id;
-    renderCards(state.summary);
+    renderKanban(state.summary);
     return;
   }
 });
@@ -301,7 +353,7 @@ document.addEventListener("click", (e) => {
 // --- Events: Category filter ---
 categoryFilter.addEventListener("change", () => {
   state.filterCategory = categoryFilter.value;
-  renderCards(state.summary);
+  renderKanban(state.summary);
 });
 
 // --- Events: Search ---
@@ -310,7 +362,7 @@ searchInput.addEventListener("input", () => {
   clearTimeout(searchTimeout);
   searchTimeout = setTimeout(() => {
     state.search = searchInput.value.trim();
-    renderCards(state.summary);
+    renderKanban(state.summary);
   }, 200);
 });
 
@@ -346,6 +398,76 @@ document.addEventListener("click", (e) => {
 
   openEditModal(item);
 });
+
+// --- Events: Raw text toggle ---
+document.addEventListener("click", (e) => {
+  const toggle = e.target.closest("[data-raw-toggle]");
+  if (!toggle) return;
+
+  e.stopPropagation();
+  const id = toggle.dataset.rawToggle;
+  const content = document.getElementById(`raw-${id}`);
+  if (content) {
+    content.classList.toggle("visible");
+    toggle.textContent = content.classList.contains("visible") ? "Ocultar original" : "Mensagem original";
+  }
+});
+
+// --- Drag and Drop ---
+document.addEventListener("dragstart", (e) => {
+  const card = e.target.closest(".item-card[draggable]");
+  if (!card) return;
+
+  state.draggedId = Number(card.dataset.cardId);
+  card.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", card.dataset.cardId);
+});
+
+document.addEventListener("dragend", (e) => {
+  const card = e.target.closest(".item-card[draggable]");
+  if (card) card.classList.remove("dragging");
+  state.draggedId = null;
+
+  // Remove all drag-over highlights
+  document.querySelectorAll(".kanban-column.drag-over").forEach((col) => col.classList.remove("drag-over"));
+});
+
+// Allow drop on kanban columns
+for (const colEl of document.querySelectorAll(".kanban-column")) {
+  colEl.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    colEl.classList.add("drag-over");
+  });
+
+  colEl.addEventListener("dragleave", (e) => {
+    // Only remove if leaving the column itself
+    if (!colEl.contains(e.relatedTarget)) {
+      colEl.classList.remove("drag-over");
+    }
+  });
+
+  colEl.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    colEl.classList.remove("drag-over");
+
+    const cardId = Number(e.dataTransfer.getData("text/plain"));
+    const newStatus = colEl.dataset.status;
+    if (!cardId || !newStatus) return;
+
+    // Find the item to check current status
+    const item = state.summary?.recentItems?.find((i) => i.id === cardId);
+    if (!item || item.status === newStatus) return;
+
+    try {
+      await patchStatus(cardId, newStatus);
+      await load();
+    } catch (err) {
+      alert(`Erro ao mover #${cardId}: ${err}`);
+    }
+  });
+}
 
 // --- Edit modal ---
 function openEditModal(item) {

@@ -27,7 +27,7 @@ body {
 }
 
 .app {
-  max-width: 960px;
+  max-width: 1280px;
   margin: 0 auto;
   padding: 12px 16px 60px;
 }
@@ -149,17 +149,78 @@ body {
 
 .stat-pill .num { font-weight: 700; color: var(--text); }
 
-/* ---- Cards list ---- */
-.cards-list { display: grid; gap: 8px; }
+/* ---- Kanban Board ---- */
+.kanban-board {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+  margin-top: 8px;
+  min-height: 400px;
+}
 
+.kanban-column {
+  background: var(--bg);
+  border: 2px dashed transparent;
+  border-radius: var(--radius);
+  min-height: 200px;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.kanban-column.drag-over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.kanban-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.kanban-header h2 {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.kanban-count {
+  background: var(--line);
+  color: var(--text);
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.kanban-column[data-status="open"] .kanban-header h2 { color: var(--accent); }
+.kanban-column[data-status="done"] .kanban-header h2 { color: var(--ok); }
+.kanban-column[data-status="eliminated"] .kanban-header h2 { color: var(--muted); }
+
+.kanban-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 4px 8px;
+  min-height: 60px;
+}
+
+/* ---- Cards ---- */
 .item-card {
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  padding: 12px 14px;
-  cursor: pointer;
-  transition: border-color 0.12s, box-shadow 0.12s;
+  padding: 10px 12px;
+  cursor: grab;
+  transition: border-color 0.12s, box-shadow 0.12s, opacity 0.15s, transform 0.12s;
+  user-select: none;
 }
 
 .item-card:hover {
@@ -167,33 +228,67 @@ body {
   box-shadow: 0 2px 8px rgba(37,99,235,0.1);
 }
 
-.item-card.done { opacity: 0.6; border-left: 3px solid var(--ok); }
-.item-card.eliminated { opacity: 0.45; border-left: 3px solid var(--muted); }
+.item-card.dragging {
+  opacity: 0.4;
+  transform: scale(0.98);
+}
 
-.item-card.open.pri-ALTA { border-left: 3px solid var(--danger); }
-.item-card.open.pri-MEDIA { border-left: 3px solid var(--warn); }
-.item-card.open.pri-BAIXA { border-left: 3px solid var(--ok); }
+.item-card.pri-ALTA { border-left: 3px solid var(--danger); }
+.item-card.pri-MEDIA { border-left: 3px solid var(--warn); }
+.item-card.pri-BAIXA { border-left: 3px solid var(--ok); }
 
-.card-top {
+.kanban-column[data-status="done"] .item-card { opacity: 0.7; }
+.kanban-column[data-status="eliminated"] .item-card { opacity: 0.5; }
+
+/* Card: Action Title (PRIMARY) */
+.card-action-title {
+  margin: 0 0 4px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--text);
+}
+
+/* Card: AI Interpretation (SECONDARY) */
+.card-interpretation {
+  margin: 0 0 6px;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--text);
+  opacity: 0.85;
+}
+
+/* Card: Key info visible without expand */
+.card-key-info {
   display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 8px;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
 }
 
-.card-summary {
-  margin: 0;
-  font-size: 0.9rem;
-  font-weight: 500;
-  line-height: 1.35;
-  flex: 1;
+.key-info-row {
+  display: flex;
+  gap: 4px;
+  font-size: 0.72rem;
+  line-height: 1.3;
 }
 
+.key-info-label {
+  color: var(--accent);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.key-info-value {
+  color: var(--text);
+}
+
+/* Card: Tags */
 .card-meta {
   display: flex;
-  gap: 5px;
+  gap: 4px;
   flex-wrap: wrap;
-  margin-top: 6px;
+  margin-top: 4px;
 }
 
 .tag {
@@ -201,7 +296,7 @@ body {
   align-items: center;
   padding: 2px 7px;
   border-radius: 999px;
-  font-size: 0.65rem;
+  font-size: 0.62rem;
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -214,7 +309,9 @@ body {
 .tag.due { background: #fef3c7; color: #92400e; }
 .tag.overdue { background: var(--danger-bg); color: var(--danger); font-weight: 700; }
 .tag.id-tag { background: #f3f4f6; color: var(--muted); }
+.tag.type-tag { background: #f3f0ff; color: #6d28d9; }
 
+/* Card: Expanded detail */
 .card-detail {
   margin-top: 8px;
   padding-top: 8px;
@@ -224,17 +321,57 @@ body {
 
 .item-card.expanded .card-detail { display: block; }
 
+/* Raw text reference (collapsible) */
+.raw-text-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 0.68rem;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
+  margin-bottom: 6px;
+  transition: all 0.12s;
+}
+
+.raw-text-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.raw-text-content {
+  display: none;
+  background: #f9fafb;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--muted);
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.raw-text-content.visible { display: block; }
+
 .detail-row {
   display: flex;
   gap: 4px;
   margin-bottom: 4px;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   line-height: 1.4;
 }
 
 .detail-label {
   color: var(--muted);
-  min-width: 110px;
+  min-width: 100px;
   flex-shrink: 0;
   font-weight: 500;
 }
@@ -247,6 +384,7 @@ body {
   margin-top: 10px;
 }
 
+/* ---- Buttons ---- */
 .btn {
   padding: 6px 14px;
   border-radius: var(--radius);
@@ -355,6 +493,19 @@ dialog::backdrop { background: rgba(0,0,0,0.4); }
 }
 
 /* ---- Responsive ---- */
+@media (max-width: 900px) {
+  .kanban-board {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  .kanban-column {
+    min-height: auto;
+  }
+  .kanban-cards {
+    max-height: none;
+  }
+}
+
 @media (max-width: 640px) {
   .topbar { flex-wrap: wrap; }
   .search-box { max-width: 100%; order: 3; flex-basis: 100%; }
