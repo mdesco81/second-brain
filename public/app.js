@@ -256,7 +256,7 @@ function renderCard(item) {
             <a href="${fileUrl}" target="_blank" class="btn-file-open" title="Abrir em nova aba">&#8599;</a>
           </div>
           <div class="file-preview">
-            <img src="${fileUrl}" alt="Imagem anexada" class="file-preview-img" loading="lazy" />
+            <img src="${fileUrl}" alt="Imagem anexada" class="file-preview-img lightbox-trigger" loading="lazy" data-lightbox-src="${fileUrl}" />
           </div>
         </div>`;
     } else if (item.inputType === "pdf") {
@@ -265,7 +265,11 @@ function renderCard(item) {
           <div class="file-header">
             <span class="file-icon">&#128196;</span>
             <span class="file-label">Documento PDF</span>
+            <button type="button" class="pdf-preview-toggle" data-pdf-toggle="${item.id}">Mostrar previa</button>
             <a href="${fileUrl}" target="_blank" class="btn-file-open" title="Abrir PDF">&#8599;</a>
+          </div>
+          <div class="pdf-preview-wrapper" id="pdf-preview-${item.id}">
+            <iframe src="${fileUrl}#view=FitH&toolbar=0" class="pdf-preview-frame" title="Previa do PDF" loading="lazy"></iframe>
           </div>
         </div>`;
     } else if (item.inputType === "audio") {
@@ -475,6 +479,44 @@ document.addEventListener("click", (e) => {
   if (content) {
     content.classList.toggle("visible");
     toggle.textContent = content.classList.contains("visible") ? "Ocultar original" : "Mensagem original";
+  }
+});
+
+// --- Events: PDF preview toggle ---
+document.addEventListener("click", (e) => {
+  const toggle = e.target.closest("[data-pdf-toggle]");
+  if (!toggle) return;
+
+  e.stopPropagation();
+  const id = toggle.dataset.pdfToggle;
+  const wrapper = document.getElementById(`pdf-preview-${id}`);
+  if (wrapper) {
+    wrapper.classList.toggle("visible");
+    toggle.textContent = wrapper.classList.contains("visible") ? "Ocultar previa" : "Mostrar previa";
+  }
+});
+
+// --- Events: Image lightbox ---
+document.addEventListener("click", (e) => {
+  const trigger = e.target.closest(".lightbox-trigger");
+  if (!trigger) return;
+
+  e.stopPropagation();
+  const src = trigger.dataset.lightboxSrc;
+  if (!src) return;
+
+  const lightbox = document.getElementById("image-lightbox");
+  document.getElementById("lightbox-img").src = src;
+  lightbox.showModal();
+});
+
+document.getElementById("lightbox-close").addEventListener("click", () => {
+  document.getElementById("image-lightbox").close();
+});
+
+document.getElementById("image-lightbox").addEventListener("click", (e) => {
+  if (e.target === e.currentTarget) {
+    e.currentTarget.close();
   }
 });
 

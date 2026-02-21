@@ -591,6 +591,86 @@ dialog::backdrop { background: rgba(0,0,0,0.4); }
   padding: 2px 5px;
 }
 
+/* ---- PDF Preview ---- */
+.pdf-preview-toggle {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 0.68rem;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.12s;
+}
+
+.pdf-preview-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.pdf-preview-wrapper {
+  display: none;
+  margin-top: 6px;
+}
+
+.pdf-preview-wrapper.visible { display: block; }
+
+.pdf-preview-frame {
+  width: 100%;
+  height: 280px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: block;
+}
+
+/* ---- Lightbox ---- */
+.lightbox-dialog {
+  border: none;
+  border-radius: 8px;
+  padding: 8px;
+  background: rgba(0,0,0,0.92);
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 24px);
+  overflow: hidden;
+}
+
+.lightbox-dialog::backdrop {
+  background: rgba(0,0,0,0.7);
+}
+
+.lightbox-close {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  background: rgba(255,255,255,0.15);
+  border: none;
+  color: #fff;
+  font-size: 1.6rem;
+  cursor: pointer;
+  padding: 2px 10px;
+  border-radius: 6px;
+  z-index: 2;
+  transition: background 0.12s;
+}
+
+.lightbox-close:hover {
+  background: rgba(255,255,255,0.3);
+}
+
+.lightbox-img {
+  max-width: 90vw;
+  max-height: 85vh;
+  object-fit: contain;
+  display: block;
+  margin: 0 auto;
+  border-radius: 4px;
+}
+
+.file-preview-img.lightbox-trigger {
+  cursor: zoom-in;
+}
+
 /* ---- Responsive ---- */
 @media (max-width: 900px) {
   .kanban-board {
@@ -612,4 +692,6 @@ dialog::backdrop { background: rgba(0,0,0,0.4); }
   .filter-group { flex-wrap: wrap; }
   .field-row { grid-template-columns: 1fr; }
   .fab { bottom: 16px; right: 16px; width: 50px; height: 50px; font-size: 1.4rem; }
+  .pdf-preview-frame { height: 200px; }
+  .lightbox-img { max-width: 95vw; max-height: 80vh; }
 }
