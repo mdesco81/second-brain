@@ -5,6 +5,7 @@ import {
   AIClassificationOutput,
   AIIntakePlannerOutput,
   PlannerContextCandidate,
+  cleanTranscription,
   describeImage,
   embedText,
   embeddingModel,
@@ -237,13 +238,13 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
 
     const audioDurationSeconds = message.voice?.duration || message.audio?.duration || 0;
 
-    const transcription = await transcribeAudio({
+    const rawTranscription = await transcribeAudio({
       buffer,
       fileName,
       mimeType,
       whisperPrompt
     });
-    if (!transcription) {
+    if (!rawTranscription) {
       log.warn("Audio received without transcription", {
         fileName,
         filePath,
@@ -251,6 +252,13 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
         hasCaption: Boolean(rawText)
       });
     }
+
+    // Clean up messy transcription: remove filler words, fix punctuation,
+    // and insert --- markers at topic transitions to help the planner split.
+    const transcription = rawTranscription
+      ? await cleanTranscription(rawTranscription)
+      : null;
+
     const normalizedText =
       [rawText, transcription].filter(Boolean).join("\n").trim() || "Audio recebido sem transcricao automatica.";
 

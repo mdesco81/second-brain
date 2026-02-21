@@ -205,6 +205,68 @@ export async function transcribeAudio(params: {
   return null;
 }
 
+// ── Transcription cleanup (Claude Haiku) ─────────────────────────────
+
+const CLEANUP_MIN_LENGTH = 100;
+
+export async function cleanTranscription(rawTranscription: string): Promise<string> {
+  if (!anthropicClient || rawTranscription.length < CLEANUP_MIN_LENGTH) {
+    return rawTranscription;
+  }
+
+  try {
+    const response = await anthropicClient.messages.create({
+      model: env.ANTHROPIC_FAST_MODEL,
+      max_tokens: 2048,
+      system: [
+        "Voce recebe a transcricao bruta de um audio de voz em portugues brasileiro.",
+        "Sua tarefa e LIMPAR e ESTRUTURAR o texto, sem alterar o significado.",
+        "",
+        "REGRAS DE LIMPEZA:",
+        "- Remova palavras de preenchimento: 'eh', 'tipo', 'tipo assim', 'ne', 'entao', 'assim', 'la', 'sei la', 'sabe', 'ahn', 'hmm', 'bom'.",
+        "- Remova repeticoes (quando a pessoa fala a mesma coisa duas vezes seguidas).",
+        "- Corrija pontuacao e capitalize inicio de frase.",
+        "- Mantenha TODOS os nomes proprios, numeros, datas, valores e informacoes factuais intactos.",
+        "- NAO resuma, NAO interprete, NAO adicione informacao. Apenas limpe.",
+        "",
+        "SEGMENTACAO POR TOPICO (CRITICO):",
+        "- Quando detectar mudanca de assunto, pessoa, ou projeto, insira a marcacao exata: ---",
+        "- Coloque --- em uma linha separada entre os dois topicos.",
+        "- Sinais de mudanca: 'outra coisa', 'alem disso', 'ah e tambem', 'mudando de assunto', ou simplesmente o foco muda para outro tema/pessoa/tarefa.",
+        "- Mesmo sem marcador explicito na fala, se o assunto muda, insira ---.",
+        "- Se o audio tem apenas UM topico, NAO insira ---.",
+        "",
+        "EXEMPLO:",
+        "Input: 'eh tipo preciso ligar pro Joao ne sobre aquele site sabe e tambem eh outra coisa tenho que revisar o contrato do do fornecedor aquele la o ABC'",
+        "Output: 'Preciso ligar pro Joao sobre aquele site.\\n---\\nTenho que revisar o contrato do fornecedor ABC.'",
+        "",
+        "Retorne APENAS o texto limpo, sem explicacoes."
+      ].join("\n"),
+      messages: [
+        {
+          role: "user",
+          content: rawTranscription
+        }
+      ]
+    });
+
+    const textBlock = response.content.find((block) => block.type === "text");
+    const cleaned = textBlock?.text?.trim();
+    if (!cleaned || cleaned.length < rawTranscription.length * 0.3) {
+      // Safety: if cleanup removed too much (>70%), keep original
+      log.warn("Transcription cleanup removed too much content, keeping original", {
+        originalLength: rawTranscription.length,
+        cleanedLength: cleaned?.length ?? 0
+      });
+      return rawTranscription;
+    }
+    return cleaned;
+  } catch (error) {
+    log.warn("Transcription cleanup failed, keeping original", { error });
+    return rawTranscription;
+  }
+}
+
 // ── Image description (Claude) ───────────────────────────────────────
 
 type ImageMediaType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
@@ -383,6 +445,12 @@ export async function planIntakeWithContext(input: {
     "SPLIT DETECTION (HIGHEST PRIORITY — THIS IS A CRITICAL SYSTEM FEATURE):",
     "Before doing ANYTHING else, read the entire input and COUNT how many distinct action items, requests, or topics exist.",
     "If you find 2 or more, you MUST use mode='split' and return one card per topic. This is NON-NEGOTIABLE.",
+    "",
+    "TOPIC BOUNDARY MARKERS (strongest signal):",
+    "- Audio transcriptions are pre-processed. Topic boundaries are marked with '---' on a separate line.",
+    "- If the input contains '---' separators, each section between separators is ALMOST CERTAINLY a distinct topic.",
+    "- Count the sections: N sections = N cards minimum. This is the most reliable split signal.",
+    "- Even if '---' is absent, still check for the other signals below.",
     "",
     "HOW TO DETECT MULTIPLE TOPICS:",
     "1. DIFFERENT PEOPLE: 'cobrar Joao' + 'falar com Maria' = 2 cards, even if same project.",
