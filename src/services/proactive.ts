@@ -3,7 +3,9 @@ import { env } from "../config/env.js";
 import {
   insertProactiveRun,
   listOpenActionItems,
+  listOverdueItems,
   listProactiveChats,
+  listStaleItems,
   loadLast24hSnapshot,
   loadWeeklySummary
 } from "../db/schema.js";
@@ -14,8 +16,12 @@ import { log } from "../utils/logger.js";
 async function deliverDailyRun(chatIds: number[]): Promise<void> {
   const snapshot = await loadLast24hSnapshot();
   for (const chatId of chatIds) {
-    const focusItems = await listOpenActionItems(chatId, 3);
-    const message = buildDailyMessage(snapshot, focusItems);
+    const [focusItems, overdueItems, staleItems] = await Promise.all([
+      listOpenActionItems(chatId, 3),
+      listOverdueItems(chatId, 5),
+      listStaleItems(chatId, 3, 5)
+    ]);
+    const message = buildDailyMessage(snapshot, focusItems, overdueItems, staleItems);
     await sendText(chatId, message);
     await insertProactiveRun(chatId, message, "daily");
   }
@@ -76,11 +82,59 @@ export function startProactiveScheduler(): void {
     }
   );
 
+  // Afternoon follow-up: check overdue items at 15:00
+  const afternoonHour = Math.min(env.PROACTIVE_HOUR + 6, 17);
+  const afternoonExpression = `0 ${afternoonHour} * * *`;
+
+  cron.schedule(
+    afternoonExpression,
+    async () => {
+      try {
+        const chatIds = await listProactiveChats();
+        if (chatIds.length === 0) {
+          return;
+        }
+
+        for (const chatId of chatIds) {
+          const overdueItems = await listOverdueItems(chatId, 3);
+          if (overdueItems.length === 0) {
+            continue;
+          }
+
+          const lines = [
+            "Lembrete da tarde:",
+            ""
+          ];
+          for (const item of overdueItems) {
+            lines.push(`- #${item.id} ${item.actionTitle || item.summaryPtBr}`);
+            lines.push(`  Ja resolveu isso? /done ${item.id}`);
+          }
+          lines.push("", "Se nao conseguiu, me conta o que esta travando.");
+
+          const message = lines.join("\n");
+          await sendText(chatId, message);
+          await insertProactiveRun(chatId, message, "daily");
+        }
+
+        log.info("Afternoon follow-up delivered", { recipients: chatIds.length });
+      } catch (error) {
+        log.error("Afternoon follow-up failed", { error });
+      }
+    },
+    {
+      timezone: env.TIMEZONE
+    }
+  );
+
   log.info("Proactive scheduler started", {
     timezone: env.TIMEZONE,
     daily: {
       hour: env.PROACTIVE_HOUR,
       minute: env.PROACTIVE_MINUTE
+    },
+    afternoon: {
+      hour: afternoonHour,
+      minute: 0
     },
     weekly: {
       day: env.WEEKLY_REPORT_DAY,

@@ -7,6 +7,11 @@ function actionLabel(item: OpenActionItem): string {
   return `#${item.id} [${item.priority}] ${title}${due}${followUp}`;
 }
 
+function daysAgo(dateStr: string): number {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  return Math.floor(diff / (1000 * 60 * 60 * 24));
+}
+
 export function buildOpenActionsMessage(items: OpenActionItem[]): string {
   if (items.length === 0) {
     return "Nao ha acoes abertas no momento.";
@@ -22,25 +27,63 @@ export function buildOpenActionsMessage(items: OpenActionItem[]): string {
 
 export function buildDailyMessage(
   snapshot: { items: number; projects: number; categoriesUsed: number },
-  focusItems: OpenActionItem[]
+  focusItems: OpenActionItem[],
+  overdueItems?: OpenActionItem[],
+  staleItems?: OpenActionItem[]
 ): string {
-  const header = [
-    "Check-in diario do Second Brain:",
-    `Ultimas 24h: ${snapshot.items} itens, ${snapshot.projects} projetos tocados, ${snapshot.categoriesUsed} categorias usadas.`
+  const lines: string[] = [
+    "Bom dia! Check-in do Second Brain:"
   ];
 
-  if (focusItems.length === 0) {
-    return [...header, "", "Sem pendencias criticas hoje."].join("\n");
+  if (snapshot.items > 0) {
+    lines.push(`Ultimas 24h: ${snapshot.items} novos itens capturados.`);
   }
 
-  return [
-    ...header,
-    "",
-    "Foco recomendado de hoje:",
-    ...focusItems.map((item) => `- ${actionLabel(item)}`),
-    "",
-    "Me atualize com status para eu ajustar prioridades."
-  ].join("\n");
+  // Overdue items - most urgent
+  if (overdueItems && overdueItems.length > 0) {
+    lines.push("");
+    lines.push(`ATRASADOS (${overdueItems.length}):`);
+    for (const item of overdueItems.slice(0, 5)) {
+      const days = item.dueAt ? daysAgo(item.dueAt) : 0;
+      lines.push(`- #${item.id} ${item.actionTitle || item.summaryPtBr} (${days}d atrasado)`);
+      if (item.nextStep) {
+        lines.push(`  Proximo passo: ${item.nextStep}`);
+      }
+    }
+  }
+
+  // Today's focus
+  if (focusItems.length > 0) {
+    lines.push("");
+    lines.push("FOCO DE HOJE:");
+    for (const item of focusItems) {
+      lines.push(`- #${item.id} [${item.priority}] ${item.actionTitle || item.summaryPtBr}`);
+      if (item.nextStep) {
+        lines.push(`  Proximo passo: ${item.nextStep}`);
+      }
+    }
+  }
+
+  // Stale items - need attention
+  if (staleItems && staleItems.length > 0) {
+    lines.push("");
+    lines.push("PARADOS HA DIAS (preciso de update):");
+    for (const item of staleItems.slice(0, 3)) {
+      const days = daysAgo(item.createdAt);
+      lines.push(`- #${item.id} ${item.actionTitle || item.summaryPtBr} (${days}d sem update)`);
+      lines.push(`  Ja resolveu? Responda /done ${item.id} ou me atualize.`);
+    }
+  }
+
+  if (focusItems.length === 0 && (!overdueItems || overdueItems.length === 0)) {
+    lines.push("");
+    lines.push("Tudo em dia! Sem pendencias criticas.");
+  } else {
+    lines.push("");
+    lines.push("Me atualize: mande um audio ou texto com o status.");
+  }
+
+  return lines.join("\n");
 }
 
 export function buildWeeklyMessage(summary: {

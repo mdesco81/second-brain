@@ -1017,6 +1017,111 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
   };
 }
 
+export async function listOverdueItems(chatId?: number, limit = 10): Promise<OpenActionItem[]> {
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    category_name: string;
+    summary_pt_br: string;
+    action: string;
+    action_title: string | null;
+    next_step: string | null;
+    follow_up_with: string | null;
+    due_at: string | null;
+    created_at: string;
+    priority: string | null;
+  }>(
+    `SELECT i.id,
+            i.chat_id::TEXT,
+            c.name AS category_name,
+            i.summary_pt_br,
+            i.action,
+            i.action_title,
+            i.next_step,
+            i.follow_up_with,
+            i.due_at::TEXT,
+            i.created_at::TEXT,
+            i.priority
+     FROM inbox_items i
+     JOIN categories c ON c.id = i.category_id
+     WHERE i.status = 'open'
+       AND i.action <> 'NONE'
+       AND i.due_at < CURRENT_DATE
+       AND ($1::BIGINT IS NULL OR i.chat_id = $1)
+     ORDER BY i.due_at ASC, i.priority DESC
+     LIMIT $2`,
+    [chatId ?? null, limit]
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    chatId: Number(row.chat_id),
+    categoryName: row.category_name,
+    summaryPtBr: row.summary_pt_br,
+    action: row.action,
+    actionTitle: row.action_title ?? undefined,
+    nextStep: row.next_step ?? undefined,
+    followUpWith: row.follow_up_with ?? undefined,
+    dueAt: row.due_at ?? undefined,
+    createdAt: row.created_at,
+    priority: normalizePriority(row.priority)
+  }));
+}
+
+export async function listStaleItems(chatId?: number, staleDays = 3, limit = 10): Promise<OpenActionItem[]> {
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    category_name: string;
+    summary_pt_br: string;
+    action: string;
+    action_title: string | null;
+    next_step: string | null;
+    follow_up_with: string | null;
+    due_at: string | null;
+    created_at: string;
+    priority: string | null;
+  }>(
+    `SELECT i.id,
+            i.chat_id::TEXT,
+            c.name AS category_name,
+            i.summary_pt_br,
+            i.action,
+            i.action_title,
+            i.next_step,
+            i.follow_up_with,
+            i.due_at::TEXT,
+            i.created_at::TEXT,
+            i.priority
+     FROM inbox_items i
+     JOIN categories c ON c.id = i.category_id
+     WHERE i.status = 'open'
+       AND i.action <> 'NONE'
+       AND i.created_at < NOW() - INTERVAL '1 day' * $3
+       AND (i.due_at IS NULL OR i.due_at >= CURRENT_DATE)
+       AND ($1::BIGINT IS NULL OR i.chat_id = $1)
+     ORDER BY
+       CASE i.priority WHEN 'ALTA' THEN 3 WHEN 'MEDIA' THEN 2 ELSE 1 END DESC,
+       i.created_at ASC
+     LIMIT $2`,
+    [chatId ?? null, limit, staleDays]
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    chatId: Number(row.chat_id),
+    categoryName: row.category_name,
+    summaryPtBr: row.summary_pt_br,
+    action: row.action,
+    actionTitle: row.action_title ?? undefined,
+    nextStep: row.next_step ?? undefined,
+    followUpWith: row.follow_up_with ?? undefined,
+    dueAt: row.due_at ?? undefined,
+    createdAt: row.created_at,
+    priority: normalizePriority(row.priority)
+  }));
+}
+
 export async function closePool(): Promise<void> {
   await pool.end();
 }
