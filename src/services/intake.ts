@@ -44,6 +44,8 @@ interface ExtractedContent {
   inputType: InputType;
   rawText: string;
   normalizedText: string;
+  /** Full text extracted from PDF – used only for AI classification, not persisted as content. */
+  pdfExtractedText?: string;
   mediaPath?: string;
   metadata: Record<string, unknown>;
 }
@@ -296,10 +298,20 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
       }
     }
 
+    // For PDFs: keep normalizedText light (caption only + file reference).
+    // The full extracted text goes to pdfExtractedText for AI classification.
+    const pdfRef = inputType === "pdf" && mediaPath
+      ? `[Documento PDF armazenado: ${originalName}]`
+      : "";
+    const normalizedText = inputType === "pdf"
+      ? [rawText, pdfRef].filter(Boolean).join("\n").trim()
+      : [rawText, extractedText].filter(Boolean).join("\n").trim();
+
     return {
       inputType,
       rawText,
-      normalizedText: [rawText, extractedText].filter(Boolean).join("\n").trim(),
+      normalizedText,
+      pdfExtractedText: inputType === "pdf" && extractedText ? extractedText : undefined,
       mediaPath,
       metadata: {
         telegramFilePath: filePath,
@@ -427,7 +439,9 @@ function buildCandidateSearchText(candidate: ContinuationContextItem): string {
 }
 
 function buildIncomingSearchText(extracted: ExtractedContent): string {
-  return [extracted.rawText, extracted.normalizedText].filter(Boolean).join("\n").trim();
+  // For PDFs, use the extracted text for similarity search (not the short reference in normalizedText)
+  const textContent = extracted.pdfExtractedText || extracted.normalizedText;
+  return [extracted.rawText, textContent].filter(Boolean).join("\n").trim();
 }
 
 function isLikelyContinuationText(text: string): boolean {
@@ -597,11 +611,20 @@ async function persistCard(params: {
     normalizedText: params.extracted.normalizedText,
     createdAt: new Date(),
     sourceLabel,
-    itemId
+    itemId,
+    mediaPath: params.extracted.mediaPath,
+    inputType: params.extracted.inputType
   });
-  await updateInboxItemStoragePath(itemId, notePath);
 
-  const embedding = await embedText(`${card.summaryPtBr}\n${params.extracted.normalizedText}`);
+  // For PDFs, keep storage_path pointing to the original PDF file (not the note).
+  // For other types, update to the knowledge note path.
+  if (params.extracted.inputType !== "pdf" || !params.extracted.mediaPath) {
+    await updateInboxItemStoragePath(itemId, notePath);
+  }
+
+  // For embeddings, use the full PDF text (when available) for better similarity matching
+  const textForEmbedding = params.extracted.pdfExtractedText || params.extracted.normalizedText;
+  const embedding = await embedText(`${card.summaryPtBr}\n${textForEmbedding}`);
   if (embedding) {
     await upsertItemEmbedding({
       itemId,
@@ -681,7 +704,8 @@ async function executePlan(params: {
       throw new Error(`merge_target_not_found:${targetId}`);
     }
 
-    const mergedEmbedding = await embedText(`${mergeCard.summaryPtBr}\n${params.extracted.normalizedText}`);
+    const mergeTextForEmbedding = params.extracted.pdfExtractedText || params.extracted.normalizedText;
+    const mergedEmbedding = await embedText(`${mergeCard.summaryPtBr}\n${mergeTextForEmbedding}`);
     if (mergedEmbedding) {
       await upsertItemEmbedding({
         itemId: targetId,
@@ -914,8 +938,13 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
     ? extracted.metadata.audioDurationSeconds
     : undefined;
 
+  // For PDFs, send the full extracted text to the AI for classification
+  const textForAI = extracted.pdfExtractedText
+    ? [extracted.rawText, extracted.pdfExtractedText].filter(Boolean).join("\n").trim()
+    : extracted.normalizedText;
+
   let plan: AIIntakePlannerOutput | null = await planIntakeWithContext({
-    text: extracted.normalizedText,
+    text: textForAI,
     inputType: extracted.inputType,
     audioDurationSeconds: audioDuration,
     knownCategories: knownCategories.map((category) => ({
@@ -927,11 +956,11 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
 
   if (!plan) {
     log.warn("AI planner returned null on first attempt — retrying once", {
-      textLength: extracted.normalizedText.length,
+      textLength: textForAI.length,
       inputType: extracted.inputType
     });
     plan = await planIntakeWithContext({
-      text: extracted.normalizedText,
+      text: textForAI,
       inputType: extracted.inputType,
       audioDurationSeconds: audioDuration,
       knownCategories: knownCategories.map((category) => ({
@@ -944,9 +973,9 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
 
   if (!plan) {
     log.warn("AI planner returned null on retry — falling back to classifyContent", {
-      textLength: extracted.normalizedText.length
+      textLength: textForAI.length
     });
-    const fallback = await classifyContent(extracted.normalizedText);
+    const fallback = await classifyContent(textForAI);
     plan = {
       decision: {
         mode: "new",

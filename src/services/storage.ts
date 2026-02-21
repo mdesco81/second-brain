@@ -87,6 +87,8 @@ export async function writeKnowledgeNote(params: {
   createdAt: Date;
   sourceLabel: string;
   itemId: number;
+  mediaPath?: string;
+  inputType?: string;
 }): Promise<string> {
   const base = bucketPath(params.classification.bucket);
   const folder = toDailyFolder(base, params.createdAt);
@@ -97,7 +99,9 @@ export async function writeKnowledgeNote(params: {
   )}.md`;
   const target = path.join(folder, fileName);
 
-  const content = [
+  const isPdf = params.inputType === "pdf" && params.mediaPath;
+
+  const contentSections = [
     `# ${params.classification.actionTitle || params.classification.summaryPtBr}`,
     "",
     `- Item ID: ${params.itemId}`,
@@ -113,16 +117,32 @@ export async function writeKnowledgeNote(params: {
     `- Criado em: ${params.createdAt.toISOString()}`,
     "",
     "## Resumo",
-    params.classification.summaryPtBr,
-    "",
-    "## Conteudo Normalizado",
-    params.normalizedText,
-    "",
-    "## Conteudo Bruto",
-    params.rawText
-  ].join("\n");
+    params.classification.summaryPtBr
+  ];
 
-  await fs.writeFile(target, content, "utf8");
+  if (isPdf) {
+    contentSections.push(
+      "",
+      "## Documento PDF",
+      `Arquivo armazenado em: ${params.mediaPath}`,
+      "",
+      "> Para consultar o conteudo completo, abra o arquivo PDF diretamente."
+    );
+    if (params.rawText) {
+      contentSections.push("", "## Observacoes do usuario", params.rawText);
+    }
+  } else {
+    contentSections.push(
+      "",
+      "## Conteudo Normalizado",
+      params.normalizedText,
+      "",
+      "## Conteudo Bruto",
+      params.rawText
+    );
+  }
+
+  await fs.writeFile(target, contentSections.join("\n"), "utf8");
   return target;
 }
 
