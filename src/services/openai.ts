@@ -134,7 +134,7 @@ export async function transcribeAudio(params: {
     return null;
   }
 
-  const fallbackModels = ["gpt-4o-mini-transcribe", "gpt-4o-transcribe"];
+  const fallbackModels = ["gpt-5.2-transcribe", "gpt-5.2-mini-transcribe"];
   const models = [env.OPENAI_TRANSCRIBE_MODEL, ...fallbackModels].filter(
     (model, index, items) => Boolean(model) && items.indexOf(model) === index
   );
