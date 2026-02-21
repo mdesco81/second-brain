@@ -81,6 +81,7 @@ export interface DashboardSummary {
     categoryName: string;
     summaryPtBr: string;
     action: SuggestedAction;
+    actionTitle?: string;
     priority: ActionPriority;
     status: ActionStatus;
     dueAt?: string;

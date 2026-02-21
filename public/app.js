@@ -17,7 +17,8 @@ const state = {
   filterCategory: "all",
   search: "",
   expandedId: null,
-  editingItem: null
+  editingItem: null,
+  loading: false
 };
 
 // --- Helpers ---
@@ -83,28 +84,29 @@ async function patchItem(id, fields) {
 
 // --- Render: Alerts ---
 function renderAlerts(summary) {
+  const alerts = summary.alerts || {};
   const chips = [];
-  if (summary.alerts.overdue > 0) {
-    chips.push(`<span class="alert-chip danger">${summary.alerts.overdue} atrasado${summary.alerts.overdue > 1 ? "s" : ""}</span>`);
+  if (alerts.overdue > 0) {
+    chips.push(`<span class="alert-chip danger">${alerts.overdue} atrasado${alerts.overdue > 1 ? "s" : ""}</span>`);
   }
-  if (summary.alerts.dueToday > 0) {
-    chips.push(`<span class="alert-chip warn">${summary.alerts.dueToday} vence${summary.alerts.dueToday > 1 ? "m" : ""} hoje</span>`);
+  if (alerts.dueToday > 0) {
+    chips.push(`<span class="alert-chip warn">${alerts.dueToday} vence${alerts.dueToday > 1 ? "m" : ""} hoje</span>`);
   }
-  if (summary.alerts.missingOwner > 0) {
-    chips.push(`<span class="alert-chip info">${summary.alerts.missingOwner} sem responsavel</span>`);
+  if (alerts.missingOwner > 0) {
+    chips.push(`<span class="alert-chip info">${alerts.missingOwner} sem responsavel</span>`);
   }
   alertsNode.innerHTML = chips.join("");
 }
 
 // --- Render: Stats ---
 function renderStats(summary) {
-  const s = summary.statusBreakdown;
+  const s = summary.statusBreakdown || {};
   statsNode.innerHTML = [
-    `<span class="stat-pill"><span class="num">${summary.totalItems}</span> capturados</span>`,
-    `<span class="stat-pill"><span class="num">${s.open}</span> abertos</span>`,
-    `<span class="stat-pill"><span class="num">${s.done}</span> resolvidos</span>`,
-    `<span class="stat-pill"><span class="num">${s.eliminated}</span> eliminados</span>`,
-    `<span class="stat-pill"><span class="num">${summary.totalProjects}</span> projetos</span>`
+    `<span class="stat-pill"><span class="num">${summary.totalItems || 0}</span> capturados</span>`,
+    `<span class="stat-pill"><span class="num">${s.open || 0}</span> abertos</span>`,
+    `<span class="stat-pill"><span class="num">${s.done || 0}</span> resolvidos</span>`,
+    `<span class="stat-pill"><span class="num">${s.eliminated || 0}</span> eliminados</span>`,
+    `<span class="stat-pill"><span class="num">${summary.totalProjects || 0}</span> projetos</span>`
   ].join("");
 }
 
@@ -144,6 +146,7 @@ function getFilteredItems(summary) {
     const q = state.search.toLowerCase();
     items = items.filter((i) =>
       (i.summaryPtBr || "").toLowerCase().includes(q) ||
+      (i.actionTitle || "").toLowerCase().includes(q) ||
       (i.categoryName || "").toLowerCase().includes(q) ||
       (i.nextStep || "").toLowerCase().includes(q) ||
       (i.followUpWith || "").toLowerCase().includes(q) ||
@@ -187,6 +190,7 @@ function renderCard(item) {
   // Detail section
   const detail = `
     <div class="card-detail">
+      ${item.actionTitle ? `<div class="detail-row"><span class="detail-label">Titulo</span><span class="detail-value">${esc(item.actionTitle)}</span></div>` : ""}
       ${item.nextStep ? `<div class="detail-row"><span class="detail-label">Proximo passo</span><span class="detail-value">${esc(item.nextStep)}</span></div>` : ""}
       ${item.followUpWith ? `<div class="detail-row"><span class="detail-label">Responsavel</span><span class="detail-value">${esc(item.followUpWith)}</span></div>` : ""}
       <div class="detail-row"><span class="detail-label">Acao</span><span class="detail-value">${esc(actionLabel(item.action))}</span></div>
@@ -244,13 +248,20 @@ function renderAll() {
 
 // --- Load data ---
 async function load() {
+  if (state.loading) return;
+  state.loading = true;
   try {
     const [summary, categories] = await Promise.all([fetchDashboard(), fetchCategories()]);
     state.summary = summary;
     state.categories = categories;
     renderAll();
   } catch (error) {
-    cardsListNode.innerHTML = `<div class="empty-state">Erro ao carregar: ${esc(String(error))}</div>`;
+    // Only show error if we have no data yet; otherwise keep stale data visible
+    if (!state.summary) {
+      cardsListNode.innerHTML = `<div class="empty-state">Erro ao carregar: ${esc(String(error))}</div>`;
+    }
+  } finally {
+    state.loading = false;
   }
 }
 

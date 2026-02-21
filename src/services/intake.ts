@@ -142,6 +142,7 @@ async function enrichTextWithUrls(text: string): Promise<{ enrichedText: string;
     urls: validMetadata
   };
 }
+
 const CONTINUATION_MARKERS = [
   "sobre o tema anterior",
   "sobre o assunto anterior",

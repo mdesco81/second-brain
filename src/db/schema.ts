@@ -105,7 +105,8 @@ export async function ensureSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS next_step TEXT,
       ADD COLUMN IF NOT EXISTS follow_up_with TEXT,
       ADD COLUMN IF NOT EXISTS processing_stage TEXT NOT NULL DEFAULT 'capturado',
-      ADD COLUMN IF NOT EXISTS processing_error TEXT;
+      ADD COLUMN IF NOT EXISTS processing_error TEXT,
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
   `);
 
   await pool.query(`
@@ -582,7 +583,8 @@ export async function updateInboxItemOwnerById(itemId: number, owner: string): P
   const result = await pool.query<{ id: number }>(
     `UPDATE inbox_items
      SET follow_up_with = $2,
-         processing_error = NULL
+         processing_error = NULL,
+         updated_at = NOW()
      WHERE id = $1
      RETURNING id`,
     [itemId, owner]
@@ -619,7 +621,8 @@ export async function mergeIntoInboxItem(params: {
          follow_up_with = COALESCE($12, follow_up_with),
          normalized_text = normalized_text || E'\n\n[Complemento ' || NOW()::TEXT || E']\n' || $13,
          processing_stage = 'planejado',
-         processing_error = NULL
+         processing_error = NULL,
+         updated_at = NOW()
      WHERE id = $1
        AND chat_id = $2
        AND status = 'open'
@@ -719,6 +722,7 @@ export async function updateInboxItemStatus(chatId: number, itemId: number, stat
   const result = await pool.query<{ id: number }>(
     `UPDATE inbox_items
      SET status = $3,
+         updated_at = NOW(),
          processing_stage = CASE
            WHEN $3 = 'done' THEN 'concluido'
            WHEN $3 = 'eliminated' THEN 'eliminado'
@@ -736,6 +740,7 @@ export async function updateInboxItemStatusById(itemId: number, status: ActionSt
   const result = await pool.query<{ id: number }>(
     `UPDATE inbox_items
      SET status = $2,
+         updated_at = NOW(),
          processing_stage = CASE
            WHEN $2 = 'done' THEN 'concluido'
            WHEN $2 = 'eliminated' THEN 'eliminado'
@@ -844,6 +849,8 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
                   follow_up_with IS NULL
                   OR BTRIM(follow_up_with) = ''
                   OR lower(BTRIM(follow_up_with)) = 'responsavel interno'
+                  OR lower(BTRIM(follow_up_with)) = 'pendente_dono'
+                  OR lower(BTRIM(follow_up_with)) = 'definir responsavel e cobrar atualizacao'
                 )
             )::TEXT AS missing_owner
          FROM inbox_items`
@@ -869,6 +876,7 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
         category_name: string;
         summary_pt_br: string;
         action: string;
+        action_title: string | null;
         priority: string;
         status: ActionStatus;
         due_at: string | null;
@@ -883,6 +891,7 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
                 c.name AS category_name,
                 i.summary_pt_br,
                 i.action,
+                i.action_title,
                 i.priority,
                 i.status,
                 i.due_at::TEXT,
@@ -893,7 +902,7 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
          FROM inbox_items i
          JOIN categories c ON c.id = i.category_id
          ORDER BY i.created_at DESC
-         LIMIT 20`
+         LIMIT 100`
       ),
       listOpenActionItems(undefined, 30),
       pool.query<{ sent_at: string; message_text: string }>(
@@ -955,6 +964,7 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
       categoryName: row.category_name,
       summaryPtBr: row.summary_pt_br,
       action: row.action as DashboardSummary["recentItems"][number]["action"],
+      actionTitle: row.action_title ?? undefined,
       priority: normalizePriority(row.priority),
       status: row.status,
       dueAt: row.due_at ?? undefined,
@@ -1076,6 +1086,8 @@ export async function updateInboxItemFields(itemId: number, fields: {
     return false;
   }
 
+  setClauses.push("updated_at = NOW()");
+
   const result = await pool.query<{ id: number }>(
     `UPDATE inbox_items SET ${setClauses.join(", ")} WHERE id = $1 RETURNING id`,
     params
@@ -1090,7 +1102,7 @@ export async function loadDoneToday(chatId?: number): Promise<number> {
      WHERE status = 'done'
        AND action <> 'NONE'
        AND processing_stage = 'concluido'
-       AND created_at >= CURRENT_DATE
+       AND updated_at >= CURRENT_DATE
        AND ($1::BIGINT IS NULL OR chat_id = $1)`,
     [chatId ?? null]
   );

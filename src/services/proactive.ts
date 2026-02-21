@@ -17,56 +17,72 @@ import { log } from "../utils/logger.js";
 async function deliverDailyRun(chatIds: number[]): Promise<void> {
   const snapshot = await loadLast24hSnapshot();
   for (const chatId of chatIds) {
-    const [focusItems, overdueItems, staleItems] = await Promise.all([
-      listOpenActionItems(chatId, 8),
-      listOverdueItems(chatId, 5),
-      listStaleItems(chatId, 3, 5)
-    ]);
-    const message = buildDailyMessage(snapshot, focusItems, overdueItems, staleItems);
-    await sendText(chatId, message);
-    await insertProactiveRun(chatId, message, "daily");
+    try {
+      const [focusItems, overdueItems, staleItems] = await Promise.all([
+        listOpenActionItems(chatId, 8),
+        listOverdueItems(chatId, 5),
+        listStaleItems(chatId, 3, 5)
+      ]);
+      const message = buildDailyMessage(snapshot, focusItems, overdueItems, staleItems);
+      await sendText(chatId, message);
+      await insertProactiveRun(chatId, message, "daily");
+    } catch (error) {
+      log.error("Daily delivery failed for chat", { chatId, error });
+    }
   }
   log.info("Daily proactive run delivered", { recipients: chatIds.length, snapshot });
 }
 
 async function deliverAfternoonRun(chatIds: number[]): Promise<void> {
   for (const chatId of chatIds) {
-    const [overdueItems, staleItems] = await Promise.all([
-      listOverdueItems(chatId, 3),
-      listStaleItems(chatId, 2, 3)
-    ]);
+    try {
+      const [overdueItems, staleItems] = await Promise.all([
+        listOverdueItems(chatId, 3),
+        listStaleItems(chatId, 2, 3)
+      ]);
 
-    if (overdueItems.length === 0 && staleItems.length === 0) {
-      continue;
+      if (overdueItems.length === 0 && staleItems.length === 0) {
+        continue;
+      }
+
+      const message = buildAfternoonMessage(overdueItems, staleItems);
+      await sendText(chatId, message);
+      await insertProactiveRun(chatId, message, "daily");
+    } catch (error) {
+      log.error("Afternoon delivery failed for chat", { chatId, error });
     }
-
-    const message = buildAfternoonMessage(overdueItems, staleItems);
-    await sendText(chatId, message);
-    await insertProactiveRun(chatId, message, "daily");
   }
   log.info("Afternoon follow-up delivered", { recipients: chatIds.length });
 }
 
 async function deliverEveningRun(chatIds: number[]): Promise<void> {
   for (const chatId of chatIds) {
-    const [doneToday, highPriority] = await Promise.all([
-      loadDoneToday(chatId),
-      listOpenActionItems(chatId, 3)
-    ]);
+    try {
+      const [doneToday, highPriority] = await Promise.all([
+        loadDoneToday(chatId),
+        listOpenActionItems(chatId, 3)
+      ]);
 
-    const message = buildEveningMessage(doneToday, highPriority);
-    await sendText(chatId, message);
-    await insertProactiveRun(chatId, message, "daily");
+      const message = buildEveningMessage(doneToday, highPriority);
+      await sendText(chatId, message);
+      await insertProactiveRun(chatId, message, "daily");
+    } catch (error) {
+      log.error("Evening delivery failed for chat", { chatId, error });
+    }
   }
   log.info("Evening wrap-up delivered", { recipients: chatIds.length });
 }
 
 async function deliverWeeklyRun(chatIds: number[]): Promise<void> {
   for (const chatId of chatIds) {
-    const summary = await loadWeeklySummary(chatId);
-    const message = buildWeeklyMessage(summary);
-    await sendText(chatId, message);
-    await insertProactiveRun(chatId, message, "weekly");
+    try {
+      const summary = await loadWeeklySummary(chatId);
+      const message = buildWeeklyMessage(summary);
+      await sendText(chatId, message);
+      await insertProactiveRun(chatId, message, "weekly");
+    } catch (error) {
+      log.error("Weekly delivery failed for chat", { chatId, error });
+    }
   }
   log.info("Weekly proactive run delivered", { recipients: chatIds.length });
 }
