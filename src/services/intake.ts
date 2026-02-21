@@ -915,9 +915,27 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
   }
 
   const decisionMode = normalizeDecisionMode(plan.decision.mode);
+
+  // --- Smart confidence override ---
+  // If there are NO open candidates, this is definitely a new card — skip asking the user.
+  // If the AI says "new" and no candidates scored above a meaningful threshold, also auto-register.
+  const SIMILAR_CANDIDATE_THRESHOLD = 0.25;
+  const hasRelevantCandidates = contextCandidates.some((c) => (c.similarityScore ?? 0) >= SIMILAR_CANDIDATE_THRESHOLD);
+
+  if (contextCandidates.length === 0 || (decisionMode === "new" && !hasRelevantCandidates)) {
+    // Force new card — no ambiguity when nothing similar exists
+    plan.decision.mode = "new";
+    plan.decision.confidence = Math.max(plan.decision.confidence ?? 0, 0.90);
+    log.info("Auto-registering as new card (no relevant candidates found)", {
+      candidateCount: contextCandidates.length,
+      hasRelevantCandidates,
+      originalConfidence: plan.decision.confidence
+    });
+  }
+
   const hasLowConfidence = decisionMode !== "split" && (plan.decision.confidence ?? 0) < AUTO_DECISION_THRESHOLD;
 
-  if (hasLowConfidence) {
+  if (hasLowConfidence && hasRelevantCandidates) {
     await createPendingDecision({
       chatId,
       decisionType: "relation",
@@ -929,42 +947,38 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
       }
     });
 
-    // Build a helpful question showing the top candidates so the user can decide
+    // Build a helpful question showing WHY we think items are similar
     const topCandidatesForDisplay = contextCandidates
-      .filter((c) => (c.similarityScore ?? 0) > 0.1)
+      .filter((c) => (c.similarityScore ?? 0) >= SIMILAR_CANDIDATE_THRESHOLD)
       .slice(0, 3);
 
     const candidateLines = topCandidatesForDisplay.map(
-      (c) => `  #${c.id} [${c.priority}] ${c.summaryPtBr}`
+      (c) => {
+        const pct = Math.round((c.similarityScore ?? 0) * 100);
+        return `  #${c.id} [${c.priority}] ${c.summaryPtBr} (${pct}% similar)`;
+      }
     );
 
     const questionLines = [
-      "Nao tenho certeza se isso eh novo ou complemento de algo existente."
+      "Encontrei cards parecidos com o que voce mandou:"
     ];
 
-    if (candidateLines.length > 0) {
-      questionLines.push(
-        "",
-        "Cards abertos que podem estar relacionados:",
-        ...candidateLines,
-        ""
-      );
-      if (plan.decision.targetItemId) {
-        questionLines.push(`Meu palpite: complemento do #${plan.decision.targetItemId}`);
-      }
-      questionLines.push(
-        "",
-        "Responda:",
-        "- `complemento` ou `complemento #id` para integrar",
-        "- `novo` para criar card separado"
-      );
-    } else {
-      questionLines.push(
-        "",
-        "Nao encontrei cards parecidos abertos.",
-        "Responda `novo` para criar ou `complemento #id` se souber qual card atualizar."
-      );
+    questionLines.push(
+      "",
+      ...candidateLines,
+      ""
+    );
+    if (plan.decision.targetItemId) {
+      questionLines.push(`Meu palpite: complemento do #${plan.decision.targetItemId}`);
     }
+    questionLines.push(
+      "",
+      `Motivo: ${plan.decision.reasonPtBr || "Topico ou contexto similar"}`,
+      "",
+      "Responda:",
+      "- `complemento` ou `complemento #id` para integrar",
+      "- `novo` para criar card separado"
+    );
 
     await sendText(chatId, questionLines.join("\n"));
     return;
