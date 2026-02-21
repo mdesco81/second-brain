@@ -62,6 +62,13 @@ const openaiClient = env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: env.OPENAI_API_KEY })
   : null;
 
+if (!anthropicClient) {
+  log.warn("ANTHROPIC_API_KEY not set — Claude AI is DISABLED. All classification will use keyword fallback only.");
+}
+if (!openaiClient) {
+  log.warn("OPENAI_API_KEY not set — audio transcription and embeddings are DISABLED.");
+}
+
 export function hasAI(): boolean {
   return Boolean(anthropicClient);
 }
@@ -309,6 +316,7 @@ export async function planIntakeWithContext(input: {
   openContext: PlannerContextCandidate[];
 }): Promise<AIIntakePlannerOutput | null> {
   if (!anthropicClient) {
+    log.warn("planIntakeWithContext skipped — anthropicClient is null (ANTHROPIC_API_KEY missing)");
     return null;
   }
 
@@ -344,8 +352,11 @@ export async function planIntakeWithContext(input: {
     "- NEW: Only if clearly DIFFERENT subject with no overlap.",
     "- SPLIT: Only if message contains 2+ clearly INDEPENDENT actionable topics.",
     "",
-    "CONFIDENCE: If ANY open candidate could relate (same category, person, project), set confidence >= 0.75 and merge.",
-    "Only set confidence < 0.72 if genuinely uncertain.",
+    "CONFIDENCE RULES:",
+    "- If the open candidates list is EMPTY (no cards exist), ALWAYS set mode='new' and confidence >= 0.90. There is nothing to merge with.",
+    "- If open candidates exist but NONE relate to the incoming message, set mode='new' and confidence >= 0.85.",
+    "- If ANY open candidate clearly relates (same topic, person, project), set confidence >= 0.75 and merge.",
+    "- Only set confidence < 0.72 if there ARE plausible candidates and you are genuinely uncertain which one matches.",
     "",
     "LANGUAGE: Think in English for accuracy, ALL output in Brazilian Portuguese.",
     "OWNER: If unknown, write exactly 'PENDENTE_DONO'.",
@@ -398,6 +409,7 @@ export async function planIntakeWithContext(input: {
 
 export async function classifyWithAI(input: AIClassificationInput): Promise<AIClassificationOutput | null> {
   if (!anthropicClient) {
+    log.warn("classifyWithAI skipped — anthropicClient is null (ANTHROPIC_API_KEY missing)");
     return null;
   }
 

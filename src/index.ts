@@ -6,6 +6,7 @@ import { startPollingLoop, stopPollingLoop } from "./services/polling.js";
 import { startProactiveScheduler } from "./services/proactive.js";
 import { ensureKnowledgeTree } from "./services/storage.js";
 import { deleteWebhook, setWebhook } from "./services/telegram.js";
+import { hasAI } from "./services/openai.js";
 import { log } from "./utils/logger.js";
 
 async function configureWebhookWithRetry(): Promise<NodeJS.Timeout> {
@@ -36,12 +37,19 @@ async function bootstrap(): Promise<void> {
 
   startProactiveScheduler();
 
+  if (!hasAI()) {
+    log.warn("⚠ Claude AI is NOT available — check ANTHROPIC_API_KEY. Cards will use keyword-only fallback.");
+  } else {
+    log.info("Claude AI is active and ready for classification.");
+  }
+
   const app = createApp();
   const server = app.listen(env.PORT, () => {
     log.info("Second Brain server running", {
       port: env.PORT,
       mode: env.TELEGRAM_MODE,
-      storageRoot: env.STORAGE_ROOT
+      storageRoot: env.STORAGE_ROOT,
+      aiEnabled: hasAI()
     });
   });
 

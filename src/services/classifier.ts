@@ -1,6 +1,7 @@
 import { ActionPriority, ClassificationResult } from "../types/domain.js";
 import { listCategories } from "../db/schema.js";
 import { classifyWithAI } from "./openai.js";
+import { log } from "../utils/logger.js";
 
 const KEYWORD_RULES: Array<{
   keywords: string[];
@@ -187,23 +188,70 @@ function defaultNextStepByAction(action: ClassificationResult["action"]): string
   return undefined;
 }
 
+function extractKeyFacts(text: string): { people: string[]; actionVerbs: string[]; shortSummary: string } {
+  const people: string[] = [];
+  // Capture capitalized names (2+ letters) that appear after common preposition patterns or standalone
+  const namePatterns = [
+    /\b(?:com|para|do|da|de|ao|pela|pelo)\s+([A-ZÀ-Ÿ][a-zà-ÿ]{1,20}(?:\s+[A-ZÀ-Ÿ][a-zà-ÿ]{1,20})?)/g,
+    /\b([A-ZÀ-Ÿ][a-zà-ÿ]{2,20})\b/g
+  ];
+  const stopWords = new Set(["audio", "que", "como", "para", "sobre", "isso", "aqui", "esse", "essa", "ainda", "muito", "mais", "uma", "voce", "precisamos", "preciso", "precisa"]);
+  for (const pattern of namePatterns) {
+    for (const match of text.matchAll(pattern)) {
+      const name = match[1]?.trim();
+      if (name && name.length > 1 && !stopWords.has(name.toLowerCase()) && !people.includes(name)) {
+        people.push(name);
+      }
+    }
+  }
+
+  const verbPatterns = /\b(agendar|marcar|ligar|enviar|cobrar|revisar|levar|buscar|pagar|comprar|resolver|fazer|falar|confirmar|cancelar|verificar|organizar|preparar|entregar|atualizar)\b/gi;
+  const actionVerbs: string[] = [];
+  for (const match of text.matchAll(verbPatterns)) {
+    const verb = match[1].toLowerCase();
+    if (!actionVerbs.includes(verb)) {
+      actionVerbs.push(verb);
+    }
+  }
+
+  // Build a cleaner summary: first sentence or up to 120 chars, cleaned up
+  const sentences = text.replace(/\s+/g, " ").trim().split(/[.!?]+/).filter(Boolean);
+  const shortSummary = truncateText(sentences[0] || text, 120);
+
+  return { people, actionVerbs, shortSummary };
+}
+
+function buildFallbackActionTitle(facts: { actionVerbs: string[]; people: string[]; shortSummary: string }): string {
+  const verb = facts.actionVerbs[0];
+  const person = facts.people[0];
+  if (verb && person) {
+    return `${verb.charAt(0).toUpperCase() + verb.slice(1)} — ${person}`;
+  }
+  if (verb) {
+    return `${verb.charAt(0).toUpperCase() + verb.slice(1)} — definir detalhes`;
+  }
+  return truncateText(facts.shortSummary, 60);
+}
+
 function fallbackClassification(text: string): ClassificationResult {
   const normalized = text.toLowerCase();
   const matched = KEYWORD_RULES.find((rule) => rule.keywords.some((keyword) => normalized.includes(keyword)));
   const priority = inferFallbackPriority(text);
+  const facts = extractKeyFacts(text);
 
   if (matched) {
     const dueDateISO = inferDueDateFromText(text) || inferDueDateFromPriority(priority);
+    const actionTitle = buildFallbackActionTitle(facts);
     return {
-      summaryPtBr: `[Classificacao automatica] ${truncateText(text, 200)} — requer revisao e interpretacao da IA.`,
+      summaryPtBr: facts.shortSummary,
       categoryName: matched.categoryName,
       categoryDescription: matched.description,
       bucket: matched.bucket,
       action: matched.action,
-      actionTitle: matched.action === "CREATE_TASK" ? "Executar proxima etapa do tema" : "Registrar referencia relevante",
+      actionTitle,
       actionDetails: text,
       nextStepPtBr: defaultNextStepByAction(matched.action),
-      followUpWithPtBr: normalizeFollowUpWith(undefined, matched.action, text),
+      followUpWithPtBr: facts.people[0] || normalizeFollowUpWith(undefined, matched.action, text),
       dueDateISO,
       priority,
       confidence: 0.62,
@@ -211,21 +259,25 @@ function fallbackClassification(text: string): ClassificationResult {
     };
   }
 
+  const hasAction = facts.actionVerbs.length > 0;
+  const action = hasAction ? "CREATE_TASK" as const : "FOLLOW_UP" as const;
+  const bucket = hasAction ? "AREAS" as const : "RESEARCH" as const;
+  const actionTitle = buildFallbackActionTitle(facts);
+
   return {
-    summaryPtBr: `[Classificacao automatica] ${truncateText(text, 200)} — requer contexto adicional para interpretacao.`,
+    summaryPtBr: facts.shortSummary,
     categoryName: "Inbox Geral",
     categoryDescription: "Itens ainda sem classificacao especifica",
-    bucket: "RESEARCH",
-    action: "FOLLOW_UP",
-    actionTitle: "Solicitar contexto",
-    actionDetails: "Item precisa de mais contexto para acao concreta.",
-    nextStepPtBr: "Responder com contexto adicional: objetivo, responsavel e prazo esperado.",
-    followUpWithPtBr: normalizeFollowUpWith(undefined, "FOLLOW_UP", text),
+    bucket,
+    action,
+    actionTitle,
+    actionDetails: text,
+    nextStepPtBr: defaultNextStepByAction(action),
+    followUpWithPtBr: facts.people[0] || normalizeFollowUpWith(undefined, action, text),
     dueDateISO: inferDueDateFromText(text) || inferDueDateFromPriority(priority),
     priority,
-    confidence: 0.45,
-    shouldCreateCategory: true,
-    followUpQuestionPtBr: "Pode me dar mais contexto para eu organizar isso melhor?"
+    confidence: 0.5,
+    shouldCreateCategory: true
   };
 }
 
@@ -241,6 +293,7 @@ export async function classifyContent(rawText: string): Promise<ClassificationRe
   });
 
   if (!aiResult) {
+    log.warn("classifyContent: AI returned null — using keyword-only fallback classification");
     return fallbackClassification(rawText);
   }
 
