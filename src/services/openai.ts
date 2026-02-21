@@ -239,7 +239,7 @@ export async function describeImage(base64DataUrl: string): Promise<string | nul
           content: [
             {
               type: "text",
-              text: "Extract the most relevant text and meaning from this image. Return in plain text in Portuguese (Brazil)."
+              text: "Extraia o texto e o significado mais relevante desta imagem. Se houver texto em ingles, traduza para portugues. Retorne em texto corrido em Portugues do Brasil."
             },
             {
               type: "image",
@@ -390,7 +390,14 @@ export async function planIntakeWithContext(input: {
     "- If ANY open candidate clearly relates (same topic, person, project), set confidence >= 0.75 and merge.",
     "- Only set confidence < 0.72 if there ARE plausible candidates and you are genuinely uncertain which one matches.",
     "",
-    "LANGUAGE: Think in English for accuracy, ALL output in Brazilian Portuguese.",
+    "LANGUAGE RULES (CRITICAL):",
+    "- The user sends messages predominantly in PORTUGUESE (Brazilian). This is the primary input language.",
+    "- Content in English will occasionally appear ONLY inside links, file attachments, or quoted technical terms — never treat English fragments as the user's own words.",
+    "- You may reason internally in any language, but ALL output fields (summaryPtBr, actionTitle, nextStepPtBr, actionDetails, followUpWithPtBr, categoryName, categoryDescription, reasonPtBr) MUST be in Brazilian Portuguese.",
+    "- Category names MUST be in Portuguese (e.g. 'Financeiro', 'Saude', 'Tecnologia' — never 'Finance', 'Health', 'Technology').",
+    "- If the input contains English text (e.g. from a link or document), translate/adapt the key points to Portuguese in your output.",
+    "- Person names stay as-is (do not translate names).",
+    "",
     "OWNER: If unknown, write exactly 'PENDENTE_DONO'.",
     "CONSTRAINT: Do not invent targetItemId outside provided candidates.",
     "",
@@ -481,7 +488,13 @@ export async function classifyWithAI(input: AIClassificationInput): Promise<AICl
     "",
     "LINKS/URLs: Set action=STORE_REFERENCE, bucket=RESOURCES. Explain WHY relevant. Keep URL in actionDetails.",
     "",
-    "ALL output in Brazilian Portuguese. Reuse categories. Fill actionTitle, nextStepPtBr, followUpWithPtBr for any action != NONE.",
+    "LANGUAGE RULES:",
+    "- Input is predominantly in PORTUGUESE (Brazilian). English appears only in links, attachments, or technical terms.",
+    "- ALL output fields MUST be in Brazilian Portuguese — including categoryName and categoryDescription.",
+    "- If input contains English content (from a link or file), translate/adapt key points to Portuguese.",
+    "- Person names stay as-is (do not translate names).",
+    "",
+    "Reuse existing categories when possible. Fill actionTitle, nextStepPtBr, followUpWithPtBr for any action != NONE.",
     "Only set dueDateISO for concrete dates/deadlines mentioned.",
     "",
     CLASSIFICATION_SCHEMA_DESCRIPTION,
