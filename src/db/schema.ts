@@ -1017,6 +1017,72 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
   };
 }
 
+export async function updateInboxItemFields(itemId: number, fields: {
+  summaryPtBr?: string;
+  categoryName?: string;
+  priority?: ActionPriority;
+  dueAt?: string | null;
+  nextStep?: string | null;
+  followUpWith?: string | null;
+  actionTitle?: string | null;
+}): Promise<boolean> {
+  const setClauses: string[] = [];
+  const params: unknown[] = [itemId];
+  let paramIndex = 2;
+
+  if (fields.summaryPtBr !== undefined) {
+    setClauses.push(`summary_pt_br = $${paramIndex}`);
+    params.push(fields.summaryPtBr);
+    paramIndex += 1;
+  }
+  if (fields.priority !== undefined) {
+    setClauses.push(`priority = $${paramIndex}`);
+    params.push(fields.priority);
+    paramIndex += 1;
+  }
+  if (fields.dueAt !== undefined) {
+    setClauses.push(`due_at = $${paramIndex}::DATE`);
+    params.push(fields.dueAt);
+    paramIndex += 1;
+  }
+  if (fields.nextStep !== undefined) {
+    setClauses.push(`next_step = $${paramIndex}`);
+    params.push(fields.nextStep);
+    paramIndex += 1;
+  }
+  if (fields.followUpWith !== undefined) {
+    setClauses.push(`follow_up_with = $${paramIndex}`);
+    params.push(fields.followUpWith);
+    paramIndex += 1;
+  }
+  if (fields.actionTitle !== undefined) {
+    setClauses.push(`action_title = $${paramIndex}`);
+    params.push(fields.actionTitle);
+    paramIndex += 1;
+  }
+  if (fields.categoryName !== undefined) {
+    const catResult = await pool.query<{ id: number }>(
+      `SELECT id FROM categories WHERE name = $1`,
+      [fields.categoryName]
+    );
+    if (catResult.rows[0]) {
+      setClauses.push(`category_id = $${paramIndex}`);
+      params.push(catResult.rows[0].id);
+      paramIndex += 1;
+    }
+  }
+
+  if (setClauses.length === 0) {
+    return false;
+  }
+
+  const result = await pool.query<{ id: number }>(
+    `UPDATE inbox_items SET ${setClauses.join(", ")} WHERE id = $1 RETURNING id`,
+    params
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 export async function loadDoneToday(chatId?: number): Promise<number> {
   const result = await pool.query<{ total: string }>(
     `SELECT COUNT(*)::TEXT AS total
