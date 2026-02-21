@@ -1,323 +1,406 @@
-const statsNode = document.getElementById("stats");
+// --- DOM refs ---
+const searchInput = document.getElementById("search");
 const alertsNode = document.getElementById("alerts");
-const workflowNode = document.getElementById("workflow");
-const todayFocusNode = document.getElementById("today-focus");
-const categoriesNode = document.getElementById("categories");
-const captureBreakdownNode = document.getElementById("capture-breakdown");
-const recentNode = document.getElementById("recent");
-const weeklyMetaNode = document.getElementById("weekly-meta");
-const weeklyDebriefNode = document.getElementById("weekly-debrief");
-const kanbanHighNode = document.getElementById("kanban-high");
-const kanbanMediumNode = document.getElementById("kanban-medium");
-const kanbanLowNode = document.getElementById("kanban-low");
-const statTemplate = document.getElementById("stat-template");
-const workflowTemplate = document.getElementById("workflow-template");
-const filtersNode = document.getElementById("recent-filters");
+const statsNode = document.getElementById("stats");
+const cardsListNode = document.getElementById("cards-list");
+const emptyNode = document.getElementById("empty-state");
+const categoryFilter = document.getElementById("filter-category");
+const editModal = document.getElementById("edit-modal");
+const editForm = document.getElementById("edit-form");
 
+// --- State ---
 const state = {
-  recentFilter: "all",
-  summary: null
+  summary: null,
+  categories: [],
+  filterStatus: "open",
+  filterPriority: "all",
+  filterCategory: "all",
+  search: "",
+  expandedId: null,
+  editingItem: null,
+  loading: false
 };
 
-function escapeHtml(value) {
+// --- Helpers ---
+function esc(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+    .replaceAll('"', "&quot;");
 }
 
-function buildStat(label, value, hint) {
-  const fragment = statTemplate.content.cloneNode(true);
-  fragment.querySelector(".label").textContent = label;
-  fragment.querySelector(".value").textContent = String(value);
-  fragment.querySelector(".hint").textContent = hint;
-  return fragment;
+function daysFromNow(dateStr) {
+  if (!dateStr) return null;
+  const diff = new Date(dateStr + "T00:00:00") - new Date(new Date().toISOString().slice(0, 10) + "T00:00:00");
+  return Math.round(diff / (1000 * 60 * 60 * 24));
 }
 
-function buildWorkflowStep(label, value) {
-  const fragment = workflowTemplate.content.cloneNode(true);
-  fragment.querySelector(".step-label").textContent = label;
-  fragment.querySelector(".step-value").textContent = String(value);
-  return fragment;
+function priorityLabel(p) {
+  if (p === "ALTA") return "Alta";
+  if (p === "MEDIA") return "Media";
+  return "Baixa";
 }
 
-function statusLabel(status) {
-  if (status === "done") {
-    return "resolvido";
-  }
-  if (status === "eliminated") {
-    return "eliminado";
-  }
-  return "aberto";
+function actionLabel(a) {
+  if (a === "CREATE_PROJECT") return "Projeto";
+  if (a === "CREATE_TASK") return "Tarefa";
+  if (a === "STORE_REFERENCE") return "Referencia";
+  if (a === "FOLLOW_UP") return "Follow-up";
+  return "Registro";
 }
 
-function actionLabel(action) {
-  if (action === "CREATE_PROJECT") {
-    return "Criar projeto";
-  }
-  if (action === "CREATE_TASK") {
-    return "Executar tarefa";
-  }
-  if (action === "STORE_REFERENCE") {
-    return "Registrar referencia";
-  }
-  if (action === "FOLLOW_UP") {
-    return "Fazer follow-up";
-  }
-  return "Somente registro";
+// --- API ---
+async function fetchDashboard() {
+  const r = await fetch("/api/dashboard");
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
 }
 
-function stageLabel(stage) {
-  if (stage === "capturado") return "capturado";
-  if (stage === "processando") return "processando";
-  if (stage === "interpretado") return "interpretado";
-  if (stage === "planejado") return "planejado";
-  if (stage === "concluido") return "concluido";
-  if (stage === "eliminado") return "eliminado";
-  if (stage === "falha") return "falha";
-  return "capturado";
+async function fetchCategories() {
+  const r = await fetch("/api/categories");
+  if (!r.ok) return [];
+  const data = await r.json();
+  return data.categories || [];
 }
 
-function statusButtons(id, status) {
-  if (status === "open") {
-    return `<div class="actions">
-      <button type="button" class="btn-action success" data-item-id="${id}" data-next-status="done">Resolver</button>
-      <button type="button" class="btn-action danger" data-item-id="${id}" data-next-status="eliminated">Eliminar</button>
-    </div>`;
-  }
-
-  return `<div class="actions">
-    <button type="button" class="btn-action" data-item-id="${id}" data-next-status="open">Reabrir</button>
-  </div>`;
-}
-
-function renderStats(summary) {
-  statsNode.innerHTML = "";
-  statsNode.append(
-    buildStat("Capturados", summary.totalItems, "Entradas totais"),
-    buildStat("Abertos", summary.statusBreakdown.open, "Itens em andamento"),
-    buildStat("Resolvidos", summary.statusBreakdown.done, "Concluídos"),
-    buildStat("Eliminados", summary.statusBreakdown.eliminated, "Descartados")
-  );
-}
-
-function renderAlerts(summary) {
-  alertsNode.innerHTML = `
-    <article class="alert-chip critical">
-      <p class="title">${escapeHtml(summary.alerts.overdue)} atrasados</p>
-      <p class="meta">Itens com prazo vencido e ainda abertos.</p>
-    </article>
-    <article class="alert-chip warning">
-      <p class="title">${escapeHtml(summary.alerts.dueToday)} vencem hoje</p>
-      <p class="meta">Priorize antes de virar atraso.</p>
-    </article>
-    <article class="alert-chip info">
-      <p class="title">${escapeHtml(summary.alerts.missingOwner)} sem responsável claro</p>
-      <p class="meta">Defina quem cobrar/procurar para não travar.</p>
-    </article>
-  `;
-}
-
-function renderWorkflow(summary) {
-  workflowNode.innerHTML = "";
-  workflowNode.append(
-    buildWorkflowStep("1. Captura", summary.workflow.captured),
-    buildWorkflowStep("2. Interpretação", summary.workflow.classified),
-    buildWorkflowStep("3. Ações definidas", summary.workflow.actionable),
-    buildWorkflowStep("4. Resolvidos", summary.workflow.resolved),
-    buildWorkflowStep("5. Eliminados", summary.workflow.eliminated)
-  );
-}
-
-function renderTodayFocus(summary) {
-  todayFocusNode.innerHTML = summary.todayFocus.length
-    ? summary.todayFocus
-        .map((item) => {
-          const due = item.dueAt ? ` | prazo ${escapeHtml(item.dueAt)}` : "";
-          const nextStep = item.nextStep ? `<p class="meta">Próximo passo: ${escapeHtml(item.nextStep)}</p>` : "";
-          const followUp = item.followUpWith ? `<p class="meta">Quem cobrar/procurar: ${escapeHtml(item.followUpWith)}</p>` : "";
-          return `<li>
-            <p class="meta">#${item.id} | ${escapeHtml(item.categoryName)} | ${escapeHtml(item.priority)}${due}</p>
-            <div class="title-line">
-              <p class="title">${escapeHtml(item.summaryPtBr)}</p>
-              <span class="action-pill">${escapeHtml(actionLabel(item.action))}</span>
-            </div>
-            ${nextStep}
-            ${followUp}
-            ${statusButtons(item.id, "open")}
-          </li>`;
-        })
-        .join("")
-    : "<li>Nenhum foco crítico aberto agora.</li>";
-}
-
-function renderCategories(summary) {
-  categoriesNode.innerHTML = summary.categories.length
-    ? summary.categories
-        .map((category) => `<li><p class="meta">${escapeHtml(category.total)} registros</p><p class="title">${escapeHtml(category.name)}</p></li>`)
-        .join("")
-    : "<li>Nenhuma categoria registrada.</li>";
-}
-
-function renderCaptureBreakdown(summary) {
-  captureBreakdownNode.innerHTML = summary.captureBreakdown.length
-    ? summary.captureBreakdown
-        .map((item) => `<li><p class="meta">${escapeHtml(item.inputType)}</p><p class="title">${escapeHtml(item.total)} itens</p></li>`)
-        .join("")
-    : "<li>Nenhuma captura registrada.</li>";
-}
-
-function renderWeeklyDebrief(summary) {
-  if (!summary.latestWeeklyDebrief) {
-    weeklyMetaNode.textContent = "Sem debrief semanal ainda.";
-    weeklyDebriefNode.textContent = "O debrief aparece aqui após o envio automático de domingo.";
-    return;
-  }
-
-  const sentAt = new Date(summary.latestWeeklyDebrief.sentAt).toLocaleString("pt-BR");
-  weeklyMetaNode.textContent = `Último envio: ${sentAt}`;
-  weeklyDebriefNode.textContent = summary.latestWeeklyDebrief.message;
-}
-
-function renderKanbanColumn(node, items) {
-  node.innerHTML = items.length
-    ? items
-        .map((item) => {
-          const due = item.dueAt ? ` | prazo ${escapeHtml(item.dueAt)}` : "";
-          const followUp = item.followUpWith ? `<p class="meta">Quem cobrar/procurar: ${escapeHtml(item.followUpWith)}</p>` : "";
-          const nextStep = item.nextStep ? `<p class="meta">Próximo passo: ${escapeHtml(item.nextStep)}</p>` : "";
-          return `<li>
-            <p class="meta">#${item.id} | ${escapeHtml(item.categoryName)} | ${escapeHtml(actionLabel(item.action))}${due}</p>
-            <p class="title">${escapeHtml(item.summaryPtBr)}</p>
-            ${followUp}
-            ${nextStep}
-            ${statusButtons(item.id, "open")}
-          </li>`;
-        })
-        .join("")
-    : "<li>Sem itens nesta coluna.</li>";
-}
-
-function filteredRecentItems(summary) {
-  if (state.recentFilter === "all") {
-    return summary.recentItems;
-  }
-  return summary.recentItems.filter((item) => item.status === state.recentFilter);
-}
-
-function renderRecent(summary) {
-  const rows = filteredRecentItems(summary);
-  recentNode.innerHTML = rows.length
-    ? rows
-        .map((item) => {
-          const created = new Date(item.createdAt).toLocaleString("pt-BR");
-          const due = item.dueAt ? ` | prazo ${escapeHtml(item.dueAt)}` : "";
-          const nextStep = item.nextStep ? `<p class="meta">Próximo passo: ${escapeHtml(item.nextStep)}</p>` : "";
-          const followUp = item.followUpWith ? `<p class="meta">Quem cobrar/procurar: ${escapeHtml(item.followUpWith)}</p>` : "";
-          const errorLine = item.processingError
-            ? `<p class="processing-error">Falha/atenção: ${escapeHtml(item.processingError)}</p>`
-            : "";
-          return `<li>
-            <p class="meta">#${item.id} | ${escapeHtml(created)} | ${escapeHtml(item.inputType)} | ${escapeHtml(item.categoryName)}</p>
-            <p class="title">${escapeHtml(item.summaryPtBr)}</p>
-            <p class="meta">
-              Ação: ${escapeHtml(actionLabel(item.action))} | Prioridade: ${escapeHtml(item.priority)}${due}
-              <span class="badge ${escapeHtml(item.status)}">${escapeHtml(statusLabel(item.status))}</span>
-              <span class="badge stage">${escapeHtml(stageLabel(item.processingStage))}</span>
-            </p>
-            ${nextStep}
-            ${followUp}
-            ${errorLine}
-            ${statusButtons(item.id, item.status)}
-          </li>`;
-        })
-        .join("")
-    : "<li>Nenhum item para este filtro.</li>";
-}
-
-function renderDashboard(summary) {
-  state.summary = summary;
-  renderStats(summary);
-  renderAlerts(summary);
-  renderWorkflow(summary);
-  renderTodayFocus(summary);
-  renderCategories(summary);
-  renderCaptureBreakdown(summary);
-  renderWeeklyDebrief(summary);
-  renderKanbanColumn(kanbanHighNode, summary.kanban.high);
-  renderKanbanColumn(kanbanMediumNode, summary.kanban.medium);
-  renderKanbanColumn(kanbanLowNode, summary.kanban.low);
-  renderRecent(summary);
-}
-
-async function updateItemStatus(id, status) {
-  const response = await fetch(`/api/actions/${id}/status`, {
+async function patchStatus(id, status) {
+  const r = await fetch(`/api/actions/${id}/status`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ status })
   });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
 }
 
-async function loadDashboard() {
-  try {
-    const response = await fetch("/api/dashboard");
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const payload = await response.json();
-    renderDashboard(payload);
-  } catch (error) {
-    recentNode.innerHTML = `<li>Falha ao carregar dashboard: ${escapeHtml(String(error))}</li>`;
-  }
+async function patchItem(id, fields) {
+  const r = await fetch(`/api/actions/${id}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(fields)
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
 }
 
-loadDashboard();
-setInterval(loadDashboard, 30000);
+// --- Render: Alerts ---
+function renderAlerts(summary) {
+  const alerts = summary.alerts || {};
+  const chips = [];
+  if (alerts.overdue > 0) {
+    chips.push(`<span class="alert-chip danger">${alerts.overdue} atrasado${alerts.overdue > 1 ? "s" : ""}</span>`);
+  }
+  if (alerts.dueToday > 0) {
+    chips.push(`<span class="alert-chip warn">${alerts.dueToday} vence${alerts.dueToday > 1 ? "m" : ""} hoje</span>`);
+  }
+  if (alerts.missingOwner > 0) {
+    chips.push(`<span class="alert-chip info">${alerts.missingOwner} sem responsavel</span>`);
+  }
+  alertsNode.innerHTML = chips.join("");
+}
 
-document.addEventListener("click", async (event) => {
-  const target = event.target;
-  if (!(target instanceof HTMLElement)) {
-    return;
+// --- Render: Stats ---
+function renderStats(summary) {
+  const s = summary.statusBreakdown || {};
+  statsNode.innerHTML = [
+    `<span class="stat-pill"><span class="num">${summary.totalItems || 0}</span> capturados</span>`,
+    `<span class="stat-pill"><span class="num">${s.open || 0}</span> abertos</span>`,
+    `<span class="stat-pill"><span class="num">${s.done || 0}</span> resolvidos</span>`,
+    `<span class="stat-pill"><span class="num">${s.eliminated || 0}</span> eliminados</span>`,
+    `<span class="stat-pill"><span class="num">${summary.totalProjects || 0}</span> projetos</span>`
+  ].join("");
+}
+
+// --- Render: Category filter ---
+function renderCategoryFilter(summary) {
+  const current = state.filterCategory;
+  const cats = summary.categories || [];
+  let html = '<option value="all">Todas categorias</option>';
+  for (const cat of cats) {
+    const sel = cat.name === current ? " selected" : "";
+    html += `<option value="${esc(cat.name)}"${sel}>${esc(cat.name)} (${cat.total})</option>`;
+  }
+  categoryFilter.innerHTML = html;
+}
+
+// --- Render: Cards ---
+function getFilteredItems(summary) {
+  let items = summary.recentItems || [];
+
+  // Status filter
+  if (state.filterStatus !== "all") {
+    items = items.filter((i) => i.status === state.filterStatus);
   }
 
-  const filterButton = target.closest(".filter-btn");
-  if (filterButton instanceof HTMLButtonElement) {
-    state.recentFilter = filterButton.dataset.filter || "all";
-    if (filtersNode) {
-      for (const button of filtersNode.querySelectorAll(".filter-btn")) {
-        button.classList.remove("active");
-      }
+  // Priority filter
+  if (state.filterPriority !== "all") {
+    items = items.filter((i) => i.priority === state.filterPriority);
+  }
+
+  // Category filter
+  if (state.filterCategory !== "all") {
+    items = items.filter((i) => i.categoryName === state.filterCategory);
+  }
+
+  // Search
+  if (state.search) {
+    const q = state.search.toLowerCase();
+    items = items.filter((i) =>
+      (i.summaryPtBr || "").toLowerCase().includes(q) ||
+      (i.actionTitle || "").toLowerCase().includes(q) ||
+      (i.categoryName || "").toLowerCase().includes(q) ||
+      (i.nextStep || "").toLowerCase().includes(q) ||
+      (i.followUpWith || "").toLowerCase().includes(q) ||
+      String(i.id).includes(q)
+    );
+  }
+
+  // Sort: open first, then by priority (ALTA > MEDIA > BAIXA), then by due date
+  const priOrder = { ALTA: 3, MEDIA: 2, BAIXA: 1 };
+  const statusOrder = { open: 3, done: 2, eliminated: 1 };
+  items.sort((a, b) => {
+    const sd = (statusOrder[b.status] || 0) - (statusOrder[a.status] || 0);
+    if (sd !== 0) return sd;
+    const pd = (priOrder[b.priority] || 0) - (priOrder[a.priority] || 0);
+    if (pd !== 0) return pd;
+    return new Date(b.createdAt) - new Date(a.createdAt);
+  });
+
+  return items;
+}
+
+function renderCard(item) {
+  const isExpanded = state.expandedId === item.id;
+  const expandedClass = isExpanded ? " expanded" : "";
+  const statusClass = item.status;
+  const priClass = `pri-${item.priority}`;
+
+  // Due tag
+  let dueTag = "";
+  if (item.dueAt) {
+    const d = daysFromNow(item.dueAt);
+    if (d !== null && d < 0) {
+      dueTag = `<span class="tag overdue">Atrasado ${Math.abs(d)}d</span>`;
+    } else if (d === 0) {
+      dueTag = `<span class="tag overdue">Vence hoje</span>`;
+    } else if (d !== null) {
+      dueTag = `<span class="tag due">${item.dueAt}</span>`;
     }
-    filterButton.classList.add("active");
-    if (state.summary) {
-      renderRecent(state.summary);
-    }
+  }
+
+  // Detail section
+  const detail = `
+    <div class="card-detail">
+      ${item.actionTitle ? `<div class="detail-row"><span class="detail-label">Titulo</span><span class="detail-value">${esc(item.actionTitle)}</span></div>` : ""}
+      ${item.nextStep ? `<div class="detail-row"><span class="detail-label">Proximo passo</span><span class="detail-value">${esc(item.nextStep)}</span></div>` : ""}
+      ${item.followUpWith ? `<div class="detail-row"><span class="detail-label">Responsavel</span><span class="detail-value">${esc(item.followUpWith)}</span></div>` : ""}
+      <div class="detail-row"><span class="detail-label">Acao</span><span class="detail-value">${esc(actionLabel(item.action))}</span></div>
+      <div class="detail-row"><span class="detail-label">Criado</span><span class="detail-value">${new Date(item.createdAt).toLocaleString("pt-BR")}</span></div>
+      ${item.processingError ? `<div class="detail-row"><span class="detail-label" style="color:var(--danger)">Erro</span><span class="detail-value" style="color:var(--danger)">${esc(item.processingError)}</span></div>` : ""}
+      <div class="card-actions">
+        ${item.status === "open" ? `
+          <button class="btn edit" data-edit-id="${item.id}">Editar</button>
+          <button class="btn success" data-status-id="${item.id}" data-status="done">Resolver</button>
+          <button class="btn danger" data-status-id="${item.id}" data-status="eliminated">Eliminar</button>
+        ` : `
+          <button class="btn secondary" data-status-id="${item.id}" data-status="open">Reabrir</button>
+        `}
+      </div>
+    </div>
+  `;
+
+  return `
+    <article class="item-card ${statusClass} ${priClass}${expandedClass}" data-card-id="${item.id}">
+      <div class="card-top">
+        <p class="card-summary">${esc(item.summaryPtBr)}</p>
+      </div>
+      <div class="card-meta">
+        <span class="tag id-tag">#${item.id}</span>
+        <span class="tag priority-${item.priority}">${priorityLabel(item.priority)}</span>
+        <span class="tag category">${esc(item.categoryName)}</span>
+        ${dueTag}
+      </div>
+      ${detail}
+    </article>
+  `;
+}
+
+function renderCards(summary) {
+  const items = getFilteredItems(summary);
+
+  if (items.length === 0) {
+    cardsListNode.innerHTML = "";
+    emptyNode.style.display = "block";
     return;
   }
 
-  const actionButton = target.closest(".btn-action");
-  if (!(actionButton instanceof HTMLButtonElement)) {
-    return;
-  }
+  emptyNode.style.display = "none";
+  cardsListNode.innerHTML = items.map(renderCard).join("");
+}
 
-  const id = Number(actionButton.dataset.itemId);
-  const nextStatus = actionButton.dataset.nextStatus;
-  if (!Number.isInteger(id) || !nextStatus) {
-    return;
-  }
+// --- Full render ---
+function renderAll() {
+  if (!state.summary) return;
+  renderAlerts(state.summary);
+  renderStats(state.summary);
+  renderCategoryFilter(state.summary);
+  renderCards(state.summary);
+}
 
-  actionButton.disabled = true;
+// --- Load data ---
+async function load() {
+  if (state.loading) return;
+  state.loading = true;
   try {
-    await updateItemStatus(id, nextStatus);
-    await loadDashboard();
+    const [summary, categories] = await Promise.all([fetchDashboard(), fetchCategories()]);
+    state.summary = summary;
+    state.categories = categories;
+    renderAll();
   } catch (error) {
-    window.alert(`Falha ao atualizar item #${id}: ${String(error)}`);
+    // Only show error if we have no data yet; otherwise keep stale data visible
+    if (!state.summary) {
+      cardsListNode.innerHTML = `<div class="empty-state">Erro ao carregar: ${esc(String(error))}</div>`;
+    }
   } finally {
-    actionButton.disabled = false;
+    state.loading = false;
+  }
+}
+
+load();
+setInterval(load, 30000);
+
+// --- Events: Filters ---
+document.addEventListener("click", (e) => {
+  const statusChip = e.target.closest("[data-filter-status]");
+  if (statusChip) {
+    state.filterStatus = statusChip.dataset.filterStatus;
+    document.querySelectorAll("[data-filter-status]").forEach((b) => b.classList.remove("active"));
+    statusChip.classList.add("active");
+    renderCards(state.summary);
+    return;
+  }
+
+  const priChip = e.target.closest("[data-filter-priority]");
+  if (priChip) {
+    state.filterPriority = priChip.dataset.filterPriority;
+    document.querySelectorAll("[data-filter-priority]").forEach((b) => b.classList.remove("active"));
+    priChip.classList.add("active");
+    renderCards(state.summary);
+    return;
+  }
+
+  // Expand/collapse card
+  const card = e.target.closest(".item-card");
+  if (card && !e.target.closest("button")) {
+    const id = Number(card.dataset.cardId);
+    state.expandedId = state.expandedId === id ? null : id;
+    renderCards(state.summary);
+    return;
+  }
+});
+
+// --- Events: Category filter ---
+categoryFilter.addEventListener("change", () => {
+  state.filterCategory = categoryFilter.value;
+  renderCards(state.summary);
+});
+
+// --- Events: Search ---
+let searchTimeout;
+searchInput.addEventListener("input", () => {
+  clearTimeout(searchTimeout);
+  searchTimeout = setTimeout(() => {
+    state.search = searchInput.value.trim();
+    renderCards(state.summary);
+  }, 200);
+});
+
+// --- Events: Status buttons ---
+document.addEventListener("click", async (e) => {
+  const statusBtn = e.target.closest("[data-status-id]");
+  if (!statusBtn) return;
+
+  e.stopPropagation();
+  const id = Number(statusBtn.dataset.statusId);
+  const status = statusBtn.dataset.status;
+  statusBtn.disabled = true;
+
+  try {
+    await patchStatus(id, status);
+    await load();
+  } catch (err) {
+    alert(`Erro ao atualizar #${id}: ${err}`);
+  } finally {
+    statusBtn.disabled = false;
+  }
+});
+
+// --- Events: Edit button ---
+document.addEventListener("click", (e) => {
+  const editBtn = e.target.closest("[data-edit-id]");
+  if (!editBtn) return;
+
+  e.stopPropagation();
+  const id = Number(editBtn.dataset.editId);
+  const item = state.summary?.recentItems?.find((i) => i.id === id);
+  if (!item) return;
+
+  openEditModal(item);
+});
+
+// --- Edit modal ---
+function openEditModal(item) {
+  state.editingItem = item;
+
+  document.getElementById("edit-card-id").textContent = `#${item.id}`;
+  document.getElementById("edit-summary").value = item.summaryPtBr || "";
+  document.getElementById("edit-action-title").value = item.actionTitle || "";
+  document.getElementById("edit-priority").value = item.priority || "MEDIA";
+  document.getElementById("edit-due").value = item.dueAt || "";
+  document.getElementById("edit-next-step").value = item.nextStep || "";
+  document.getElementById("edit-owner").value = item.followUpWith || "";
+
+  // Populate category dropdown
+  const catSelect = document.getElementById("edit-category");
+  let catHtml = "";
+  for (const cat of state.categories) {
+    const sel = cat.name === item.categoryName ? " selected" : "";
+    catHtml += `<option value="${esc(cat.name)}"${sel}>${esc(cat.name)}</option>`;
+  }
+  catSelect.innerHTML = catHtml;
+
+  editModal.showModal();
+}
+
+document.getElementById("modal-close").addEventListener("click", () => editModal.close());
+document.getElementById("modal-cancel").addEventListener("click", () => editModal.close());
+
+editForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!state.editingItem) return;
+
+  const id = state.editingItem.id;
+  const fields = {
+    summaryPtBr: document.getElementById("edit-summary").value.trim(),
+    actionTitle: document.getElementById("edit-action-title").value.trim(),
+    priority: document.getElementById("edit-priority").value,
+    dueAt: document.getElementById("edit-due").value || null,
+    nextStep: document.getElementById("edit-next-step").value.trim(),
+    followUpWith: document.getElementById("edit-owner").value.trim(),
+    categoryName: document.getElementById("edit-category").value
+  };
+
+  const saveBtn = document.getElementById("modal-save");
+  saveBtn.disabled = true;
+  saveBtn.textContent = "Salvando...";
+
+  try {
+    await patchItem(id, fields);
+    editModal.close();
+    await load();
+  } catch (err) {
+    alert(`Erro ao salvar #${id}: ${err}`);
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = "Salvar";
   }
 });

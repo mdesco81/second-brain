@@ -125,3 +125,4 @@ Comandos Telegram:
 - Sem `OPENAI_API_KEY`, o sistema continua funcionando com fallback heuristico para classificacao.
 - Para producao, rode atras de reverse proxy TLS (Caddy/Nginx/Traefik).
 - Guia de producao no AWS Lightsail: `DEPLOY_LIGHTSAIL.md`.
+- Guia de producao no Amazon EC2: `DEPLOY_EC2.md`.

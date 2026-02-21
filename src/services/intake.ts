@@ -47,6 +47,102 @@ interface ExtractedContent {
 }
 
 const AUDIO_EXTENSIONS = new Set([".mp3", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".aac", ".flac", ".webm"]);
+
+const URL_REGEX = /https?:\/\/[^\s<>"')\]]+/gi;
+
+function extractUrls(text: string): string[] {
+  return text.match(URL_REGEX) || [];
+}
+
+async function fetchUrlMetadata(url: string): Promise<{ title?: string; description?: string; url: string } | null> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; SecondBrain/1.0)",
+        "Accept": "text/html"
+      },
+      redirect: "follow",
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      return { url };
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("text/html")) {
+      return { url };
+    }
+
+    // Read only first 32KB to avoid downloading huge pages
+    const reader = response.body?.getReader();
+    if (!reader) {
+      return { url };
+    }
+    let html = "";
+    const decoder = new TextDecoder();
+    let bytesRead = 0;
+    const maxBytes = 32768;
+
+    while (bytesRead < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      html += decoder.decode(value, { stream: true });
+      bytesRead += value.length;
+    }
+    reader.cancel().catch(() => {});
+
+    const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+    const title = titleMatch?.[1]?.trim()?.replace(/\s+/g, " ");
+
+    const descMatch =
+      html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["']/i) ||
+      html.match(/<meta[^>]*content=["']([^"']*)["'][^>]*name=["']description["']/i);
+    const ogDescMatch =
+      html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']*)["']/i) ||
+      html.match(/<meta[^>]*content=["']([^"']*)["'][^>]*property=["']og:description["']/i);
+
+    return {
+      title: title || undefined,
+      description: (descMatch?.[1] || ogDescMatch?.[1])?.trim() || undefined,
+      url
+    };
+  } catch {
+    return { url };
+  }
+}
+
+async function enrichTextWithUrls(text: string): Promise<{ enrichedText: string; urls: Array<{ title?: string; description?: string; url: string }> }> {
+  const urls = extractUrls(text);
+  if (urls.length === 0) {
+    return { enrichedText: text, urls: [] };
+  }
+
+  const metadataResults = await Promise.all(
+    urls.slice(0, 3).map((u) => fetchUrlMetadata(u))
+  );
+  const validMetadata = metadataResults.filter((m): m is NonNullable<typeof m> => m !== null);
+
+  if (validMetadata.length === 0) {
+    return { enrichedText: text, urls: [] };
+  }
+
+  const enrichmentLines = validMetadata.map((m) => {
+    const parts = [`Link: ${m.url}`];
+    if (m.title) parts.push(`Titulo: ${m.title}`);
+    if (m.description) parts.push(`Descricao: ${m.description}`);
+    return parts.join("\n");
+  });
+
+  return {
+    enrichedText: `${text}\n\n---\n${enrichmentLines.join("\n\n")}`,
+    urls: validMetadata
+  };
+}
+
 const CONTINUATION_MARKERS = [
   "sobre o tema anterior",
   "sobre o assunto anterior",
@@ -57,7 +153,25 @@ const CONTINUATION_MARKERS = [
   "sobre isso",
   "sobre aquilo",
   "esse tema",
-  "esse assunto"
+  "esse assunto",
+  "voltando ao",
+  "voltando no",
+  "a respeito do",
+  "a respeito da",
+  "falando nisso",
+  "ainda sobre",
+  "mais sobre",
+  "outra coisa sobre",
+  "aproveitando",
+  "lembrando que",
+  "esqueci de falar",
+  "esqueci de mencionar",
+  "ah e tambem",
+  "alias",
+  "so pra complementar",
+  "atualizando",
+  "update sobre",
+  "novidade sobre"
 ];
 
 function inferInputType(message: TelegramMessage): InputType {
@@ -93,11 +207,12 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
   const rawText = (message.text || message.caption || "").trim();
 
   if (inputType === "text") {
+    const { enrichedText, urls } = await enrichTextWithUrls(rawText);
     return {
       inputType,
       rawText,
-      normalizedText: rawText,
-      metadata: {}
+      normalizedText: enrichedText,
+      metadata: urls.length > 0 ? { urls, hasLinks: true } : {}
     };
   }
 
@@ -256,20 +371,16 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 function lexicalOverlapScore(a: string, b: string): number {
-  const ta = new Set(
-    a
+  // Accept tokens with 3+ chars to catch names (Joao, TI, ERP) and short keywords
+  const tokenize = (text: string) => new Set(
+    text
       .toLowerCase()
       .replace(/[^a-zA-ZÀ-ÿ0-9\s]/g, " ")
       .split(/\s+/)
-      .filter((token) => token.length >= 4)
+      .filter((token) => token.length >= 3)
   );
-  const tb = new Set(
-    b
-      .toLowerCase()
-      .replace(/[^a-zA-ZÀ-ÿ0-9\s]/g, " ")
-      .split(/\s+/)
-      .filter((token) => token.length >= 4)
-  );
+  const ta = tokenize(a);
+  const tb = tokenize(b);
   if (!ta.size || !tb.size) {
     return 0;
   }
@@ -279,7 +390,8 @@ function lexicalOverlapScore(a: string, b: string): number {
       overlap += 1;
     }
   }
-  return overlap / Math.max(ta.size, tb.size);
+  // Use min instead of max for a more generous overlap ratio
+  return overlap / Math.min(ta.size, tb.size);
 }
 
 function buildCandidateSearchText(candidate: ContinuationContextItem): string {
@@ -383,8 +495,15 @@ async function rankContextCandidates(chatId: number, extracted: ExtractedContent
     .map((candidate) => {
       const lexical = lexicalOverlapScore(incomingText, buildCandidateSearchText(candidate));
       const semantic = incomingEmbedding && candidate.embedding ? cosineSimilarity(incomingEmbedding, candidate.embedding) : 0;
-      const continuationBoost = isLikelyContinuationText(incomingText) ? 0.08 : 0;
-      const score = Math.max(lexical * 0.7, semantic) + continuationBoost;
+      const continuationBoost = isLikelyContinuationText(incomingText) ? 0.15 : 0;
+      // Weighted combination instead of max — both signals matter
+      const combinedScore = semantic > 0
+        ? semantic * 0.6 + lexical * 0.4
+        : lexical;
+      // Recency boost: items from last 24h get a small boost (likely same conversation)
+      const ageHours = (Date.now() - new Date(candidate.createdAt).getTime()) / (1000 * 60 * 60);
+      const recencyBoost = ageHours < 24 ? 0.05 : ageHours < 72 ? 0.02 : 0;
+      const score = combinedScore + continuationBoost + recencyBoost;
 
       return {
         id: candidate.id,
@@ -400,7 +519,7 @@ async function rankContextCandidates(chatId: number, extracted: ExtractedContent
     })
     .sort((a, b) => (b.similarityScore ?? 0) - (a.similarityScore ?? 0));
 
-  return ranked.slice(0, 8);
+  return ranked.slice(0, 10);
 }
 
 async function persistCard(params: {
@@ -552,10 +671,15 @@ async function executePlan(params: {
       });
     }
 
-    await sendText(
-      params.chatId,
-      `Atualização integrada automaticamente ao card #${targetId}.\nResumo atualizado: ${mergeCard.summaryPtBr}`
-    );
+    const mergeResponse = [
+      `Integrado ao card #${targetId}:`,
+      `${mergeCard.summaryPtBr}`,
+      mergeCard.actionTitle ? `Acao: ${mergeCard.actionTitle}` : null,
+      mergeCard.nextStepPtBr ? `Proximo passo: ${mergeCard.nextStepPtBr}` : null,
+      `Prioridade: ${mergeCard.priority}`,
+      mergeCard.dueDateISO ? `Prazo: ${mergeCard.dueDateISO}` : null
+    ].filter(Boolean).join("\n");
+    await sendText(params.chatId, mergeResponse);
 
     if (isOwnerMissing(mergeCard.followUpWithPtBr)) {
       await sendText(params.chatId, `Card #${targetId} sem dono claro. Responda: /owner ${targetId} NomeDoResponsavel`);
@@ -578,12 +702,22 @@ async function executePlan(params: {
       createdItems.push(created);
     }
 
-    const createdSummaryLines = createdItems.map((item) => `- Card #${item.itemId} criado.`);
-    const splitNotice =
-      mode === "split" && cards.length > 1
-        ? `Separei automaticamente em ${cards.length} cards para manter execucao clara.`
-        : "Registro concluido.";
-    await sendText(params.chatId, [splitNotice, ...createdSummaryLines].join("\n"));
+    for (const [index, item] of createdItems.entries()) {
+      const card = cards[index];
+      const cardResponse = [
+        `Card #${item.itemId} registrado:`,
+        `${card.summaryPtBr}`,
+        card.actionTitle ? `Acao: ${card.actionTitle}` : null,
+        card.nextStepPtBr ? `Proximo passo: ${card.nextStepPtBr}` : null,
+        `Prioridade: ${card.priority}`,
+        card.dueDateISO ? `Prazo: ${card.dueDateISO}` : null,
+        card.followUpWithPtBr && card.followUpWithPtBr !== PENDING_OWNER_TOKEN ? `Responsavel: ${card.followUpWithPtBr}` : null
+      ].filter(Boolean).join("\n");
+      await sendText(params.chatId, cardResponse);
+    }
+    if (mode === "split" && cards.length > 1) {
+      await sendText(params.chatId, `Separei em ${cards.length} cards independentes para facilitar o acompanhamento.`);
+    }
 
     for (const item of createdItems) {
       if (isOwnerMissing(item.followUpWith)) {
@@ -792,17 +926,44 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
       }
     });
 
-    const suggestedTarget = plan.decision.targetItemId ? `#${plan.decision.targetItemId}` : "nenhum card especifico";
-    await sendText(
-      chatId,
-      [
-        "Estou com baixa confianca para decidir relacao com o historico aberto.",
-        `Sugestao atual: ${decisionMode === "merge" ? `complementar ${suggestedTarget}` : "novo card"}.`,
-        "Responda agora com:",
-        "- `complemento` (ou `complemento #id`)",
-        "- `novo`"
-      ].join("\n")
+    // Build a helpful question showing the top candidates so the user can decide
+    const topCandidatesForDisplay = contextCandidates
+      .filter((c) => (c.similarityScore ?? 0) > 0.1)
+      .slice(0, 3);
+
+    const candidateLines = topCandidatesForDisplay.map(
+      (c) => `  #${c.id} [${c.priority}] ${c.summaryPtBr}`
     );
+
+    const questionLines = [
+      "Nao tenho certeza se isso eh novo ou complemento de algo existente."
+    ];
+
+    if (candidateLines.length > 0) {
+      questionLines.push(
+        "",
+        "Cards abertos que podem estar relacionados:",
+        ...candidateLines,
+        ""
+      );
+      if (plan.decision.targetItemId) {
+        questionLines.push(`Meu palpite: complemento do #${plan.decision.targetItemId}`);
+      }
+      questionLines.push(
+        "",
+        "Responda:",
+        "- `complemento` ou `complemento #id` para integrar",
+        "- `novo` para criar card separado"
+      );
+    } else {
+      questionLines.push(
+        "",
+        "Nao encontrei cards parecidos abertos.",
+        "Responda `novo` para criar ou `complemento #id` se souber qual card atualizar."
+      );
+    }
+
+    await sendText(chatId, questionLines.join("\n"));
     return;
   }
 

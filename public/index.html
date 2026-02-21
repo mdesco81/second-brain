@@ -3,128 +3,106 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Second Brain Control Panel</title>
+    <title>Second Brain</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main class="layout">
-      <header class="card hero">
-        <div>
-          <p class="eyebrow">Second Brain</p>
-          <h1>Dashboard Operacional</h1>
-          <p class="subtitle">Fluxo completo de captura, interpretação, priorização e acompanhamento.</p>
+    <main class="app">
+      <header class="topbar">
+        <h1 class="logo">Second Brain</h1>
+        <div class="search-box">
+          <input type="search" id="search" placeholder="Buscar cards..." autocomplete="off" />
         </div>
-        <p class="hero-tip">A IA organiza, prioriza e sinaliza riscos para voce agir antes do prazo estourar.</p>
       </header>
 
-      <section class="stats" id="stats"></section>
-      <section class="alerts" id="alerts"></section>
+      <section class="alerts-bar" id="alerts"></section>
 
-      <section class="card workflow-card">
-        <div class="section-head">
-          <h2>Fluxo por Etapas</h2>
-          <p>O que já entrou, foi interpretado e virou execução.</p>
+      <nav class="filters-bar">
+        <div class="filter-group">
+          <button type="button" class="chip active" data-filter-status="open">Abertos</button>
+          <button type="button" class="chip" data-filter-status="all">Todos</button>
+          <button type="button" class="chip" data-filter-status="done">Resolvidos</button>
+          <button type="button" class="chip" data-filter-status="eliminated">Eliminados</button>
         </div>
-        <div class="workflow-grid" id="workflow"></div>
-      </section>
-
-      <section class="main-grid">
-        <div class="primary">
-          <section class="card focus-card">
-            <div class="section-head">
-              <h2>Foco de Hoje</h2>
-              <p>Top 3 movimentos sugeridos pela IA agora.</p>
-            </div>
-            <ul class="list" id="today-focus"></ul>
-          </section>
-
-          <section class="card kanban-card">
-            <div class="section-head">
-              <h2>Prioridades em Aberto</h2>
-              <p>Organizado por urgência e pronto para ação.</p>
-            </div>
-            <div class="kanban-board">
-              <article class="kanban-column high">
-                <h3>Alta</h3>
-                <ul class="list" id="kanban-high"></ul>
-              </article>
-              <article class="kanban-column medium">
-                <h3>Média</h3>
-                <ul class="list" id="kanban-medium"></ul>
-              </article>
-              <article class="kanban-column low">
-                <h3>Baixa</h3>
-                <ul class="list" id="kanban-low"></ul>
-              </article>
-            </div>
-          </section>
-
-          <section class="card recent-card">
-            <div class="section-head">
-              <h2>Capturas Recentes</h2>
-              <div class="filters" id="recent-filters">
-                <button type="button" class="filter-btn active" data-filter="all">Todos</button>
-                <button type="button" class="filter-btn" data-filter="open">Abertos</button>
-                <button type="button" class="filter-btn" data-filter="done">Resolvidos</button>
-                <button type="button" class="filter-btn" data-filter="eliminated">Eliminados</button>
-              </div>
-            </div>
-            <ul class="list" id="recent"></ul>
-          </section>
+        <div class="filter-group">
+          <button type="button" class="chip active" data-filter-priority="all">Todas</button>
+          <button type="button" class="chip pri-alta" data-filter-priority="ALTA">Alta</button>
+          <button type="button" class="chip pri-media" data-filter-priority="MEDIA">Media</button>
+          <button type="button" class="chip pri-baixa" data-filter-priority="BAIXA">Baixa</button>
         </div>
+        <div class="filter-group">
+          <select id="filter-category">
+            <option value="all">Todas categorias</option>
+          </select>
+        </div>
+      </nav>
 
-        <aside class="secondary">
-          <section class="card guide-card">
-            <h2>Guia Rápido</h2>
-            <ul class="guide-list">
-              <li>1) Valide prioridade e prazo no Kanban.</li>
-              <li>2) Defina “Resolver” quando concluído.</li>
-              <li>3) Use “Eliminar” para itens sem valor.</li>
-              <li>4) Reabra se o contexto mudar.</li>
-            </ul>
-          </section>
+      <section class="stats-strip" id="stats"></section>
 
-          <section class="card">
-            <h2>Mapa de Captura</h2>
-            <ul class="list" id="capture-breakdown"></ul>
-          </section>
-
-          <section class="card">
-            <h2>Categorias</h2>
-            <ul class="list" id="categories"></ul>
-          </section>
-
-          <section class="card debrief-card">
-            <div class="section-head">
-              <h2>Debrief Semanal</h2>
-              <p id="weekly-meta">Sem relatório ainda.</p>
-            </div>
-            <pre id="weekly-debrief"></pre>
-          </section>
-        </aside>
-      </section>
+      <section class="cards-list" id="cards-list"></section>
+      <div class="empty-state" id="empty-state" style="display:none">
+        Nenhum card encontrado com os filtros atuais.
+      </div>
     </main>
 
-    <template id="stat-template">
-      <article class="card stat-card">
-        <p class="label"></p>
-        <p class="value"></p>
-        <p class="hint"></p>
-      </article>
-    </template>
+    <dialog id="edit-modal">
+      <form method="dialog" class="edit-form" id="edit-form">
+        <header class="modal-header">
+          <h2>Editar Card <span id="edit-card-id"></span></h2>
+          <button type="button" class="close-btn" id="modal-close">&times;</button>
+        </header>
 
-    <template id="workflow-template">
-      <article class="workflow-step">
-        <p class="step-label"></p>
-        <p class="step-value"></p>
-      </article>
-    </template>
+        <div class="field">
+          <label for="edit-summary">Resumo</label>
+          <textarea id="edit-summary" rows="2"></textarea>
+        </div>
+
+        <div class="field">
+          <label for="edit-action-title">Titulo da acao</label>
+          <input type="text" id="edit-action-title" />
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="edit-priority">Prioridade</label>
+            <select id="edit-priority">
+              <option value="ALTA">Alta</option>
+              <option value="MEDIA">Media</option>
+              <option value="BAIXA">Baixa</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="edit-due">Prazo</label>
+            <input type="date" id="edit-due" />
+          </div>
+          <div class="field">
+            <label for="edit-category">Categoria</label>
+            <select id="edit-category"></select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="edit-next-step">Proximo passo</label>
+          <input type="text" id="edit-next-step" />
+        </div>
+
+        <div class="field">
+          <label for="edit-owner">Responsavel</label>
+          <input type="text" id="edit-owner" />
+        </div>
+
+        <footer class="modal-footer">
+          <button type="button" class="btn secondary" id="modal-cancel">Cancelar</button>
+          <button type="submit" class="btn primary" id="modal-save">Salvar</button>
+        </footer>
+      </form>
+    </dialog>
 
     <script src="/app.js" type="module"></script>
   </body>

@@ -105,7 +105,8 @@ export async function ensureSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS next_step TEXT,
       ADD COLUMN IF NOT EXISTS follow_up_with TEXT,
       ADD COLUMN IF NOT EXISTS processing_stage TEXT NOT NULL DEFAULT 'capturado',
-      ADD COLUMN IF NOT EXISTS processing_error TEXT;
+      ADD COLUMN IF NOT EXISTS processing_error TEXT,
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
   `);
 
   await pool.query(`
@@ -582,7 +583,8 @@ export async function updateInboxItemOwnerById(itemId: number, owner: string): P
   const result = await pool.query<{ id: number }>(
     `UPDATE inbox_items
      SET follow_up_with = $2,
-         processing_error = NULL
+         processing_error = NULL,
+         updated_at = NOW()
      WHERE id = $1
      RETURNING id`,
     [itemId, owner]
@@ -619,7 +621,8 @@ export async function mergeIntoInboxItem(params: {
          follow_up_with = COALESCE($12, follow_up_with),
          normalized_text = normalized_text || E'\n\n[Complemento ' || NOW()::TEXT || E']\n' || $13,
          processing_stage = 'planejado',
-         processing_error = NULL
+         processing_error = NULL,
+         updated_at = NOW()
      WHERE id = $1
        AND chat_id = $2
        AND status = 'open'
@@ -719,6 +722,7 @@ export async function updateInboxItemStatus(chatId: number, itemId: number, stat
   const result = await pool.query<{ id: number }>(
     `UPDATE inbox_items
      SET status = $3,
+         updated_at = NOW(),
          processing_stage = CASE
            WHEN $3 = 'done' THEN 'concluido'
            WHEN $3 = 'eliminated' THEN 'eliminado'
@@ -736,6 +740,7 @@ export async function updateInboxItemStatusById(itemId: number, status: ActionSt
   const result = await pool.query<{ id: number }>(
     `UPDATE inbox_items
      SET status = $2,
+         updated_at = NOW(),
          processing_stage = CASE
            WHEN $2 = 'done' THEN 'concluido'
            WHEN $2 = 'eliminated' THEN 'eliminado'
@@ -844,6 +849,8 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
                   follow_up_with IS NULL
                   OR BTRIM(follow_up_with) = ''
                   OR lower(BTRIM(follow_up_with)) = 'responsavel interno'
+                  OR lower(BTRIM(follow_up_with)) = 'pendente_dono'
+                  OR lower(BTRIM(follow_up_with)) = 'definir responsavel e cobrar atualizacao'
                 )
             )::TEXT AS missing_owner
          FROM inbox_items`
@@ -869,6 +876,7 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
         category_name: string;
         summary_pt_br: string;
         action: string;
+        action_title: string | null;
         priority: string;
         status: ActionStatus;
         due_at: string | null;
@@ -883,6 +891,7 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
                 c.name AS category_name,
                 i.summary_pt_br,
                 i.action,
+                i.action_title,
                 i.priority,
                 i.status,
                 i.due_at::TEXT,
@@ -893,7 +902,7 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
          FROM inbox_items i
          JOIN categories c ON c.id = i.category_id
          ORDER BY i.created_at DESC
-         LIMIT 20`
+         LIMIT 100`
       ),
       listOpenActionItems(undefined, 30),
       pool.query<{ sent_at: string; message_text: string }>(
@@ -955,6 +964,7 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
       categoryName: row.category_name,
       summaryPtBr: row.summary_pt_br,
       action: row.action as DashboardSummary["recentItems"][number]["action"],
+      actionTitle: row.action_title ?? undefined,
       priority: normalizePriority(row.priority),
       status: row.status,
       dueAt: row.due_at ?? undefined,
@@ -1015,6 +1025,193 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
       }))
     }
   };
+}
+
+export async function updateInboxItemFields(itemId: number, fields: {
+  summaryPtBr?: string;
+  categoryName?: string;
+  priority?: ActionPriority;
+  dueAt?: string | null;
+  nextStep?: string | null;
+  followUpWith?: string | null;
+  actionTitle?: string | null;
+}): Promise<boolean> {
+  const setClauses: string[] = [];
+  const params: unknown[] = [itemId];
+  let paramIndex = 2;
+
+  if (fields.summaryPtBr !== undefined) {
+    setClauses.push(`summary_pt_br = $${paramIndex}`);
+    params.push(fields.summaryPtBr);
+    paramIndex += 1;
+  }
+  if (fields.priority !== undefined) {
+    setClauses.push(`priority = $${paramIndex}`);
+    params.push(fields.priority);
+    paramIndex += 1;
+  }
+  if (fields.dueAt !== undefined) {
+    setClauses.push(`due_at = $${paramIndex}::DATE`);
+    params.push(fields.dueAt);
+    paramIndex += 1;
+  }
+  if (fields.nextStep !== undefined) {
+    setClauses.push(`next_step = $${paramIndex}`);
+    params.push(fields.nextStep);
+    paramIndex += 1;
+  }
+  if (fields.followUpWith !== undefined) {
+    setClauses.push(`follow_up_with = $${paramIndex}`);
+    params.push(fields.followUpWith);
+    paramIndex += 1;
+  }
+  if (fields.actionTitle !== undefined) {
+    setClauses.push(`action_title = $${paramIndex}`);
+    params.push(fields.actionTitle);
+    paramIndex += 1;
+  }
+  if (fields.categoryName !== undefined) {
+    const catResult = await pool.query<{ id: number }>(
+      `SELECT id FROM categories WHERE name = $1`,
+      [fields.categoryName]
+    );
+    if (catResult.rows[0]) {
+      setClauses.push(`category_id = $${paramIndex}`);
+      params.push(catResult.rows[0].id);
+      paramIndex += 1;
+    }
+  }
+
+  if (setClauses.length === 0) {
+    return false;
+  }
+
+  setClauses.push("updated_at = NOW()");
+
+  const result = await pool.query<{ id: number }>(
+    `UPDATE inbox_items SET ${setClauses.join(", ")} WHERE id = $1 RETURNING id`,
+    params
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function loadDoneToday(chatId?: number): Promise<number> {
+  const result = await pool.query<{ total: string }>(
+    `SELECT COUNT(*)::TEXT AS total
+     FROM inbox_items
+     WHERE status = 'done'
+       AND action <> 'NONE'
+       AND processing_stage = 'concluido'
+       AND updated_at >= CURRENT_DATE
+       AND ($1::BIGINT IS NULL OR chat_id = $1)`,
+    [chatId ?? null]
+  );
+  return Number(result.rows[0]?.total ?? 0);
+}
+
+export async function listOverdueItems(chatId?: number, limit = 10): Promise<OpenActionItem[]> {
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    category_name: string;
+    summary_pt_br: string;
+    action: string;
+    action_title: string | null;
+    next_step: string | null;
+    follow_up_with: string | null;
+    due_at: string | null;
+    created_at: string;
+    priority: string | null;
+  }>(
+    `SELECT i.id,
+            i.chat_id::TEXT,
+            c.name AS category_name,
+            i.summary_pt_br,
+            i.action,
+            i.action_title,
+            i.next_step,
+            i.follow_up_with,
+            i.due_at::TEXT,
+            i.created_at::TEXT,
+            i.priority
+     FROM inbox_items i
+     JOIN categories c ON c.id = i.category_id
+     WHERE i.status = 'open'
+       AND i.action <> 'NONE'
+       AND i.due_at < CURRENT_DATE
+       AND ($1::BIGINT IS NULL OR i.chat_id = $1)
+     ORDER BY i.due_at ASC, i.priority DESC
+     LIMIT $2`,
+    [chatId ?? null, limit]
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    chatId: Number(row.chat_id),
+    categoryName: row.category_name,
+    summaryPtBr: row.summary_pt_br,
+    action: row.action,
+    actionTitle: row.action_title ?? undefined,
+    nextStep: row.next_step ?? undefined,
+    followUpWith: row.follow_up_with ?? undefined,
+    dueAt: row.due_at ?? undefined,
+    createdAt: row.created_at,
+    priority: normalizePriority(row.priority)
+  }));
+}
+
+export async function listStaleItems(chatId?: number, staleDays = 3, limit = 10): Promise<OpenActionItem[]> {
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    category_name: string;
+    summary_pt_br: string;
+    action: string;
+    action_title: string | null;
+    next_step: string | null;
+    follow_up_with: string | null;
+    due_at: string | null;
+    created_at: string;
+    priority: string | null;
+  }>(
+    `SELECT i.id,
+            i.chat_id::TEXT,
+            c.name AS category_name,
+            i.summary_pt_br,
+            i.action,
+            i.action_title,
+            i.next_step,
+            i.follow_up_with,
+            i.due_at::TEXT,
+            i.created_at::TEXT,
+            i.priority
+     FROM inbox_items i
+     JOIN categories c ON c.id = i.category_id
+     WHERE i.status = 'open'
+       AND i.action <> 'NONE'
+       AND i.created_at < NOW() - INTERVAL '1 day' * $3
+       AND (i.due_at IS NULL OR i.due_at >= CURRENT_DATE)
+       AND ($1::BIGINT IS NULL OR i.chat_id = $1)
+     ORDER BY
+       CASE i.priority WHEN 'ALTA' THEN 3 WHEN 'MEDIA' THEN 2 ELSE 1 END DESC,
+       i.created_at ASC
+     LIMIT $2`,
+    [chatId ?? null, limit, staleDays]
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    chatId: Number(row.chat_id),
+    categoryName: row.category_name,
+    summaryPtBr: row.summary_pt_br,
+    action: row.action,
+    actionTitle: row.action_title ?? undefined,
+    nextStep: row.next_step ?? undefined,
+    followUpWith: row.follow_up_with ?? undefined,
+    dueAt: row.due_at ?? undefined,
+    createdAt: row.created_at,
+    priority: normalizePriority(row.priority)
+  }));
 }
 
 export async function closePool(): Promise<void> {
