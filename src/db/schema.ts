@@ -886,6 +886,7 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
         follow_up_with: string | null;
         processing_stage: string | null;
         processing_error: string | null;
+        storage_path: string | null;
       }>(
         `SELECT i.id,
                 i.created_at::TEXT,
@@ -902,7 +903,8 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
                 i.next_step,
                 i.follow_up_with,
                 i.processing_stage,
-                i.processing_error
+                i.processing_error,
+                i.storage_path
          FROM inbox_items i
          JOIN categories c ON c.id = i.category_id
          ORDER BY i.created_at DESC
@@ -977,7 +979,8 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
       nextStep: row.next_step ?? undefined,
       followUpWith: row.follow_up_with ?? undefined,
       processingStage: normalizeProcessingStage(row.processing_stage),
-      processingError: row.processing_error ?? undefined
+      processingError: row.processing_error ?? undefined,
+      hasFile: Boolean(row.storage_path && !row.storage_path.endsWith(".md"))
     })),
     todayFocus: todayFocus.map((item) => ({
       id: item.id,
@@ -1218,6 +1221,77 @@ export async function listStaleItems(chatId?: number, staleDays = 3, limit = 10)
     createdAt: row.created_at,
     priority: normalizePriority(row.priority)
   }));
+}
+
+export async function loadVocabularyTerms(limit = 80): Promise<string[]> {
+  const result = await pool.query<{ term: string }>(
+    `SELECT DISTINCT term FROM (
+       SELECT DISTINCT BTRIM(follow_up_with) AS term
+         FROM inbox_items
+         WHERE follow_up_with IS NOT NULL
+           AND BTRIM(follow_up_with) <> ''
+           AND lower(BTRIM(follow_up_with)) NOT IN ('pendente_dono', 'responsavel interno', 'usuario', 'definir responsavel e cobrar atualizacao')
+       UNION
+       SELECT DISTINCT name AS term FROM categories
+       UNION
+       SELECT DISTINCT title AS term FROM projects WHERE status = 'active'
+     ) sub
+     WHERE term IS NOT NULL AND length(term) >= 2
+     ORDER BY term
+     LIMIT $1`,
+    [limit]
+  );
+  return result.rows.map((row) => row.term);
+}
+
+export async function getItemFileInfo(itemId: number): Promise<{
+  storagePath: string;
+  inputType: string;
+} | null> {
+  const result = await pool.query<{
+    storage_path: string | null;
+    input_type: string;
+  }>(
+    `SELECT storage_path, input_type FROM inbox_items WHERE id = $1`,
+    [itemId]
+  );
+  const row = result.rows[0];
+  if (!row?.storage_path || row.storage_path.endsWith(".md")) return null;
+  return { storagePath: row.storage_path, inputType: row.input_type };
+}
+
+export async function insertDashboardItem(params: {
+  summaryPtBr: string;
+  categoryId: number;
+  priority: ActionPriority;
+  actionTitle?: string;
+  dueAt?: string;
+  nextStep?: string;
+  followUpWith?: string;
+}): Promise<number> {
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO inbox_items (
+      chat_id, telegram_message_id, input_type, raw_text, normalized_text,
+      summary_pt_br, category_id, bucket, action, priority,
+      action_title, due_at, next_step, follow_up_with,
+      processing_stage, confidence, metadata
+    ) VALUES (
+      0, 0, 'text', $1, $1,
+      $1, $2, 'AREAS', 'CREATE_TASK', $3,
+      $4, $5::DATE, $6, $7,
+      'planejado', 0.95, '{}'::JSONB
+    ) RETURNING id`,
+    [
+      params.summaryPtBr,
+      params.categoryId,
+      params.priority,
+      params.actionTitle ?? null,
+      params.dueAt ?? null,
+      params.nextStep ?? null,
+      params.followUpWith ?? null
+    ]
+  );
+  return result.rows[0].id;
 }
 
 export async function closePool(): Promise<void> {

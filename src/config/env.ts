@@ -11,6 +11,7 @@ const envSchema = z.object({
   TELEGRAM_MODE: z.enum(["webhook", "polling"]).default("webhook"),
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
   ANTHROPIC_MODEL: z.string().default("claude-sonnet-4-6"),
+  ANTHROPIC_FAST_MODEL: z.string().default("claude-haiku-4-5-20251001"),
   OPENAI_API_KEY: z.string().min(1).optional(),
   OPENAI_TRANSCRIBE_MODEL: z.string().default("gpt-5.2-transcribe"),
   OPENAI_EMBED_MODEL: z.string().default("text-embedding-3-small"),

@@ -5,6 +5,7 @@ import {
   AIClassificationOutput,
   AIIntakePlannerOutput,
   PlannerContextCandidate,
+  cleanTranscription,
   describeImage,
   embedText,
   embeddingModel,
@@ -23,6 +24,7 @@ import {
   listCategories,
   listOpenContextCandidates,
   listOpenActionItems,
+  loadVocabularyTerms,
   mergeIntoInboxItem,
   loadWeeklySummary,
   resolvePendingDecision,
@@ -42,6 +44,8 @@ interface ExtractedContent {
   inputType: InputType;
   rawText: string;
   normalizedText: string;
+  /** Full text extracted from PDF – used only for AI classification, not persisted as content. */
+  pdfExtractedText?: string;
   mediaPath?: string;
   metadata: Record<string, unknown>;
 }
@@ -227,12 +231,22 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
     const fileName = message.audio?.file_name || message.document?.file_name || `audio${ext}`;
     const mimeType = message.voice?.mime_type || message.audio?.mime_type || message.document?.mime_type || "audio/ogg";
     const mediaPath = await storeIncomingMedia(fileName, buffer);
-    const transcription = await transcribeAudio({
+
+    // Build dynamic vocabulary prompt for Whisper from existing cards
+    const vocabularyTerms = await loadVocabularyTerms(80).catch(() => [] as string[]);
+    const whisperPrompt = vocabularyTerms.length > 0
+      ? vocabularyTerms.join(", ")
+      : undefined;
+
+    const audioDurationSeconds = message.voice?.duration || message.audio?.duration || 0;
+
+    const rawTranscription = await transcribeAudio({
       buffer,
       fileName,
-      mimeType
+      mimeType,
+      whisperPrompt
     });
-    if (!transcription) {
+    if (!rawTranscription) {
       log.warn("Audio received without transcription", {
         fileName,
         filePath,
@@ -240,6 +254,13 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
         hasCaption: Boolean(rawText)
       });
     }
+
+    // Clean up messy transcription: remove filler words, fix punctuation,
+    // and insert --- markers at topic transitions to help the planner split.
+    const transcription = rawTranscription
+      ? await cleanTranscription(rawTranscription)
+      : null;
+
     const normalizedText =
       [rawText, transcription].filter(Boolean).join("\n").trim() || "Audio recebido sem transcricao automatica.";
 
@@ -251,7 +272,8 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
       metadata: {
         telegramFilePath: filePath,
         mimeType,
-        transcriptionAvailable: Boolean(transcription)
+        transcriptionAvailable: Boolean(transcription),
+        audioDurationSeconds
       }
     };
   }
@@ -276,10 +298,20 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
       }
     }
 
+    // For PDFs: keep normalizedText light (caption only + file reference).
+    // The full extracted text goes to pdfExtractedText for AI classification.
+    const pdfRef = inputType === "pdf" && mediaPath
+      ? `[Documento PDF armazenado: ${originalName}]`
+      : "";
+    const normalizedText = inputType === "pdf"
+      ? [rawText, pdfRef].filter(Boolean).join("\n").trim()
+      : [rawText, extractedText].filter(Boolean).join("\n").trim();
+
     return {
       inputType,
       rawText,
-      normalizedText: [rawText, extractedText].filter(Boolean).join("\n").trim(),
+      normalizedText,
+      pdfExtractedText: inputType === "pdf" && extractedText ? extractedText : undefined,
       mediaPath,
       metadata: {
         telegramFilePath: filePath,
@@ -407,7 +439,9 @@ function buildCandidateSearchText(candidate: ContinuationContextItem): string {
 }
 
 function buildIncomingSearchText(extracted: ExtractedContent): string {
-  return [extracted.rawText, extracted.normalizedText].filter(Boolean).join("\n").trim();
+  // For PDFs, use the extracted text for similarity search (not the short reference in normalizedText)
+  const textContent = extracted.pdfExtractedText || extracted.normalizedText;
+  return [extracted.rawText, textContent].filter(Boolean).join("\n").trim();
 }
 
 function isLikelyContinuationText(text: string): boolean {
@@ -577,11 +611,21 @@ async function persistCard(params: {
     normalizedText: params.extracted.normalizedText,
     createdAt: new Date(),
     sourceLabel,
-    itemId
+    itemId,
+    mediaPath: params.extracted.mediaPath,
+    inputType: params.extracted.inputType
   });
-  await updateInboxItemStoragePath(itemId, notePath);
 
-  const embedding = await embedText(`${card.summaryPtBr}\n${params.extracted.normalizedText}`);
+  // When the item has an original media file (PDF, audio, image, etc.), keep
+  // storage_path pointing to it so the dashboard can serve it.  Only overwrite
+  // with the knowledge-note path for text-only items that have no media.
+  if (!params.extracted.mediaPath) {
+    await updateInboxItemStoragePath(itemId, notePath);
+  }
+
+  // For embeddings, use the full PDF text (when available) for better similarity matching
+  const textForEmbedding = params.extracted.pdfExtractedText || params.extracted.normalizedText;
+  const embedding = await embedText(`${card.summaryPtBr}\n${textForEmbedding}`);
   if (embedding) {
     await upsertItemEmbedding({
       itemId,
@@ -661,7 +705,8 @@ async function executePlan(params: {
       throw new Error(`merge_target_not_found:${targetId}`);
     }
 
-    const mergedEmbedding = await embedText(`${mergeCard.summaryPtBr}\n${params.extracted.normalizedText}`);
+    const mergeTextForEmbedding = params.extracted.pdfExtractedText || params.extracted.normalizedText;
+    const mergedEmbedding = await embedText(`${mergeCard.summaryPtBr}\n${mergeTextForEmbedding}`);
     if (mergedEmbedding) {
       await upsertItemEmbedding({
         itemId: targetId,
@@ -890,8 +935,19 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
   const knownCategories = await listCategories();
   const contextCandidates = await rankContextCandidates(chatId, extracted);
 
+  const audioDuration = typeof extracted.metadata.audioDurationSeconds === "number"
+    ? extracted.metadata.audioDurationSeconds
+    : undefined;
+
+  // For PDFs, send the full extracted text to the AI for classification
+  const textForAI = extracted.pdfExtractedText
+    ? [extracted.rawText, extracted.pdfExtractedText].filter(Boolean).join("\n").trim()
+    : extracted.normalizedText;
+
   let plan: AIIntakePlannerOutput | null = await planIntakeWithContext({
-    text: extracted.normalizedText,
+    text: textForAI,
+    inputType: extracted.inputType,
+    audioDurationSeconds: audioDuration,
     knownCategories: knownCategories.map((category) => ({
       name: category.name,
       description: category.description
@@ -900,10 +956,27 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
   });
 
   if (!plan) {
-    log.warn("AI planner returned null — falling back to classifyContent", {
-      textLength: extracted.normalizedText.length
+    log.warn("AI planner returned null on first attempt — retrying once", {
+      textLength: textForAI.length,
+      inputType: extracted.inputType
     });
-    const fallback = await classifyContent(extracted.normalizedText);
+    plan = await planIntakeWithContext({
+      text: textForAI,
+      inputType: extracted.inputType,
+      audioDurationSeconds: audioDuration,
+      knownCategories: knownCategories.map((category) => ({
+        name: category.name,
+        description: category.description
+      })),
+      openContext: contextCandidates
+    });
+  }
+
+  if (!plan) {
+    log.warn("AI planner returned null on retry — falling back to classifyContent", {
+      textLength: textForAI.length
+    });
+    const fallback = await classifyContent(textForAI);
     plan = {
       decision: {
         mode: "new",

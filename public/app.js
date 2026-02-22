@@ -99,6 +99,16 @@ async function patchItem(id, fields) {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
 }
 
+async function createItem(fields) {
+  const r = await fetch("/api/actions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(fields)
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
 // --- Render: Alerts ---
 function renderAlerts(summary) {
   const alerts = summary.alerts || {};
@@ -233,9 +243,67 @@ function renderCard(item) {
        <div class="raw-text-content" id="raw-${item.id}">${esc(item.rawText)}</div>`
     : "";
 
+  // File attachment section
+  let fileSection = "";
+  if (item.hasFile) {
+    const fileUrl = `/api/items/${item.id}/file`;
+    if (item.inputType === "image") {
+      fileSection = `
+        <div class="file-attachment">
+          <div class="file-header">
+            <span class="file-icon">&#128247;</span>
+            <span class="file-label">Imagem original</span>
+            <a href="${fileUrl}" target="_blank" class="btn-file-open" title="Abrir em nova aba">&#8599;</a>
+          </div>
+          <div class="file-preview">
+            <img src="${fileUrl}" alt="Imagem anexada" class="file-preview-img lightbox-trigger" loading="lazy" data-lightbox-src="${fileUrl}" />
+          </div>
+        </div>`;
+    } else if (item.inputType === "pdf") {
+      fileSection = `
+        <div class="file-attachment">
+          <div class="file-header">
+            <span class="file-icon">&#128196;</span>
+            <span class="file-label">Documento PDF</span>
+            <button type="button" class="pdf-preview-toggle" data-pdf-toggle="${item.id}">Mostrar previa</button>
+            <a href="${fileUrl}" target="_blank" class="btn-file-open" title="Abrir PDF">&#8599;</a>
+          </div>
+          <div class="pdf-preview-wrapper" id="pdf-preview-${item.id}">
+            <iframe src="${fileUrl}#view=FitH&toolbar=0" class="pdf-preview-frame" title="Previa do PDF" loading="lazy"></iframe>
+          </div>
+        </div>`;
+    } else if (item.inputType === "audio") {
+      fileSection = `
+        <div class="file-attachment">
+          <div class="file-header">
+            <span class="file-icon">&#127911;</span>
+            <span class="file-label">Audio original</span>
+          </div>
+          <audio controls preload="none" class="file-audio-player">
+            <source src="${fileUrl}" />
+          </audio>
+        </div>`;
+    } else {
+      fileSection = `
+        <div class="file-attachment">
+          <div class="file-header">
+            <span class="file-icon">&#128206;</span>
+            <span class="file-label">Arquivo anexado</span>
+            <a href="${fileUrl}" target="_blank" class="btn-file-open" title="Baixar arquivo">&#8599;</a>
+          </div>
+        </div>`;
+    }
+  }
+
+  // File indicator on collapsed card
+  const fileIndicator = item.hasFile
+    ? `<span class="tag file-tag" title="Tem arquivo anexado">&#128206;</span>`
+    : "";
+
   // Detail section (expanded)
   const detail = `
     <div class="card-detail">
+      ${fileSection}
       ${rawTextSection}
       ${item.actionDetails ? `<div class="detail-row"><span class="detail-label">Detalhes</span><span class="detail-value">${esc(item.actionDetails)}</span></div>` : ""}
       <div class="detail-row"><span class="detail-label">Tipo</span><span class="detail-value">${esc(actionLabel(item.action))}</span></div>
@@ -263,6 +331,7 @@ function renderCard(item) {
         <span class="tag priority-${item.priority}">${priorityLabel(item.priority)}</span>
         <span class="tag category">${esc(item.categoryName)}</span>
         <span class="tag type-tag">${inputTypeLabel(item.inputType)}</span>
+        ${fileIndicator}
         ${dueTag}
       </div>
       ${detail}
@@ -413,6 +482,44 @@ document.addEventListener("click", (e) => {
   }
 });
 
+// --- Events: PDF preview toggle ---
+document.addEventListener("click", (e) => {
+  const toggle = e.target.closest("[data-pdf-toggle]");
+  if (!toggle) return;
+
+  e.stopPropagation();
+  const id = toggle.dataset.pdfToggle;
+  const wrapper = document.getElementById(`pdf-preview-${id}`);
+  if (wrapper) {
+    wrapper.classList.toggle("visible");
+    toggle.textContent = wrapper.classList.contains("visible") ? "Ocultar previa" : "Mostrar previa";
+  }
+});
+
+// --- Events: Image lightbox ---
+document.addEventListener("click", (e) => {
+  const trigger = e.target.closest(".lightbox-trigger");
+  if (!trigger) return;
+
+  e.stopPropagation();
+  const src = trigger.dataset.lightboxSrc;
+  if (!src) return;
+
+  const lightbox = document.getElementById("image-lightbox");
+  document.getElementById("lightbox-img").src = src;
+  lightbox.showModal();
+});
+
+document.getElementById("lightbox-close").addEventListener("click", () => {
+  document.getElementById("image-lightbox").close();
+});
+
+document.getElementById("image-lightbox").addEventListener("click", (e) => {
+  if (e.target === e.currentTarget) {
+    e.currentTarget.close();
+  }
+});
+
 // --- Drag and Drop ---
 document.addEventListener("dragstart", (e) => {
   const card = e.target.closest(".item-card[draggable]");
@@ -524,5 +631,68 @@ editForm.addEventListener("submit", async (e) => {
   } finally {
     saveBtn.disabled = false;
     saveBtn.textContent = "Salvar";
+  }
+});
+
+// --- New Card modal ---
+const newModal = document.getElementById("new-modal");
+const newForm = document.getElementById("new-form");
+
+document.getElementById("fab-new-card").addEventListener("click", () => {
+  // Reset form
+  document.getElementById("new-summary").value = "";
+  document.getElementById("new-action-title").value = "";
+  document.getElementById("new-priority").value = "MEDIA";
+  document.getElementById("new-due").value = "";
+  document.getElementById("new-next-step").value = "";
+  document.getElementById("new-owner").value = "";
+
+  // Populate category dropdown
+  const catSelect = document.getElementById("new-category");
+  let catHtml = "";
+  for (const cat of state.categories) {
+    catHtml += `<option value="${esc(cat.name)}">${esc(cat.name)}</option>`;
+  }
+  catSelect.innerHTML = catHtml;
+
+  newModal.showModal();
+  document.getElementById("new-summary").focus();
+});
+
+document.getElementById("new-modal-close").addEventListener("click", () => newModal.close());
+document.getElementById("new-modal-cancel").addEventListener("click", () => newModal.close());
+
+newForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+
+  const summaryPtBr = document.getElementById("new-summary").value.trim();
+  if (!summaryPtBr) {
+    document.getElementById("new-summary").focus();
+    return;
+  }
+
+  const fields = {
+    summaryPtBr,
+    actionTitle: document.getElementById("new-action-title").value.trim() || undefined,
+    priority: document.getElementById("new-priority").value,
+    dueAt: document.getElementById("new-due").value || undefined,
+    nextStep: document.getElementById("new-next-step").value.trim() || undefined,
+    followUpWith: document.getElementById("new-owner").value.trim() || undefined,
+    categoryName: document.getElementById("new-category").value || undefined
+  };
+
+  const saveBtn = document.getElementById("new-modal-save");
+  saveBtn.disabled = true;
+  saveBtn.textContent = "Criando...";
+
+  try {
+    const result = await createItem(fields);
+    newModal.close();
+    await load();
+  } catch (err) {
+    alert(`Erro ao criar card: ${err}`);
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = "Criar";
   }
 });

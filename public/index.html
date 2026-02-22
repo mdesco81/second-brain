@@ -68,6 +68,63 @@
       </div>
     </main>
 
+    <!-- FAB: New Card -->
+    <button type="button" class="fab" id="fab-new-card" title="Novo card">+</button>
+
+    <!-- New Card Modal -->
+    <dialog id="new-modal">
+      <form method="dialog" class="edit-form" id="new-form">
+        <header class="modal-header">
+          <h2>Novo Card</h2>
+          <button type="button" class="close-btn" id="new-modal-close">&times;</button>
+        </header>
+
+        <div class="field">
+          <label for="new-summary">Descricao / Nota *</label>
+          <textarea id="new-summary" rows="3" placeholder="O que voce quer registrar?"></textarea>
+        </div>
+
+        <div class="field">
+          <label for="new-action-title">Titulo da acao</label>
+          <input type="text" id="new-action-title" placeholder="Ex: Ligar para o contador" />
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="new-priority">Prioridade</label>
+            <select id="new-priority">
+              <option value="ALTA">Alta</option>
+              <option value="MEDIA" selected>Media</option>
+              <option value="BAIXA">Baixa</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="new-due">Prazo</label>
+            <input type="date" id="new-due" />
+          </div>
+          <div class="field">
+            <label for="new-category">Categoria</label>
+            <select id="new-category"></select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="new-next-step">Proximo passo</label>
+          <input type="text" id="new-next-step" placeholder="Qual a proxima acao concreta?" />
+        </div>
+
+        <div class="field">
+          <label for="new-owner">Responsavel</label>
+          <input type="text" id="new-owner" placeholder="Quem vai executar?" />
+        </div>
+
+        <footer class="modal-footer">
+          <button type="button" class="btn secondary" id="new-modal-cancel">Cancelar</button>
+          <button type="submit" class="btn primary" id="new-modal-save">Criar</button>
+        </footer>
+      </form>
+    </dialog>
+
     <dialog id="edit-modal">
       <form method="dialog" class="edit-form" id="edit-form">
         <header class="modal-header">
@@ -119,6 +176,12 @@
           <button type="submit" class="btn primary" id="modal-save">Salvar</button>
         </footer>
       </form>
+    </dialog>
+
+    <!-- Image Lightbox -->
+    <dialog id="image-lightbox" class="lightbox-dialog" aria-label="Visualizador de imagem">
+      <button type="button" class="lightbox-close" id="lightbox-close">&times;</button>
+      <img id="lightbox-img" src="" alt="Imagem em tela cheia" class="lightbox-img" />
     </dialog>
 
     <script src="/app.js" type="module"></script>
