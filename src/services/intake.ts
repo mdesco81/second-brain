@@ -33,7 +33,8 @@ import {
   updateInboxItemStoragePath,
   upsertItemEmbedding,
   upsertCategory,
-  upsertChatSubscription
+  upsertChatSubscription,
+  insertItemAttachment
 } from "../db/schema.js";
 import { buildOpenActionsMessage, buildWeeklyMessage } from "./reports.js";
 import { appendProjectStatus, storeIncomingMedia, writeActionBoard, writeKnowledgeNote } from "./storage.js";
@@ -362,9 +363,9 @@ function actionTitleFallback(text: string): string {
   return text
     .trim()
     .split(/\s+/)
-    .slice(0, 8)
+    .slice(0, 12)
     .join(" ")
-    .slice(0, 80);
+    .slice(0, 140);
 }
 
 function stageFromClassification(action: string): ProcessingStage {
@@ -452,7 +453,7 @@ function isLikelyContinuationText(text: string): boolean {
 function normalizePlannerCard(card: AIClassificationOutput): AIClassificationOutput {
   return {
     ...card,
-    actionTitle: card.actionTitle?.trim() || "Definir acao objetiva",
+    actionTitle: (card.actionTitle?.trim() || "Definir acao objetiva").slice(0, 140),
     nextStepPtBr: card.nextStepPtBr?.trim() || "Executar o primeiro passo concreto e atualizar o status.",
     followUpWithPtBr: card.followUpWithPtBr?.trim() || PENDING_OWNER_TOKEN,
     actionDetails: card.actionDetails?.trim() || card.summaryPtBr
@@ -589,6 +590,16 @@ async function persistCard(params: {
     metadata: params.metadata
   });
 
+  // Track attachment in dedicated table for multi-file support
+  if (params.extracted.mediaPath) {
+    await insertItemAttachment({
+      itemId,
+      storagePath: params.extracted.mediaPath,
+      fileName: path.basename(params.extracted.mediaPath),
+      inputType: params.extracted.inputType
+    });
+  }
+
   const sourceLabel = `telegram:${params.chatId}#${params.messageId}`;
   const notePath = await writeKnowledgeNote({
     classification: {
@@ -705,6 +716,16 @@ async function executePlan(params: {
       throw new Error(`merge_target_not_found:${targetId}`);
     }
 
+    // Attach incoming file to the existing card
+    if (params.extracted.mediaPath) {
+      await insertItemAttachment({
+        itemId: targetId,
+        storagePath: params.extracted.mediaPath,
+        fileName: path.basename(params.extracted.mediaPath),
+        inputType: params.extracted.inputType
+      });
+    }
+
     const mergeTextForEmbedding = params.extracted.pdfExtractedText || params.extracted.normalizedText;
     const mergedEmbedding = await embedText(`${mergeCard.summaryPtBr}\n${mergeTextForEmbedding}`);
     if (mergedEmbedding) {
@@ -722,7 +743,8 @@ async function executePlan(params: {
       mergeCard.actionTitle ? `Acao: ${mergeCard.actionTitle}` : null,
       mergeCard.nextStepPtBr ? `Proximo passo: ${mergeCard.nextStepPtBr}` : null,
       `Prioridade: ${mergeCard.priority}`,
-      mergeCard.dueDateISO ? `Prazo: ${mergeCard.dueDateISO}` : null
+      mergeCard.dueDateISO ? `Prazo: ${mergeCard.dueDateISO}` : null,
+      params.extracted.mediaPath ? `Arquivo anexado ao card.` : null
     ].filter(Boolean).join("\n");
     await sendText(params.chatId, mergeResponse);
 

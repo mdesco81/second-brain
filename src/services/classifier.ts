@@ -61,7 +61,7 @@ function truncateText(value: string, maxLength: number): string {
 
 function normalizeActionTitle(value: string | undefined, action: ClassificationResult["action"], fallbackText: string): string {
   if (value && cleanSpaces(value)) {
-    return truncateText(value, 90);
+    return truncateText(value, 140);
   }
   if (action === "CREATE_PROJECT") {
     return "Definir escopo e proximo marco do projeto";
@@ -75,7 +75,7 @@ function normalizeActionTitle(value: string | undefined, action: ClassificationR
   if (action === "STORE_REFERENCE") {
     return "Registrar referencia util";
   }
-  return truncateText(fallbackText, 90);
+  return truncateText(fallbackText, 140);
 }
 
 function normalizePriority(priority?: string): ActionPriority {

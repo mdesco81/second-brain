@@ -99,6 +99,13 @@ async function patchItem(id, fields) {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
 }
 
+async function fetchAttachments(itemId) {
+  const r = await fetch(`/api/items/${itemId}/files`);
+  if (!r.ok) return [];
+  const data = await r.json();
+  return data.attachments || [];
+}
+
 async function createItem(fields) {
   const r = await fetch("/api/actions", {
     method: "POST",
@@ -243,61 +250,24 @@ function renderCard(item) {
        <div class="raw-text-content" id="raw-${item.id}">${esc(item.rawText)}</div>`
     : "";
 
-  // File attachment section
+  // File attachments section (supports multiple files)
+  const fileCount = item.attachmentCount || (item.hasFile ? 1 : 0);
   let fileSection = "";
-  if (item.hasFile) {
-    const fileUrl = `/api/items/${item.id}/file`;
-    if (item.inputType === "image") {
-      fileSection = `
-        <div class="file-attachment">
-          <div class="file-header">
-            <span class="file-icon">&#128247;</span>
-            <span class="file-label">Imagem original</span>
-            <a href="${fileUrl}" target="_blank" class="btn-file-open" title="Abrir em nova aba">&#8599;</a>
-          </div>
-          <div class="file-preview">
-            <img src="${fileUrl}" alt="Imagem anexada" class="file-preview-img lightbox-trigger" loading="lazy" data-lightbox-src="${fileUrl}" />
-          </div>
-        </div>`;
-    } else if (item.inputType === "pdf") {
-      fileSection = `
-        <div class="file-attachment">
-          <div class="file-header">
-            <span class="file-icon">&#128196;</span>
-            <span class="file-label">Documento PDF</span>
-            <button type="button" class="pdf-preview-toggle" data-pdf-toggle="${item.id}">Mostrar previa</button>
-            <a href="${fileUrl}" target="_blank" class="btn-file-open" title="Abrir PDF">&#8599;</a>
-          </div>
-          <div class="pdf-preview-wrapper" id="pdf-preview-${item.id}">
-            <iframe src="${fileUrl}#view=FitH&toolbar=0" class="pdf-preview-frame" title="Previa do PDF" loading="lazy"></iframe>
-          </div>
-        </div>`;
-    } else if (item.inputType === "audio") {
-      fileSection = `
-        <div class="file-attachment">
-          <div class="file-header">
-            <span class="file-icon">&#127911;</span>
-            <span class="file-label">Audio original</span>
-          </div>
-          <audio controls preload="none" class="file-audio-player">
-            <source src="${fileUrl}" />
-          </audio>
-        </div>`;
-    } else {
-      fileSection = `
-        <div class="file-attachment">
-          <div class="file-header">
-            <span class="file-icon">&#128206;</span>
-            <span class="file-label">Arquivo anexado</span>
-            <a href="${fileUrl}" target="_blank" class="btn-file-open" title="Baixar arquivo">&#8599;</a>
-          </div>
-        </div>`;
-    }
+  if (fileCount > 0) {
+    fileSection = `
+      <div class="file-attachments" id="attachments-${item.id}">
+        <div class="file-header">
+          <span class="file-icon">&#128206;</span>
+          <span class="file-label">${fileCount} arquivo${fileCount > 1 ? "s" : ""}</span>
+          <button type="button" class="btn-load-attachments" data-load-attachments="${item.id}">Carregar</button>
+        </div>
+        <div class="attachments-list" id="attachments-list-${item.id}"></div>
+      </div>`;
   }
 
   // File indicator on collapsed card
-  const fileIndicator = item.hasFile
-    ? `<span class="tag file-tag" title="Tem arquivo anexado">&#128206;</span>`
+  const fileIndicator = fileCount > 0
+    ? `<span class="tag file-tag" title="${fileCount} arquivo${fileCount > 1 ? "s" : ""} anexado${fileCount > 1 ? "s" : ""}">&#128206; ${fileCount > 1 ? fileCount : ""}</span>`
     : "";
 
   // Detail section (expanded)
@@ -517,6 +487,89 @@ document.getElementById("lightbox-close").addEventListener("click", () => {
 document.getElementById("image-lightbox").addEventListener("click", (e) => {
   if (e.target === e.currentTarget) {
     e.currentTarget.close();
+  }
+});
+
+// --- Render single attachment ---
+function renderAttachment(att) {
+  const url = att.url;
+  const name = esc(att.fileName || "Arquivo");
+
+  if (att.inputType === "image") {
+    return `
+      <div class="file-attachment">
+        <div class="file-header">
+          <span class="file-icon">&#128247;</span>
+          <span class="file-label">${name}</span>
+          <a href="${url}" target="_blank" class="btn-file-open" title="Abrir em nova aba">&#8599;</a>
+        </div>
+        <div class="file-preview">
+          <img src="${url}" alt="${name}" class="file-preview-img lightbox-trigger" loading="lazy" data-lightbox-src="${url}" />
+        </div>
+      </div>`;
+  }
+  if (att.inputType === "pdf") {
+    const pdfId = `pdf-att-${att.id}`;
+    return `
+      <div class="file-attachment">
+        <div class="file-header">
+          <span class="file-icon">&#128196;</span>
+          <span class="file-label">${name}</span>
+          <button type="button" class="pdf-preview-toggle" data-pdf-toggle="${pdfId}">Mostrar previa</button>
+          <a href="${url}" target="_blank" class="btn-file-open" title="Abrir PDF">&#8599;</a>
+        </div>
+        <div class="pdf-preview-wrapper" id="pdf-preview-${pdfId}">
+          <iframe src="${url}#view=FitH&toolbar=0" class="pdf-preview-frame" title="Previa do PDF" loading="lazy"></iframe>
+        </div>
+      </div>`;
+  }
+  if (att.inputType === "audio") {
+    return `
+      <div class="file-attachment">
+        <div class="file-header">
+          <span class="file-icon">&#127911;</span>
+          <span class="file-label">${name}</span>
+        </div>
+        <audio controls preload="none" class="file-audio-player">
+          <source src="${url}" />
+        </audio>
+      </div>`;
+  }
+  return `
+    <div class="file-attachment">
+      <div class="file-header">
+        <span class="file-icon">&#128206;</span>
+        <span class="file-label">${name}</span>
+        <a href="${url}" target="_blank" class="btn-file-open" title="Baixar arquivo">&#8599;</a>
+      </div>
+    </div>`;
+}
+
+// --- Events: Load attachments ---
+document.addEventListener("click", async (e) => {
+  const loadBtn = e.target.closest("[data-load-attachments]");
+  if (!loadBtn) return;
+  e.stopPropagation();
+
+  const itemId = loadBtn.dataset.loadAttachments;
+  loadBtn.textContent = "Carregando...";
+  loadBtn.disabled = true;
+
+  try {
+    const attachments = await fetchAttachments(itemId);
+    const container = document.getElementById(`attachments-list-${itemId}`);
+    if (!container) return;
+
+    if (attachments.length === 0) {
+      container.innerHTML = '<div style="padding:8px;font-size:0.78rem;opacity:0.6">Nenhum arquivo encontrado</div>';
+      return;
+    }
+
+    container.innerHTML = attachments.map(renderAttachment).join("");
+    loadBtn.style.display = "none";
+  } catch (err) {
+    loadBtn.textContent = "Erro - tentar novamente";
+    loadBtn.disabled = false;
   }
 });
 

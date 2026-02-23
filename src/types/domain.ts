@@ -92,6 +92,7 @@ export interface DashboardSummary {
     processingStage: ProcessingStage;
     processingError?: string;
     hasFile?: boolean;
+    attachmentCount?: number;
   }>;
   todayFocus: Array<{
     id: number;

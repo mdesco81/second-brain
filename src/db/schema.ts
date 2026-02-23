@@ -96,6 +96,18 @@ export async function ensureSchema(): Promise<void> {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       resolved_at TIMESTAMPTZ
     );
+
+    CREATE TABLE IF NOT EXISTS item_attachments (
+      id SERIAL PRIMARY KEY,
+      item_id INTEGER NOT NULL REFERENCES inbox_items(id) ON DELETE CASCADE,
+      storage_path TEXT NOT NULL,
+      file_name TEXT,
+      input_type TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_item_attachments_item_id
+      ON item_attachments(item_id);
   `);
 
   await pool.query(`
@@ -887,6 +899,7 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
         processing_stage: string | null;
         processing_error: string | null;
         storage_path: string | null;
+        attachment_count: number;
       }>(
         `SELECT i.id,
                 i.created_at::TEXT,
@@ -904,7 +917,8 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
                 i.follow_up_with,
                 i.processing_stage,
                 i.processing_error,
-                i.storage_path
+                i.storage_path,
+                (SELECT COUNT(*) FROM item_attachments WHERE item_id = i.id)::INTEGER AS attachment_count
          FROM inbox_items i
          JOIN categories c ON c.id = i.category_id
          ORDER BY i.created_at DESC
@@ -980,7 +994,8 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
       followUpWith: row.follow_up_with ?? undefined,
       processingStage: normalizeProcessingStage(row.processing_stage),
       processingError: row.processing_error ?? undefined,
-      hasFile: Boolean(row.storage_path && !row.storage_path.endsWith(".md"))
+      hasFile: row.attachment_count > 0 || Boolean(row.storage_path && !row.storage_path.endsWith(".md")),
+      attachmentCount: row.attachment_count
     })),
     todayFocus: todayFocus.map((item) => ({
       id: item.id,
@@ -1292,6 +1307,83 @@ export async function insertDashboardItem(params: {
     ]
   );
   return result.rows[0].id;
+}
+
+// --- Item Attachments ---
+
+export interface ItemAttachment {
+  id: number;
+  itemId: number;
+  storagePath: string;
+  fileName: string | null;
+  inputType: string;
+  createdAt: string;
+}
+
+export async function insertItemAttachment(params: {
+  itemId: number;
+  storagePath: string;
+  fileName?: string;
+  inputType: string;
+}): Promise<number> {
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO item_attachments (item_id, storage_path, file_name, input_type)
+     VALUES ($1, $2, $3, $4)
+     RETURNING id`,
+    [params.itemId, params.storagePath, params.fileName ?? null, params.inputType]
+  );
+  return result.rows[0].id;
+}
+
+export async function listItemAttachments(itemId: number): Promise<ItemAttachment[]> {
+  const result = await pool.query<{
+    id: number;
+    item_id: number;
+    storage_path: string;
+    file_name: string | null;
+    input_type: string;
+    created_at: string;
+  }>(
+    `SELECT id, item_id, storage_path, file_name, input_type, created_at::TEXT
+     FROM item_attachments
+     WHERE item_id = $1
+     ORDER BY created_at ASC`,
+    [itemId]
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    itemId: row.item_id,
+    storagePath: row.storage_path,
+    fileName: row.file_name,
+    inputType: row.input_type,
+    createdAt: row.created_at
+  }));
+}
+
+export async function getAttachmentById(attachmentId: number): Promise<{
+  storagePath: string;
+  fileName: string | null;
+  inputType: string;
+  itemId: number;
+} | null> {
+  const result = await pool.query<{
+    storage_path: string;
+    file_name: string | null;
+    input_type: string;
+    item_id: number;
+  }>(
+    `SELECT storage_path, file_name, input_type, item_id
+     FROM item_attachments WHERE id = $1`,
+    [attachmentId]
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    storagePath: row.storage_path,
+    fileName: row.file_name,
+    inputType: row.input_type,
+    itemId: row.item_id
+  };
 }
 
 export async function closePool(): Promise<void> {

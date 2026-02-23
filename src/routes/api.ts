@@ -2,9 +2,11 @@ import { Router } from "express";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
+  getAttachmentById,
   getItemFileInfo,
   insertDashboardItem,
   listCategories,
+  listItemAttachments,
   listOpenActionItems,
   loadDashboardSummary,
   updateInboxItemFields,
@@ -171,6 +173,90 @@ apiRouter.get("/items/:id/file", async (req, res, next) => {
     res.setHeader("Content-Disposition", `inline; filename="${fileName}"`);
 
     const fileBuffer = await fs.readFile(fileInfo.storagePath);
+    res.send(fileBuffer);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// --- List attachments for a card ---
+apiRouter.get("/items/:id/files", async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ ok: false, error: "invalid_id" });
+      return;
+    }
+
+    const attachments = await listItemAttachments(id);
+
+    // Backwards compat: if no rows in item_attachments, fall back to legacy storage_path
+    if (attachments.length === 0) {
+      const legacy = await getItemFileInfo(id);
+      if (legacy) {
+        res.json({
+          ok: true,
+          attachments: [{
+            id: 0,
+            itemId: id,
+            fileName: path.basename(legacy.storagePath),
+            inputType: legacy.inputType,
+            url: `/api/items/${id}/file`
+          }]
+        });
+        return;
+      }
+    }
+
+    res.json({
+      ok: true,
+      attachments: attachments.map((a) => ({
+        id: a.id,
+        itemId: a.itemId,
+        fileName: a.fileName || path.basename(a.storagePath),
+        inputType: a.inputType,
+        createdAt: a.createdAt,
+        url: `/api/items/${id}/files/${a.id}`
+      }))
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// --- Serve individual attachment by ID ---
+apiRouter.get("/items/:id/files/:attachmentId", async (req, res, next) => {
+  try {
+    const itemId = Number(req.params.id);
+    const attachmentId = Number(req.params.attachmentId);
+
+    if (!Number.isInteger(itemId) || itemId <= 0 ||
+        !Number.isInteger(attachmentId) || attachmentId <= 0) {
+      res.status(400).json({ ok: false, error: "invalid_id" });
+      return;
+    }
+
+    const attachment = await getAttachmentById(attachmentId);
+    if (!attachment || attachment.itemId !== itemId) {
+      res.status(404).json({ ok: false, error: "not_found" });
+      return;
+    }
+
+    try {
+      await fs.access(attachment.storagePath);
+    } catch {
+      res.status(404).json({ ok: false, error: "file_not_found" });
+      return;
+    }
+
+    const ext = path.extname(attachment.storagePath).toLowerCase();
+    const contentType = MIME_MAP[ext] || "application/octet-stream";
+    const fileName = attachment.fileName || path.basename(attachment.storagePath);
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", `inline; filename="${fileName}"`);
+
+    const fileBuffer = await fs.readFile(attachment.storagePath);
     res.send(fileBuffer);
   } catch (error) {
     next(error);
