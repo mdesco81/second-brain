@@ -27,7 +27,8 @@ const state = {
   expandedId: null,
   editingItem: null,
   loading: false,
-  draggedId: null
+  draggedId: null,
+  attachmentsCache: {}
 };
 
 // --- Helpers ---
@@ -250,19 +251,19 @@ function renderCard(item) {
        <div class="raw-text-content" id="raw-${item.id}">${esc(item.rawText)}</div>`
     : "";
 
-  // File attachments section (supports multiple files)
+  // File attachments section — render directly using known file endpoint
   const fileCount = item.attachmentCount || (item.hasFile ? 1 : 0);
   let fileSection = "";
   if (fileCount > 0) {
-    fileSection = `
-      <div class="file-attachments" id="attachments-${item.id}">
-        <div class="file-header">
-          <span class="file-icon">&#128206;</span>
-          <span class="file-label">${fileCount} arquivo${fileCount > 1 ? "s" : ""}</span>
-          <button type="button" class="btn-load-attachments" data-load-attachments="${item.id}">Carregar</button>
-        </div>
-        <div class="attachments-list" id="attachments-list-${item.id}"></div>
-      </div>`;
+    // Check cache first; if not cached, show a placeholder that auto-loads
+    const cached = state.attachmentsCache[item.id];
+    if (cached) {
+      fileSection = cached.map(renderAttachment).join("");
+    } else {
+      // Fallback: render using legacy single-file endpoint based on inputType
+      const fileUrl = `/api/items/${item.id}/file`;
+      fileSection = renderAttachmentByType(fileUrl, item.inputType, item.id);
+    }
   }
 
   // File indicator on collapsed card
@@ -381,10 +382,19 @@ document.addEventListener("click", (e) => {
 
   // Expand/collapse card
   const card = e.target.closest(".item-card");
-  if (card && !e.target.closest("button")) {
+  if (card && !e.target.closest("button") && !e.target.closest("a")) {
     const id = Number(card.dataset.cardId);
-    state.expandedId = state.expandedId === id ? null : id;
+    const wasExpanded = state.expandedId === id;
+    state.expandedId = wasExpanded ? null : id;
     renderKanban(state.summary);
+    // Auto-load attachments when expanding a card that has files
+    if (!wasExpanded) {
+      const item = state.summary?.recentItems?.find((i) => i.id === id);
+      const fileCount = (item?.attachmentCount || 0) + (item?.hasFile && !item?.attachmentCount ? 1 : 0);
+      if (fileCount > 0) {
+        loadAttachmentsForCard(id);
+      }
+    }
     return;
   }
 });
@@ -490,45 +500,51 @@ document.getElementById("image-lightbox").addEventListener("click", (e) => {
   }
 });
 
-// --- Render single attachment ---
+// --- Render single attachment from API data ---
 function renderAttachment(att) {
   const url = att.url;
   const name = esc(att.fileName || "Arquivo");
+  return renderAttachmentByType(url, att.inputType, `att-${att.id}`, name);
+}
 
-  if (att.inputType === "image") {
+// --- Render attachment by type (works with any URL) ---
+function renderAttachmentByType(url, inputType, uniqueId, name) {
+  name = name || "Arquivo";
+  const downloadUrl = url;
+
+  if (inputType === "image") {
     return `
       <div class="file-attachment">
         <div class="file-header">
           <span class="file-icon">&#128247;</span>
-          <span class="file-label">${name}</span>
+          <span class="file-label">${esc(name)}</span>
+          <a href="${downloadUrl}" download class="btn-file-open" title="Download">&#11015;</a>
           <a href="${url}" target="_blank" class="btn-file-open" title="Abrir em nova aba">&#8599;</a>
         </div>
         <div class="file-preview">
-          <img src="${url}" alt="${name}" class="file-preview-img lightbox-trigger" loading="lazy" data-lightbox-src="${url}" />
+          <img src="${url}" alt="${esc(name)}" class="file-preview-img lightbox-trigger" loading="lazy" data-lightbox-src="${url}" />
         </div>
       </div>`;
   }
-  if (att.inputType === "pdf") {
-    const pdfId = `pdf-att-${att.id}`;
+  if (inputType === "pdf") {
+    const pdfId = `pdf-${uniqueId}`;
     return `
       <div class="file-attachment">
         <div class="file-header">
           <span class="file-icon">&#128196;</span>
-          <span class="file-label">${name}</span>
-          <button type="button" class="pdf-preview-toggle" data-pdf-toggle="${pdfId}">Mostrar previa</button>
+          <span class="file-label">${esc(name)}</span>
+          <a href="${downloadUrl}" download class="btn-file-open" title="Download">&#11015;</a>
           <a href="${url}" target="_blank" class="btn-file-open" title="Abrir PDF">&#8599;</a>
-        </div>
-        <div class="pdf-preview-wrapper" id="pdf-preview-${pdfId}">
-          <iframe src="${url}#view=FitH&toolbar=0" class="pdf-preview-frame" title="Previa do PDF" loading="lazy"></iframe>
         </div>
       </div>`;
   }
-  if (att.inputType === "audio") {
+  if (inputType === "audio") {
     return `
       <div class="file-attachment">
         <div class="file-header">
           <span class="file-icon">&#127911;</span>
-          <span class="file-label">${name}</span>
+          <span class="file-label">${esc(name)}</span>
+          <a href="${downloadUrl}" download class="btn-file-open" title="Download">&#11015;</a>
         </div>
         <audio controls preload="none" class="file-audio-player">
           <source src="${url}" />
@@ -539,39 +555,29 @@ function renderAttachment(att) {
     <div class="file-attachment">
       <div class="file-header">
         <span class="file-icon">&#128206;</span>
-        <span class="file-label">${name}</span>
-        <a href="${url}" target="_blank" class="btn-file-open" title="Baixar arquivo">&#8599;</a>
+        <span class="file-label">${esc(name)}</span>
+        <a href="${downloadUrl}" download class="btn-file-open" title="Download">&#11015;</a>
+        <a href="${url}" target="_blank" class="btn-file-open" title="Abrir">&#8599;</a>
       </div>
     </div>`;
 }
 
-// --- Events: Load attachments ---
-document.addEventListener("click", async (e) => {
-  const loadBtn = e.target.closest("[data-load-attachments]");
-  if (!loadBtn) return;
-  e.stopPropagation();
-
-  const itemId = loadBtn.dataset.loadAttachments;
-  loadBtn.textContent = "Carregando...";
-  loadBtn.disabled = true;
-
+// --- Auto-load attachments when card expands ---
+async function loadAttachmentsForCard(itemId) {
+  if (state.attachmentsCache[itemId]) return;
   try {
     const attachments = await fetchAttachments(itemId);
-    const container = document.getElementById(`attachments-list-${itemId}`);
-    if (!container) return;
-
-    if (attachments.length === 0) {
-      container.innerHTML = '<div style="padding:8px;font-size:0.78rem;opacity:0.6">Nenhum arquivo encontrado</div>';
-      return;
+    if (attachments.length > 0) {
+      state.attachmentsCache[itemId] = attachments;
+      // Re-render to show loaded attachments
+      if (state.expandedId === itemId) {
+        renderKanban(state.summary);
+      }
     }
-
-    container.innerHTML = attachments.map(renderAttachment).join("");
-    loadBtn.style.display = "none";
-  } catch (err) {
-    loadBtn.textContent = "Erro - tentar novamente";
-    loadBtn.disabled = false;
+  } catch {
+    // Silently fail — the fallback single-file render is already shown
   }
-});
+}
 
 // --- Drag and Drop ---
 document.addEventListener("dragstart", (e) => {
