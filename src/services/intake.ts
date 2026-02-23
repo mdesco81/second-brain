@@ -227,11 +227,32 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
       return { inputType, rawText, normalizedText: rawText, metadata: { error: "missing_audio_id" } };
     }
 
-    const { buffer, filePath } = await getFileBuffer(fileId);
+    let buffer: Buffer;
+    let filePath: string;
+    try {
+      const fileResult = await getFileBuffer(fileId);
+      buffer = fileResult.buffer;
+      filePath = fileResult.filePath;
+    } catch (error) {
+      log.error("Failed to download audio from Telegram", { fileId, error });
+      return {
+        inputType,
+        rawText,
+        normalizedText: rawText || "Audio recebido mas download do Telegram falhou.",
+        metadata: { error: "telegram_download_failed", fileId }
+      };
+    }
+
     const ext = path.extname(filePath) || ".ogg";
     const fileName = message.audio?.file_name || message.document?.file_name || `audio${ext}`;
     const mimeType = message.voice?.mime_type || message.audio?.mime_type || message.document?.mime_type || "audio/ogg";
-    const mediaPath = await storeIncomingMedia(fileName, buffer);
+
+    let mediaPath: string | undefined;
+    try {
+      mediaPath = await storeIncomingMedia(fileName, buffer);
+    } catch (error) {
+      log.error("Failed to store audio file on disk", { fileName, error });
+    }
 
     // Build dynamic vocabulary prompt for Whisper from existing cards
     const vocabularyTerms = await loadVocabularyTerms(80).catch(() => [] as string[]);
@@ -241,12 +262,17 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
 
     const audioDurationSeconds = message.voice?.duration || message.audio?.duration || 0;
 
-    const rawTranscription = await transcribeAudio({
-      buffer,
-      fileName,
-      mimeType,
-      whisperPrompt
-    });
+    let rawTranscription: string | null = null;
+    try {
+      rawTranscription = await transcribeAudio({
+        buffer,
+        fileName,
+        mimeType,
+        whisperPrompt
+      });
+    } catch (error) {
+      log.error("Unexpected transcribeAudio crash", { fileName, mimeType, error });
+    }
     if (!rawTranscription) {
       log.warn("Audio received without transcription", {
         fileName,
@@ -942,6 +968,31 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
   const chatId = message.chat.id;
   const messageId = message.message_id;
 
+  try {
+    await processTelegramMessageInner(chatId, messageId, message);
+  } catch (error) {
+    log.error("processTelegramMessage crashed — notifying user", {
+      chatId,
+      messageId,
+      inputType: inferInputType(message),
+      error
+    });
+    try {
+      await sendText(
+        chatId,
+        "Ocorreu um erro ao processar sua mensagem. Tente novamente ou envie em texto."
+      );
+    } catch (sendError) {
+      log.error("Failed to send error notification to user", { chatId, sendError });
+    }
+  }
+}
+
+async function processTelegramMessageInner(
+  chatId: number,
+  messageId: number,
+  message: TelegramMessage
+): Promise<void> {
   await upsertChatSubscription(chatId);
 
   if (message.text && (await tryResolvePendingRelation(chatId, message))) {
