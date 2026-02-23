@@ -595,9 +595,19 @@ async function persistCard(params: {
   metadata: Record<string, unknown>;
 }): Promise<{ itemId: number; categoryName: string; summaryPtBr: string; followUpWith?: string }> {
   const card = normalizePlannerCard(params.card);
+
+  log.info("pipeline:persist_upsertCategory", { categoryName: card.categoryName });
   const categoryId = await upsertCategory(card.categoryName, card.categoryDescription, card.shouldCreateCategory ? "agent" : "reuse");
+  log.info("pipeline:persist_upsertCategory_done", { categoryId });
 
   const processingStage = stageFromClassification(card.action);
+  log.info("pipeline:persist_insertInboxItem", {
+    action: card.action,
+    priority: card.priority,
+    bucket: card.bucket,
+    hasDueAt: Boolean(card.dueDateISO),
+    confidence: card.confidence
+  });
   const itemId = await insertInboxItem({
     chatId: params.chatId,
     messageId: params.messageId,
@@ -619,9 +629,11 @@ async function persistCard(params: {
     storagePath: params.extracted.mediaPath,
     metadata: params.metadata
   });
+  log.info("pipeline:persist_insertInboxItem_done", { itemId });
 
   // Track attachment in dedicated table for multi-file support
   if (params.extracted.mediaPath) {
+    log.info("pipeline:persist_insertAttachment", { itemId, mediaPath: params.extracted.mediaPath });
     await insertItemAttachment({
       itemId,
       storagePath: params.extracted.mediaPath,
@@ -631,6 +643,7 @@ async function persistCard(params: {
   }
 
   const sourceLabel = `telegram:${params.chatId}#${params.messageId}`;
+  log.info("pipeline:persist_writeKnowledgeNote", { itemId });
   const notePath = await writeKnowledgeNote({
     classification: {
       summaryPtBr: card.summaryPtBr,
@@ -656,6 +669,7 @@ async function persistCard(params: {
     mediaPath: params.extracted.mediaPath,
     inputType: params.extracted.inputType
   });
+  log.info("pipeline:persist_writeKnowledgeNote_done", { notePath });
 
   // When the item has an original media file (PDF, audio, image, etc.), keep
   // storage_path pointing to it so the dashboard can serve it.  Only overwrite
@@ -665,9 +679,11 @@ async function persistCard(params: {
   }
 
   // For embeddings, use the full PDF text (when available) for better similarity matching
+  log.info("pipeline:persist_embedText", { itemId });
   const textForEmbedding = params.extracted.pdfExtractedText || params.extracted.normalizedText;
   const embedding = await embedText(`${card.summaryPtBr}\n${textForEmbedding}`);
   if (embedding) {
+    log.info("pipeline:persist_upsertEmbedding", { itemId, vectorLen: embedding.length });
     await upsertItemEmbedding({
       itemId,
       chatId: params.chatId,
@@ -675,6 +691,7 @@ async function persistCard(params: {
       vector: embedding
     });
   }
+  log.info("pipeline:persist_embedding_done", { itemId, hasEmbedding: Boolean(embedding) });
 
   if (card.action === "CREATE_PROJECT") {
     const projectTitle = card.actionTitle || actionTitleFallback(card.summaryPtBr);
@@ -705,6 +722,7 @@ async function executePlan(params: {
 }): Promise<void> {
   const mode = params.forcedMode || normalizeDecisionMode(params.plan.decision.mode);
   const cards = params.plan.cards.map(normalizePlannerCard);
+  log.info("pipeline:executePlan_start", { mode, cardCount: cards.length });
 
   const audioWithoutTranscription =
     params.extracted.inputType === "audio" && params.extracted.metadata.transcriptionAvailable === false && !params.extracted.rawText;
@@ -1036,8 +1054,13 @@ async function processTelegramMessageInner(
     return;
   }
 
+  log.info("pipeline:extract_done", { inputType: extracted.inputType, textLen: extracted.normalizedText.length });
+
   const knownCategories = await listCategories();
+  log.info("pipeline:categories_done", { count: knownCategories.length });
+
   const contextCandidates = await rankContextCandidates(chatId, extracted);
+  log.info("pipeline:candidates_done", { count: contextCandidates.length });
 
   const audioDuration = typeof extracted.metadata.audioDurationSeconds === "number"
     ? extracted.metadata.audioDurationSeconds
@@ -1090,6 +1113,8 @@ async function processTelegramMessageInner(
       cards: [fallback as AIClassificationOutput]
     };
   }
+
+  log.info("pipeline:plan_done", { mode: plan.decision.mode, confidence: plan.decision.confidence, cards: plan.cards.length });
 
   const decisionMode = normalizeDecisionMode(plan.decision.mode);
 

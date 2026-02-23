@@ -228,7 +228,7 @@ export async function insertInboxItem(params: {
       storage_path,
       metadata
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::DATE,$14,$15,$16,$17,$18::NUMERIC,$19,$20::JSONB
+      $1::BIGINT,$2::BIGINT,$3::TEXT,$4::TEXT,$5::TEXT,$6::TEXT,$7::INTEGER,$8::TEXT,$9::TEXT,$10::TEXT,$11::TEXT,$12::TEXT,$13::DATE,$14::TEXT,$15::TEXT,$16::TEXT,$17::TEXT,$18::NUMERIC,$19::TEXT,$20::JSONB
     ) RETURNING id`,
     [
       params.chatId,
@@ -629,25 +629,25 @@ export async function mergeIntoInboxItem(params: {
 }): Promise<boolean> {
   const result = await pool.query<{ id: number }>(
     `UPDATE inbox_items
-     SET category_id = $3,
-         bucket = $4,
-         action = $5,
+     SET category_id = $3::INTEGER,
+         bucket = $4::TEXT,
+         action = $5::TEXT,
          -- Summary: use AI synthesis if it's longer than existing; otherwise append to preserve content
          summary_pt_br = CASE
-           WHEN LENGTH($6) >= LENGTH(summary_pt_br) THEN $6
-           ELSE summary_pt_br || E'\n[Atualização] ' || $6
+           WHEN LENGTH($6::TEXT) >= LENGTH(summary_pt_br) THEN $6::TEXT
+           ELSE summary_pt_br || E'\n[Atualização] ' || $6::TEXT
          END,
          -- Title: only replace if new value is non-empty and substantive (>10 chars)
          action_title = CASE
-           WHEN $7 IS NOT NULL AND LENGTH(TRIM($7)) > 10 THEN $7
-           ELSE COALESCE(action_title, $7)
+           WHEN $7::TEXT IS NOT NULL AND LENGTH(TRIM($7::TEXT)) > 10 THEN $7::TEXT
+           ELSE COALESCE(action_title, $7::TEXT)
          END,
-         action_details = COALESCE(action_details, '') || CASE WHEN action_details IS NULL OR action_details = '' THEN '' ELSE E'\n\n' END || $8,
-         priority = $9,
+         action_details = COALESCE(action_details, '') || CASE WHEN action_details IS NULL OR action_details = '' THEN '' ELSE E'\n\n' END || $8::TEXT,
+         priority = $9::TEXT,
          due_at = COALESCE($10::DATE, due_at),
-         next_step = COALESCE($11, next_step),
-         follow_up_with = COALESCE($12, follow_up_with),
-         normalized_text = normalized_text || E'\n\n[Complemento ' || NOW()::TEXT || E']\n' || $13,
+         next_step = COALESCE($11::TEXT, next_step),
+         follow_up_with = COALESCE($12::TEXT, follow_up_with),
+         normalized_text = normalized_text || E'\n\n[Complemento ' || NOW()::TEXT || E']\n' || $13::TEXT,
          raw_text = CASE
            WHEN $14::TEXT IS NOT NULL AND $14::TEXT != '' THEN raw_text || E'\n' || $14::TEXT
            ELSE raw_text
@@ -655,8 +655,8 @@ export async function mergeIntoInboxItem(params: {
          processing_stage = 'planejado',
          processing_error = NULL,
          updated_at = NOW()
-     WHERE id = $1
-       AND chat_id = $2
+     WHERE id = $1::INTEGER
+       AND chat_id = $2::BIGINT
        AND status = 'open'
      RETURNING id`,
     [
