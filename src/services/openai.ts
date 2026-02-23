@@ -330,6 +330,10 @@ export async function describeImage(base64DataUrl: string): Promise<string | nul
 
 // ── Embeddings (OpenAI) ──────────────────────────────────────────────
 
+// text-embedding-3-small has an 8191 token limit.
+// Rough heuristic: 1 token ≈ 4 chars for Portuguese text.
+const EMBED_MAX_CHARS = 28_000;
+
 export async function embedText(text: string): Promise<number[] | null> {
   if (!openaiClient) {
     return null;
@@ -339,10 +343,14 @@ export async function embedText(text: string): Promise<number[] | null> {
     return null;
   }
 
+  const truncated = normalized.length > EMBED_MAX_CHARS
+    ? normalized.slice(0, EMBED_MAX_CHARS)
+    : normalized;
+
   try {
     const response = await openaiClient.embeddings.create({
       model: env.OPENAI_EMBED_MODEL,
-      input: normalized
+      input: truncated
     });
     const vector = response.data?.[0]?.embedding;
     return Array.isArray(vector) ? vector : null;

@@ -228,7 +228,7 @@ export async function insertInboxItem(params: {
       storage_path,
       metadata
     ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::DATE,$14,$15,$16,$17,$18::NUMERIC,$19,$20::JSONB
     ) RETURNING id`,
     [
       params.chatId,
@@ -649,7 +649,7 @@ export async function mergeIntoInboxItem(params: {
          follow_up_with = COALESCE($12, follow_up_with),
          normalized_text = normalized_text || E'\n\n[Complemento ' || NOW()::TEXT || E']\n' || $13,
          raw_text = CASE
-           WHEN $14 IS NOT NULL AND $14 != '' THEN raw_text || E'\n' || $14
+           WHEN $14::TEXT IS NOT NULL AND $14::TEXT != '' THEN raw_text || E'\n' || $14::TEXT
            ELSE raw_text
          END,
          processing_stage = 'planejado',
