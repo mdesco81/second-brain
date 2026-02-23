@@ -45,8 +45,8 @@ newgrp docker
 ## 5) Configurar variáveis de produção
 
 ```bash
-cp .env.production.example .env.production
-nano .env.production
+cp .env.example .env
+nano .env
 ```
 
 Preencha:
@@ -73,7 +73,7 @@ Esse comando usa `docker-compose.prod.yml` e sobe:
 ## 7) Verificações
 
 ```bash
-docker compose --env-file .env.production -f docker-compose.prod.yml ps
+docker compose --env-file .env -f docker-compose.prod.yml ps
 curl -I https://SEU_DOMINIO/api/health
 ```
 
@@ -90,7 +90,7 @@ Webhook:
 Logs:
 
 ```bash
-docker compose --env-file .env.production -f docker-compose.prod.yml logs -f app
+docker compose --env-file .env -f docker-compose.prod.yml logs -f app
 ```
 
 Atualização de versão:

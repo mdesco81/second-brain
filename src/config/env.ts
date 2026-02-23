@@ -15,8 +15,6 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.string().min(1).optional(),
   OPENAI_TRANSCRIBE_MODEL: z.string().default("gpt-5.2-transcribe"),
   OPENAI_EMBED_MODEL: z.string().default("text-embedding-3-small"),
-  DASHBOARD_USER: z.string().optional(),
-  DASHBOARD_PASSWORD: z.string().optional(),
   TIMEZONE: z.string().default("America/Sao_Paulo"),
   PROACTIVE_HOUR: z.coerce.number().int().min(0).max(23).default(9),
   PROACTIVE_MINUTE: z.coerce.number().int().min(0).max(59).default(0),

@@ -28,8 +28,8 @@ git pull
 ## 2) Configurar variáveis de produção
 
 ```bash
-cp .env.production.example .env.production
-nano .env.production
+cp .env.example .env
+nano .env
 ```
 
 Preencha todos os valores:
@@ -41,8 +41,6 @@ Preencha todos os valores:
 | `TELEGRAM_BOT_TOKEN` | Token do @BotFather |
 | `TELEGRAM_WEBHOOK_SECRET` | Secret para validar webhook (somente `A-Za-z0-9_-`) |
 | `OPENAI_API_KEY` | Chave da API OpenAI |
-| `DASHBOARD_USER` | Usuário do painel web |
-| `DASHBOARD_PASSWORD` | Senha do painel web |
 | `TIMEZONE` | Ex. `America/Sao_Paulo` |
 | `PROACTIVE_HOUR` / `PROACTIVE_MINUTE` | Horário do check-in diário |
 
@@ -62,13 +60,13 @@ Isso sobe três containers via `docker-compose.prod.yml`:
 
 ```bash
 # Status dos containers
-docker compose --env-file .env.production -f docker-compose.prod.yml ps
+docker compose --env-file .env -f docker-compose.prod.yml ps
 
 # Health check
 curl -I https://SEU_DOMINIO/api/health
 
 # Logs da aplicação
-docker compose --env-file .env.production -f docker-compose.prod.yml logs -f app
+docker compose --env-file .env -f docker-compose.prod.yml logs -f app
 ```
 
 Dashboard: `https://SEU_DOMINIO`
@@ -80,7 +78,7 @@ O webhook do Telegram é configurado automaticamente no boot (com retry a cada 6
 ### Logs
 
 ```bash
-docker compose --env-file .env.production -f docker-compose.prod.yml logs -f app
+docker compose --env-file .env -f docker-compose.prod.yml logs -f app
 ```
 
 ### Atualizar versão
@@ -121,7 +119,7 @@ Sem Elastic IP, o IP público muda a cada reboot. Para associar:
 
 Se o domínio não estiver pronto, use polling:
 
-No `.env.production`, altere a seção do `docker-compose.prod.yml`:
+No `.env`, altere a seção do `docker-compose.prod.yml`:
 - `TELEGRAM_MODE` para `polling`
 - Remova a dependência de `APP_BASE_URL` até o domínio ficar pronto
 

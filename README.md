@@ -21,7 +21,6 @@ MVP para capturar entradas via Telegram (`texto`, `audio`, `PDF`, `imagem`), cla
 - Daily proactive check-in agent with focus queue
 - Weekly report with summary + next-week priorities
 - Web dashboard (`/`) with stage-by-stage workflow, "Foco de Hoje", risk alerts, capture map, Kanban, status controls, and latest weekly debrief
-- Optional basic auth for dashboard/API (`DASHBOARD_USER` + `DASHBOARD_PASSWORD`)
 
 ## Folder structure (knowledge base)
 
@@ -61,7 +60,6 @@ cp .env.example .env
 - `OPENAI_API_KEY`
 - `OPENAI_EMBED_MODEL`
 - `APP_BASE_URL` (obrigatorio no modo webhook)
-- `DASHBOARD_USER` e `DASHBOARD_PASSWORD` (recomendado em producao)
 
 3. Run with Docker Compose:
 
