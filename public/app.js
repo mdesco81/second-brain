@@ -209,30 +209,44 @@ function renderCard(item) {
   const expandedClass = isExpanded ? " expanded" : "";
   const priClass = `pri-${item.priority}`;
 
-  // Due tag
+  // Due tag logic
   let dueTag = "";
+  let urgentDueTag = "";
   if (item.dueAt) {
     const d = daysFromNow(item.dueAt);
     if (d !== null && d < 0) {
       dueTag = `<span class="tag overdue">Atrasado ${Math.abs(d)}d</span>`;
+      urgentDueTag = dueTag;
     } else if (d === 0) {
       dueTag = `<span class="tag overdue">Vence hoje</span>`;
+      urgentDueTag = dueTag;
     } else if (d !== null) {
       dueTag = `<span class="tag due">${item.dueAt}</span>`;
     }
   }
 
-  // PRIMARY: Action title (what to do)
-  const actionTitle = item.actionTitle
-    ? `<h3 class="card-action-title">${esc(item.actionTitle)}</h3>`
+  // PRIMARY: Action title (or summary fallback)
+  const displayTitle = item.actionTitle || ((item.summaryPtBr || "").length > 80 ? (item.summaryPtBr || "").slice(0, 80) + "..." : (item.summaryPtBr || ""));
+  const titleHtml = displayTitle ? `<h3 class="card-action-title">${esc(displayTitle)}</h3>` : "";
+
+  // Quick edit button (only for open cards)
+  const quickEditBtn = item.status === "open"
+    ? `<button class="card-quick-edit" data-edit-id="${item.id}" title="Editar">&#9998;</button>`
     : "";
 
-  // SECONDARY: AI interpretation
+  // Collapsed meta: only priority + category + urgent due
+  const collapsedMeta = `<div class="card-meta-collapsed">
+    <span class="tag priority-${item.priority}">${priorityLabel(item.priority)}</span>
+    <span class="tag category">${esc(item.categoryName)}</span>
+    ${urgentDueTag}
+  </div>`;
+
+  // SECONDARY: AI interpretation (moved to expandable)
   const interpretation = item.summaryPtBr
     ? `<p class="card-interpretation">${esc(item.summaryPtBr)}</p>`
     : "";
 
-  // Key info visible without expand
+  // Key info (moved to expandable)
   const keyInfoRows = [];
   if (item.nextStep) {
     keyInfoRows.push(`<div class="key-info-row"><span class="key-info-label">Proximo:</span><span class="key-info-value">${esc(item.nextStep)}</span></div>`);
@@ -244,6 +258,22 @@ function renderCard(item) {
     ? `<div class="card-key-info">${keyInfoRows.join("")}</div>`
     : "";
 
+  // File indicator
+  const fileCount = item.attachmentCount || (item.hasFile ? 1 : 0);
+  const fileIndicator = fileCount > 0
+    ? `<span class="tag file-tag" title="${fileCount} arquivo${fileCount > 1 ? "s" : ""} anexado${fileCount > 1 ? "s" : ""}">&#128206; ${fileCount > 1 ? fileCount : ""}</span>`
+    : "";
+
+  // Full meta tags (shown in expandable zone)
+  const fullMeta = `<div class="card-meta">
+    <span class="tag id-tag">#${item.id}</span>
+    <span class="tag priority-${item.priority}">${priorityLabel(item.priority)}</span>
+    <span class="tag category">${esc(item.categoryName)}</span>
+    <span class="tag type-tag">${inputTypeLabel(item.inputType)}</span>
+    ${fileIndicator}
+    ${dueTag}
+  </div>`;
+
   // Raw text reference (shown in expanded detail)
   const hasRawText = item.rawText && item.rawText.trim() && item.rawText.trim() !== item.summaryPtBr?.trim();
   const rawTextSection = hasRawText
@@ -251,25 +281,17 @@ function renderCard(item) {
        <div class="raw-text-content" id="raw-${item.id}">${esc(item.rawText)}</div>`
     : "";
 
-  // File attachments section — render directly using known file endpoint
-  const fileCount = item.attachmentCount || (item.hasFile ? 1 : 0);
+  // File attachments section
   let fileSection = "";
   if (fileCount > 0) {
-    // Check cache first; if not cached, show a placeholder that auto-loads
     const cached = state.attachmentsCache[item.id];
     if (cached) {
       fileSection = cached.map(renderAttachment).join("");
     } else {
-      // Fallback: render using legacy single-file endpoint based on inputType
       const fileUrl = `/api/items/${item.id}/file`;
       fileSection = renderAttachmentByType(fileUrl, item.inputType, item.id);
     }
   }
-
-  // File indicator on collapsed card
-  const fileIndicator = fileCount > 0
-    ? `<span class="tag file-tag" title="${fileCount} arquivo${fileCount > 1 ? "s" : ""} anexado${fileCount > 1 ? "s" : ""}">&#128206; ${fileCount > 1 ? fileCount : ""}</span>`
-    : "";
 
   // Detail section (expanded)
   const detail = `
@@ -294,16 +316,13 @@ function renderCard(item) {
 
   return `
     <article class="item-card ${priClass}${expandedClass}" draggable="true" data-card-id="${item.id}" data-card-status="${item.status}">
-      ${actionTitle}
-      ${interpretation}
-      ${keyInfo}
-      <div class="card-meta">
-        <span class="tag id-tag">#${item.id}</span>
-        <span class="tag priority-${item.priority}">${priorityLabel(item.priority)}</span>
-        <span class="tag category">${esc(item.categoryName)}</span>
-        <span class="tag type-tag">${inputTypeLabel(item.inputType)}</span>
-        ${fileIndicator}
-        ${dueTag}
+      ${quickEditBtn}
+      ${titleHtml}
+      ${collapsedMeta}
+      <div class="card-expandable">
+        ${interpretation}
+        ${keyInfo}
+        ${fullMeta}
       </div>
       ${detail}
     </article>
@@ -669,7 +688,7 @@ editForm.addEventListener("submit", async (e) => {
   const id = state.editingItem.id;
   const fields = {
     summaryPtBr: document.getElementById("edit-summary").value.trim(),
-    actionTitle: document.getElementById("edit-action-title").value.trim(),
+    actionTitle: document.getElementById("edit-action-title").value.trim().slice(0, 140),
     priority: document.getElementById("edit-priority").value,
     dueAt: document.getElementById("edit-due").value || null,
     nextStep: document.getElementById("edit-next-step").value.trim(),
@@ -732,7 +751,7 @@ newForm.addEventListener("submit", async (e) => {
 
   const fields = {
     summaryPtBr,
-    actionTitle: document.getElementById("new-action-title").value.trim() || undefined,
+    actionTitle: document.getElementById("new-action-title").value.trim().slice(0, 140) || undefined,
     priority: document.getElementById("new-priority").value,
     dueAt: document.getElementById("new-due").value || undefined,
     nextStep: document.getElementById("new-next-step").value.trim() || undefined,
@@ -755,3 +774,89 @@ newForm.addEventListener("submit", async (e) => {
     saveBtn.textContent = "Criar";
   }
 });
+
+// --- Voice Dictation (Web Speech API) ---
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+if (SpeechRecognition) {
+  let activeRecognition = null;
+  let activeBtn = null;
+
+  document.addEventListener("click", (e) => {
+    const micBtn = e.target.closest(".mic-btn");
+    if (!micBtn) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+
+    const targetId = micBtn.dataset.micTarget;
+    const textarea = document.getElementById(targetId);
+    if (!textarea) return;
+
+    // If already recording on this button, stop
+    if (activeBtn === micBtn && activeRecognition) {
+      activeRecognition.stop();
+      return;
+    }
+
+    // If recording on another button, stop that first
+    if (activeRecognition) {
+      activeRecognition.stop();
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = "pt-BR";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    const baseText = textarea.value;
+
+    recognition.onstart = () => {
+      activeRecognition = recognition;
+      activeBtn = micBtn;
+      micBtn.classList.add("recording");
+      micBtn.title = "Parar ditado";
+    };
+
+    let finalText = "";
+
+    recognition.onresult = (event) => {
+      let interim = "";
+      finalText = "";
+      for (let i = 0; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          finalText += event.results[i][0].transcript;
+        } else {
+          interim += event.results[i][0].transcript;
+        }
+      }
+      const separator = baseText && !baseText.endsWith(" ") ? " " : "";
+      textarea.value = baseText + separator + finalText + interim;
+    };
+
+    recognition.onend = () => {
+      // Keep only final text
+      const separator = baseText && !baseText.endsWith(" ") ? " " : "";
+      textarea.value = baseText + separator + finalText;
+      activeRecognition = null;
+      activeBtn = null;
+      micBtn.classList.remove("recording");
+      micBtn.title = "Ditar por voz";
+    };
+
+    recognition.onerror = (event) => {
+      console.warn("Speech recognition error:", event.error);
+      activeRecognition = null;
+      activeBtn = null;
+      micBtn.classList.remove("recording");
+      micBtn.title = "Ditar por voz";
+    };
+
+    recognition.start();
+  });
+} else {
+  // Hide all mic buttons if Speech API not available
+  document.querySelectorAll(".mic-btn").forEach((btn) => {
+    btn.style.display = "none";
+  });
+}

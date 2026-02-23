@@ -81,12 +81,15 @@
 
         <div class="field">
           <label for="new-summary">Descricao / Nota *</label>
-          <textarea id="new-summary" rows="3" placeholder="O que voce quer registrar?"></textarea>
+          <div class="input-with-mic">
+            <textarea id="new-summary" rows="3" placeholder="O que voce quer registrar?"></textarea>
+            <button type="button" class="mic-btn" data-mic-target="new-summary" title="Ditar por voz">&#127908;</button>
+          </div>
         </div>
 
         <div class="field">
           <label for="new-action-title">Titulo da acao</label>
-          <input type="text" id="new-action-title" placeholder="Ex: Ligar para o contador" />
+          <input type="text" id="new-action-title" maxlength="140" placeholder="Ex: Ligar para o contador" />
         </div>
 
         <div class="field-row">
@@ -134,12 +137,15 @@
 
         <div class="field">
           <label for="edit-summary">Interpretacao / Resumo</label>
-          <textarea id="edit-summary" rows="2"></textarea>
+          <div class="input-with-mic">
+            <textarea id="edit-summary" rows="2"></textarea>
+            <button type="button" class="mic-btn" data-mic-target="edit-summary" title="Ditar por voz">&#127908;</button>
+          </div>
         </div>
 
         <div class="field">
           <label for="edit-action-title">Titulo da acao</label>
-          <input type="text" id="edit-action-title" />
+          <input type="text" id="edit-action-title" maxlength="140" />
         </div>
 
         <div class="field-row">
