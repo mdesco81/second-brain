@@ -430,7 +430,9 @@ function lexicalOverlapScore(a: string, b: string): number {
 function buildCandidateSearchText(candidate: ContinuationContextItem): string {
   return [
     candidate.categoryName,
+    candidate.actionTitle || "",
     candidate.summaryPtBr,
+    candidate.actionDetails || "",
     candidate.normalizedText,
     candidate.nextStep || "",
     candidate.followUpWith || ""
@@ -544,6 +546,8 @@ async function rankContextCandidates(chatId: number, extracted: ExtractedContent
         id: candidate.id,
         categoryName: candidate.categoryName,
         summaryPtBr: candidate.summaryPtBr,
+        actionTitle: candidate.actionTitle,
+        actionDetails: candidate.actionDetails,
         action: candidate.action,
         priority: candidate.priority,
         nextStep: candidate.nextStep,
@@ -692,6 +696,32 @@ async function executePlan(params: {
       throw new Error("merge_target_missing");
     }
     const mergeCard = cards[0];
+
+    // Validate: detect poor AI merge output and skip destructive fields
+    const VAGUE_MERGE_PHRASES = [
+      "complemento da mensagem",
+      "complemento sobre",
+      "atualizacao sobre o tema",
+      "informacao adicional sobre",
+      "continuacao da mensagem",
+      "complementando mensagem",
+      "update sobre",
+      "sobre o assunto anterior"
+    ];
+    const summaryIsVague = VAGUE_MERGE_PHRASES.some(
+      (phrase) => mergeCard.summaryPtBr.toLowerCase().includes(phrase)
+    ) || mergeCard.summaryPtBr.length < 30;
+
+    if (summaryIsVague) {
+      log.warn("AI merge summary is vague or too short — appending incoming text instead of replacing", {
+        targetId,
+        aiSummary: mergeCard.summaryPtBr,
+        incomingTextLength: params.extracted.normalizedText.length
+      });
+      // Fall back to appending a condensed version instead of replacing with vague text
+      mergeCard.summaryPtBr = params.extracted.normalizedText.slice(0, 300);
+    }
+
     const categoryId = await upsertCategory(
       mergeCard.categoryName,
       mergeCard.categoryDescription,
@@ -710,7 +740,8 @@ async function executePlan(params: {
       dueAt: mergeCard.dueDateISO ?? undefined,
       nextStep: mergeCard.nextStepPtBr,
       followUpWith: mergeCard.followUpWithPtBr,
-      normalizedTextAppend: params.extracted.normalizedText
+      normalizedTextAppend: params.extracted.normalizedText,
+      rawTextAppend: params.extracted.rawText
     });
     if (!merged) {
       throw new Error(`merge_target_not_found:${targetId}`);

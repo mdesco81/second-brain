@@ -32,6 +32,8 @@ export interface PlannerContextCandidate {
   id: number;
   categoryName: string;
   summaryPtBr: string;
+  actionTitle?: string;
+  actionDetails?: string;
   action: string;
   priority: ActionPriority;
   nextStep?: string;
@@ -441,6 +443,20 @@ export async function planIntakeWithContext(input: {
     "- MERGE: Same TOPIC, PERSON, PROJECT, or CONTEXT as any open candidate. Be aggressive about merging. Set targetItemId.",
     "- NEW: Only if clearly DIFFERENT subject with no overlap AND the message has only ONE topic/action.",
     "- SPLIT: When the message contains 2+ DISTINCT topics, actions, or requests — even if they share some context. THIS IS THE MOST COMMON MODE FOR VOICE NOTES.",
+    "",
+    "MERGE MODE — CONTENT SYNTHESIS (CRITICAL, NON-NEGOTIABLE):",
+    "When you choose mode='merge', your card output REPLACES the existing card's fields. You MUST synthesize ALL information.",
+    "- READ THE TARGET CARD CAREFULLY: Look at the candidate's summaryPtBr, actionTitle, actionDetails, nextStep, followUpWith in the openContext list.",
+    "- summaryPtBr: Write a COMPLETE standalone summary that captures ALL information from the EXISTING card AND the new message.",
+    "  NEVER write vague phrases like 'complemento da mensagem anterior', 'atualizacao sobre o tema', 'informacao adicional'.",
+    "  A reader who sees ONLY your summary must understand the FULL picture — both the original context AND the new update.",
+    "  BAD: 'Complemento sobre a reuniao com Joao' (loses the original card's context).",
+    "  GOOD: 'Reuniao com Joao sobre redesign do site confirmada para quarta 14h — ele vai trazer proposta de cronograma. Risco: se escopo nao fechar ate sexta, atraso de 2 semanas'.",
+    "- actionTitle: KEEP the existing card's actionTitle if it's good and specific. Only change it if the new information significantly changes WHAT needs to be done.",
+    "  If the existing title is 'Cobrar Joao sobre escopo do site', and the new message adds scheduling info, KEEP the same title — don't replace with something vague.",
+    "- actionDetails: MERGE all facts from both sources — the existing card's details AND the new message's facts. Names, dates, amounts, decisions.",
+    "- priority/nextStep/followUpWith: Only update if the new message provides CLEARER or MORE URGENT information.",
+    "- Test: If your merge card would make the existing card WORSE or LESS INFORMATIVE, you are doing it wrong. Rewrite.",
     "",
     "SPLIT DETECTION (HIGHEST PRIORITY — THIS IS A CRITICAL SYSTEM FEATURE):",
     "Before doing ANYTHING else, read the entire input and COUNT how many distinct action items, requests, or topics exist.",

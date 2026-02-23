@@ -333,6 +333,7 @@ export interface ContinuationContextItem {
   normalizedText: string;
   action: string;
   actionTitle?: string;
+  actionDetails?: string;
   nextStep?: string;
   followUpWith?: string;
   dueAt?: string;
@@ -454,6 +455,7 @@ export async function loadLatestOpenItemForChat(chatId: number): Promise<Continu
     normalized_text: string;
     action: string;
     action_title: string | null;
+    action_details: string | null;
     next_step: string | null;
     follow_up_with: string | null;
     due_at: string | null;
@@ -469,6 +471,7 @@ export async function loadLatestOpenItemForChat(chatId: number): Promise<Continu
             i.normalized_text,
             i.action,
             i.action_title,
+            i.action_details,
             i.next_step,
             i.follow_up_with,
             i.due_at::TEXT,
@@ -500,6 +503,7 @@ export async function loadLatestOpenItemForChat(chatId: number): Promise<Continu
     normalizedText: row.normalized_text,
     action: row.action,
     actionTitle: row.action_title ?? undefined,
+    actionDetails: row.action_details ?? undefined,
     nextStep: row.next_step ?? undefined,
     followUpWith: row.follow_up_with ?? undefined,
     dueAt: row.due_at ?? undefined,
@@ -519,6 +523,7 @@ export async function listOpenContextCandidates(chatId: number, limit = 30): Pro
     normalized_text: string;
     action: string;
     action_title: string | null;
+    action_details: string | null;
     next_step: string | null;
     follow_up_with: string | null;
     due_at: string | null;
@@ -534,6 +539,7 @@ export async function listOpenContextCandidates(chatId: number, limit = 30): Pro
             i.normalized_text,
             i.action,
             i.action_title,
+            i.action_details,
             i.next_step,
             i.follow_up_with,
             i.due_at::TEXT,
@@ -563,6 +569,7 @@ export async function listOpenContextCandidates(chatId: number, limit = 30): Pro
     normalizedText: row.normalized_text,
     action: row.action,
     actionTitle: row.action_title ?? undefined,
+    actionDetails: row.action_details ?? undefined,
     nextStep: row.next_step ?? undefined,
     followUpWith: row.follow_up_with ?? undefined,
     dueAt: row.due_at ?? undefined,
@@ -618,20 +625,33 @@ export async function mergeIntoInboxItem(params: {
   nextStep?: string;
   followUpWith?: string;
   normalizedTextAppend: string;
+  rawTextAppend?: string;
 }): Promise<boolean> {
   const result = await pool.query<{ id: number }>(
     `UPDATE inbox_items
      SET category_id = $3,
          bucket = $4,
          action = $5,
-         summary_pt_br = $6,
-         action_title = $7,
+         -- Summary: use AI synthesis if it's longer than existing; otherwise append to preserve content
+         summary_pt_br = CASE
+           WHEN LENGTH($6) >= LENGTH(summary_pt_br) THEN $6
+           ELSE summary_pt_br || E'\n[Atualização] ' || $6
+         END,
+         -- Title: only replace if new value is non-empty and substantive (>10 chars)
+         action_title = CASE
+           WHEN $7 IS NOT NULL AND LENGTH(TRIM($7)) > 10 THEN $7
+           ELSE COALESCE(action_title, $7)
+         END,
          action_details = COALESCE(action_details, '') || CASE WHEN action_details IS NULL OR action_details = '' THEN '' ELSE E'\n\n' END || $8,
          priority = $9,
          due_at = COALESCE($10::DATE, due_at),
          next_step = COALESCE($11, next_step),
          follow_up_with = COALESCE($12, follow_up_with),
          normalized_text = normalized_text || E'\n\n[Complemento ' || NOW()::TEXT || E']\n' || $13,
+         raw_text = CASE
+           WHEN $14 IS NOT NULL AND $14 != '' THEN raw_text || E'\n' || $14
+           ELSE raw_text
+         END,
          processing_stage = 'planejado',
          processing_error = NULL,
          updated_at = NOW()
@@ -652,7 +672,8 @@ export async function mergeIntoInboxItem(params: {
       params.dueAt ?? null,
       params.nextStep ?? null,
       params.followUpWith ?? null,
-      params.normalizedTextAppend
+      params.normalizedTextAppend,
+      params.rawTextAppend ?? null
     ]
   );
 
