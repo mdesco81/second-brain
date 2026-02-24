@@ -18,7 +18,6 @@
         <h1 class="logo"><span class="logo-icon">&#129504;</span> Second Brain</h1>
         <nav class="main-tabs">
           <button class="main-tab active" data-tab="brain">Second Brain</button>
-          <button class="main-tab" data-tab="inbox">Inbox <span class="inbox-tab-badge" id="inbox-tab-badge" style="display:none">0</span></button>
           <button class="main-tab" data-tab="jarbas">Jarbas</button>
         </nav>
         <div class="search-box">
@@ -46,6 +45,13 @@
       <section class="stats-strip" id="stats"></section>
 
       <section class="kanban-board" id="kanban-board">
+        <div class="kanban-column" data-status="inbox">
+          <div class="kanban-header">
+            <h2>A Processar</h2>
+            <span class="kanban-count" id="count-inbox">0</span>
+          </div>
+          <div class="kanban-cards" id="col-inbox"></div>
+        </div>
         <div class="kanban-column" data-status="open">
           <div class="kanban-header">
             <h2>Abertos</h2>
@@ -82,53 +88,6 @@
         <p class="empty-state-text">Nenhum card encontrado com os filtros atuais.</p>
         <button type="button" class="empty-state-cta" id="clear-filters-btn">Limpar filtros</button>
       </div>
-
-      <!-- Inbox Tab Content -->
-      <section class="inbox-section" id="inbox-section" style="display:none">
-        <div class="inbox-header">
-          <h2>Processar Inbox</h2>
-          <span class="inbox-count-badge" id="inbox-count-badge">0 itens</span>
-        </div>
-        <div class="inbox-card-container" id="inbox-card-container"></div>
-        <div class="inbox-actions" id="inbox-actions" style="display:none">
-          <button type="button" class="btn success" id="inbox-btn-actionable">Acionavel</button>
-          <button type="button" class="btn secondary" id="inbox-btn-reference">Referencia</button>
-          <button type="button" class="btn danger" id="inbox-btn-trash">Descartar</button>
-          <button type="button" class="btn secondary" id="inbox-btn-skip" style="margin-left:auto">Pular</button>
-        </div>
-        <div class="inbox-quick-form" id="inbox-quick-form" style="display:none">
-          <div class="field-row">
-            <div class="field">
-              <label for="inbox-priority">Prioridade</label>
-              <select id="inbox-priority">
-                <option value="ALTA">Alta</option>
-                <option value="MEDIA" selected>Media</option>
-                <option value="BAIXA">Baixa</option>
-              </select>
-            </div>
-            <div class="field">
-              <label for="inbox-due">Prazo</label>
-              <input type="date" id="inbox-due" />
-            </div>
-          </div>
-          <div class="field">
-            <label for="inbox-next-step">Proximo passo</label>
-            <input type="text" id="inbox-next-step" placeholder="Qual a proxima acao concreta?" />
-          </div>
-          <div class="field">
-            <label for="inbox-owner">Responsavel</label>
-            <input type="text" id="inbox-owner" placeholder="Quem vai executar?" />
-          </div>
-          <div class="inbox-form-actions">
-            <button type="button" class="btn secondary" id="inbox-form-cancel">Cancelar</button>
-            <button type="button" class="btn primary" id="inbox-form-save">Salvar como tarefa</button>
-          </div>
-        </div>
-        <div class="empty-state" id="inbox-empty" style="display:none">
-          <span class="empty-state-icon">&#9989;</span>
-          <p class="empty-state-text">Inbox zerada! Todos os itens foram processados.</p>
-        </div>
-      </section>
 
       <!-- Jarbas Tab Content -->
       <section class="jarbas-view" id="jarbas-view" style="display:none">

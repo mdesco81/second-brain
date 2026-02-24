@@ -7,15 +7,17 @@ const categoryFilter = document.getElementById("filter-category");
 const editModal = document.getElementById("edit-modal");
 const editForm = document.getElementById("edit-form");
 
+const colInbox = document.getElementById("col-inbox");
 const colOpen = document.getElementById("col-open");
 const colDone = document.getElementById("col-done");
 const colEliminated = document.getElementById("col-eliminated");
+const countInbox = document.getElementById("count-inbox");
 const countOpen = document.getElementById("count-open");
 const countDone = document.getElementById("count-done");
 const countEliminated = document.getElementById("count-eliminated");
 
-const columns = { open: colOpen, done: colDone, eliminated: colEliminated };
-const counts = { open: countOpen, done: countDone, eliminated: countEliminated };
+const columns = { inbox: colInbox, open: colOpen, done: colDone, eliminated: colEliminated };
+const counts = { inbox: countInbox, open: countOpen, done: countDone, eliminated: countEliminated };
 
 // --- State ---
 const state = {
@@ -32,9 +34,7 @@ const state = {
   activeTab: "brain",
   jarbasOutputs: null,
   jarbasPreviewCache: {},
-  inboxQueue: [],
-  inboxIndex: 0,
-  inboxCount: 0
+  inboxItemIds: new Set()
 };
 
 // ============================================================================
@@ -342,11 +342,9 @@ function switchTab(tab) {
   ];
 
   const jarbasSection = document.getElementById("jarbas-view");
-  const inboxSection = document.getElementById("inbox-section");
 
-  // Hide all non-brain sections
+  // Hide non-brain sections
   jarbasSection.style.display = "none";
-  inboxSection.style.display = "none";
 
   if (tab === "brain") {
     for (const el of brainSections) {
@@ -354,12 +352,6 @@ function switchTab(tab) {
     }
     // Re-hide search results if not active
     document.getElementById("search-results").style.display = "none";
-  } else if (tab === "inbox") {
-    for (const el of brainSections) {
-      if (el) el.style.display = "none";
-    }
-    inboxSection.style.display = "block";
-    loadInboxQueue();
   } else {
     for (const el of brainSections) {
       if (el) el.style.display = "none";
@@ -438,167 +430,6 @@ async function processInboxItemApi(id, params) {
   return r.json();
 }
 
-async function loadInboxQueue() {
-  try {
-    const data = await fetchInboxQueue();
-    state.inboxQueue = data.items || [];
-    state.inboxCount = data.count || 0;
-    state.inboxIndex = 0;
-    renderInboxView();
-    updateInboxBadge();
-  } catch {
-    state.inboxQueue = [];
-    state.inboxCount = 0;
-    renderInboxView();
-  }
-}
-
-function updateInboxBadge() {
-  const badge = document.getElementById("inbox-tab-badge");
-  if (state.inboxCount > 0) {
-    badge.textContent = state.inboxCount;
-    badge.style.display = "inline-flex";
-  } else {
-    badge.style.display = "none";
-  }
-}
-
-function renderInboxView() {
-  const container = document.getElementById("inbox-card-container");
-  const actions = document.getElementById("inbox-actions");
-  const empty = document.getElementById("inbox-empty");
-  const form = document.getElementById("inbox-quick-form");
-  const badge = document.getElementById("inbox-count-badge");
-
-  badge.textContent = `${state.inboxCount} iten${state.inboxCount !== 1 ? "s" : ""}`;
-
-  if (state.inboxQueue.length === 0 || state.inboxIndex >= state.inboxQueue.length) {
-    container.innerHTML = "";
-    actions.style.display = "none";
-    form.style.display = "none";
-    empty.style.display = "block";
-    return;
-  }
-
-  empty.style.display = "none";
-  actions.style.display = "flex";
-  form.style.display = "none";
-
-  const item = state.inboxQueue[state.inboxIndex];
-  const date = new Date(item.createdAt).toLocaleDateString("pt-BR");
-
-  container.innerHTML = `
-    <div class="inbox-item-card">
-      <div class="inbox-item-counter">${state.inboxIndex + 1} de ${state.inboxQueue.length}</div>
-      ${item.actionTitle ? `<h3 class="inbox-item-title">${esc(item.actionTitle)}</h3>` : ""}
-      <p class="inbox-item-summary">${esc(item.summaryPtBr)}</p>
-      ${item.rawText && item.rawText !== item.summaryPtBr ? `<div class="inbox-item-raw">${esc(item.rawText.slice(0, 500))}${item.rawText.length > 500 ? "..." : ""}</div>` : ""}
-      <div class="card-meta" style="margin-top:10px">
-        <span class="tag category">${esc(item.categoryName)}</span>
-        <span class="tag type-tag">${inputTypeLabel(item.inputType)}</span>
-        <span class="tag id-tag">#${item.id}</span>
-        <span class="tag due">${date}</span>
-      </div>
-    </div>
-  `;
-}
-
-// Inbox event handlers
-document.getElementById("inbox-btn-actionable").addEventListener("click", () => {
-  document.getElementById("inbox-quick-form").style.display = "block";
-  document.getElementById("inbox-actions").style.display = "none";
-  // Reset form
-  document.getElementById("inbox-priority").value = "MEDIA";
-  document.getElementById("inbox-due").value = "";
-  document.getElementById("inbox-next-step").value = "";
-  document.getElementById("inbox-owner").value = "";
-});
-
-document.getElementById("inbox-form-cancel").addEventListener("click", () => {
-  document.getElementById("inbox-quick-form").style.display = "none";
-  document.getElementById("inbox-actions").style.display = "flex";
-});
-
-document.getElementById("inbox-form-save").addEventListener("click", async () => {
-  const item = state.inboxQueue[state.inboxIndex];
-  if (!item) return;
-
-  const btn = document.getElementById("inbox-form-save");
-  btn.disabled = true;
-  btn.textContent = "Salvando...";
-
-  try {
-    await processInboxItemApi(item.id, {
-      mode: "actionable",
-      priority: document.getElementById("inbox-priority").value,
-      dueAt: document.getElementById("inbox-due").value || undefined,
-      nextStep: document.getElementById("inbox-next-step").value.trim() || undefined,
-      followUpWith: document.getElementById("inbox-owner").value.trim() || undefined
-    });
-    showToast("Item marcado como tarefa", "success", 2500);
-    advanceInbox(true);
-  } catch (err) {
-    showToast(`Erro: ${err.message}`, "error");
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Salvar como tarefa";
-  }
-});
-
-document.getElementById("inbox-btn-reference").addEventListener("click", async () => {
-  const item = state.inboxQueue[state.inboxIndex];
-  if (!item) return;
-
-  try {
-    await processInboxItemApi(item.id, { mode: "reference" });
-    showToast("Item arquivado como referencia", "success", 2500);
-    advanceInbox(true);
-  } catch (err) {
-    showToast(`Erro: ${err.message}`, "error");
-  }
-});
-
-document.getElementById("inbox-btn-trash").addEventListener("click", async () => {
-  const item = state.inboxQueue[state.inboxIndex];
-  if (!item) return;
-
-  const confirmed = await showConfirm({
-    title: "Descartar item?",
-    message: `"${(item.summaryPtBr || "").slice(0, 80)}" sera eliminado.`,
-    icon: "\ud83d\uddd1\ufe0f",
-    okText: "Descartar",
-    okClass: "danger"
-  });
-  if (!confirmed) return;
-
-  try {
-    await processInboxItemApi(item.id, { mode: "trash" });
-    showToast("Item descartado", "success", 2500);
-    advanceInbox(true);
-  } catch (err) {
-    showToast(`Erro: ${err.message}`, "error");
-  }
-});
-
-document.getElementById("inbox-btn-skip").addEventListener("click", () => {
-  advanceInbox();
-});
-
-function advanceInbox(wasProcessed = false) {
-  state.inboxIndex++;
-  if (wasProcessed) {
-    state.inboxCount = Math.max(0, state.inboxCount - 1);
-    updateInboxBadge();
-  }
-
-  // If we exhausted the current batch, reload from server (there may be more)
-  if (state.inboxIndex >= state.inboxQueue.length && state.inboxCount > 0) {
-    loadInboxQueue();
-    return;
-  }
-
-  renderInboxView();
-}
 
 // ============================================================================
 // Render: Alerts
@@ -729,9 +560,16 @@ function renderCard(item) {
   const displayTitle = item.actionTitle || ((item.summaryPtBr || "").length > 80 ? (item.summaryPtBr || "").slice(0, 80) + "..." : (item.summaryPtBr || ""));
   const titleHtml = displayTitle ? `<h3 class="card-action-title">${esc(displayTitle)}</h3>` : "";
 
-  // Quick hover actions (only for open cards)
+  // Quick hover actions
+  const isInbox = state.inboxItemIds.has(item.id);
   let hoverActions = "";
-  if (item.status === "open") {
+  if (isInbox) {
+    hoverActions = `<div class="card-hover-actions">
+      <button class="card-hover-btn action-done" data-inbox-process="${item.id}" data-inbox-mode="actionable" title="Marcar como tarefa">&#10003;</button>
+      <button class="card-hover-btn" data-inbox-process="${item.id}" data-inbox-mode="reference" title="Referencia">&#128218;</button>
+      <button class="card-hover-btn action-eliminate" data-inbox-process="${item.id}" data-inbox-mode="trash" title="Descartar">&#10005;</button>
+    </div>`;
+  } else if (item.status === "open") {
     hoverActions = `<div class="card-hover-actions">
       <button class="card-hover-btn action-done" data-status-id="${item.id}" data-status="done" title="Resolver">&#10003;</button>
       <button class="card-hover-btn action-eliminate" data-status-id="${item.id}" data-status="eliminated" title="Eliminar">&#10005;</button>
@@ -742,6 +580,13 @@ function renderCard(item) {
       <button class="card-hover-btn" data-status-id="${item.id}" data-status="open" title="Reabrir">&#8634;</button>
     </div>`;
   }
+
+  // Inline inbox processing actions (always visible in inbox column)
+  const inboxActionsHtml = isInbox ? `<div class="card-inbox-actions">
+    <button class="btn success" data-inbox-process="${item.id}" data-inbox-mode="actionable">&#10003; Tarefa</button>
+    <button class="btn secondary" data-inbox-process="${item.id}" data-inbox-mode="reference">Ref</button>
+    <button class="btn danger" data-inbox-process="${item.id}" data-inbox-mode="trash">Lixo</button>
+  </div>` : "";
 
   // Collapsed meta
   const collapsedMeta = `<div class="card-meta-collapsed">
@@ -812,7 +657,11 @@ function renderCard(item) {
       ${item.processingError ? `<div class="detail-row"><span class="detail-label" style="color:var(--danger)">Erro</span><span class="detail-value" style="color:var(--danger)">${esc(item.processingError)}</span></div>` : ""}
       <div class="card-actions">
         <div class="card-actions-main">
-          ${item.status === "open" ? `
+          ${isInbox ? `
+            <button class="btn success" data-inbox-process="${item.id}" data-inbox-mode="actionable">Marcar como tarefa</button>
+            <button class="btn secondary" data-inbox-process="${item.id}" data-inbox-mode="reference">Referencia</button>
+            <button class="btn danger" data-inbox-process="${item.id}" data-inbox-mode="trash">Descartar</button>
+          ` : item.status === "open" ? `
             <button class="btn edit" data-edit-id="${item.id}">Editar</button>
             <button class="btn success" data-status-id="${item.id}" data-status="done">Resolver</button>
             <button class="btn danger" data-status-id="${item.id}" data-status="eliminated">Eliminar</button>
@@ -833,6 +682,7 @@ function renderCard(item) {
       ${progressiveHtml}
       ${titleHtml}
       ${collapsedMeta}
+      ${inboxActionsHtml}
       <div class="card-expandable">
         ${interpretation}
         ${keyInfo}
@@ -849,23 +699,28 @@ function renderCard(item) {
 function renderKanban(summary) {
   const items = getFilteredItems(summary);
 
-  const grouped = { open: [], done: [], eliminated: [] };
+  const grouped = { inbox: [], open: [], done: [], eliminated: [] };
   for (const item of items) {
-    const bucket = grouped[item.status];
-    if (bucket) {
-      bucket.push(item);
+    if (item.status === "open" && state.inboxItemIds.has(item.id)) {
+      grouped.inbox.push(item);
+    } else {
+      const bucket = grouped[item.status];
+      if (bucket) {
+        bucket.push(item);
+      }
     }
   }
 
   const totalFiltered = items.length;
 
-  for (const status of ["open", "done", "eliminated"]) {
+  for (const status of ["inbox", "open", "done", "eliminated"]) {
     const col = columns[status];
     const group = grouped[status];
     counts[status].textContent = group.length;
 
     if (group.length === 0) {
       const msgs = {
+        inbox: "Nenhum item para processar",
         open: "Nenhum card aberto",
         done: "Nenhum resolvido",
         eliminated: "Nenhum eliminado"
@@ -904,8 +759,7 @@ async function load() {
     ]);
     state.summary = summary;
     state.categories = categories;
-    state.inboxCount = inboxData.count || 0;
-    updateInboxBadge();
+    state.inboxItemIds = new Set((inboxData.items || []).map((i) => i.id));
     renderAll();
   } catch (error) {
     if (!state.summary) {
@@ -1169,6 +1023,47 @@ document.addEventListener("click", async (e) => {
 });
 
 // ============================================================================
+// Events: Inbox processing (kanban inline actions)
+// ============================================================================
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-inbox-process]");
+  if (!btn) return;
+
+  e.stopPropagation();
+  const id = Number(btn.dataset.inboxProcess);
+  const mode = btn.dataset.inboxMode;
+
+  if (mode === "trash") {
+    const item = state.summary?.recentItems?.find((i) => i.id === id);
+    const confirmed = await showConfirm({
+      title: "Descartar item?",
+      message: `"${((item?.summaryPtBr) || "").slice(0, 80)}" sera eliminado.`,
+      icon: "\ud83d\uddd1\ufe0f",
+      okText: "Descartar",
+      okClass: "danger"
+    });
+    if (!confirmed) return;
+  }
+
+  btn.disabled = true;
+  const card = btn.closest(".item-card");
+  if (card) card.classList.add("removing");
+
+  try {
+    await processInboxItemApi(id, { mode });
+    const msgs = { actionable: "Marcado como tarefa", reference: "Arquivado como referencia", trash: "Descartado" };
+    showToast(msgs[mode] || "Processado", "success", 2500);
+    await new Promise((r) => setTimeout(r, 200));
+    await load();
+  } catch (err) {
+    showToast(`Erro: ${err.message}`, "error");
+    if (card) card.classList.remove("removing");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ============================================================================
 // Events: Edit button
 // ============================================================================
 document.addEventListener("click", (e) => {
@@ -1366,15 +1261,32 @@ for (const colEl of document.querySelectorAll(".kanban-column")) {
     const newStatus = colEl.dataset.status;
     if (!cardId || !newStatus) return;
 
+    // Don't allow drops to inbox column
+    if (newStatus === "inbox") return;
+
     const item = state.summary?.recentItems?.find((i) => i.id === cardId);
-    if (!item || item.status === newStatus) return;
+    if (!item) return;
+
+    const isFromInbox = state.inboxItemIds.has(cardId);
+    if (!isFromInbox && item.status === newStatus) return;
 
     try {
-      await patchStatus(cardId, newStatus);
+      if (isFromInbox) {
+        // Process inbox item based on target column
+        const modeMap = { open: "actionable", done: "actionable", eliminated: "trash" };
+        const mode = modeMap[newStatus] || "actionable";
+        await processInboxItemApi(cardId, { mode });
+        // If target is done, also mark as done after processing
+        if (newStatus === "done") {
+          await patchStatus(cardId, "done");
+        }
+      } else {
+        await patchStatus(cardId, newStatus);
+      }
       const statusMessages = {
+        open: isFromInbox ? "Marcado como tarefa" : "Card reaberto",
         done: "Card marcado como resolvido",
-        eliminated: "Card eliminado",
-        open: "Card reaberto"
+        eliminated: isFromInbox ? "Descartado" : "Card eliminado"
       };
       showToast(statusMessages[newStatus] || "Status atualizado", "success", 2500);
       await load();

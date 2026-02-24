@@ -177,7 +177,7 @@ body {
 /* ---- Kanban Board ---- */
 .kanban-board {
   display: grid;
-  grid-template-columns: 1.4fr 1fr 0.8fr;
+  grid-template-columns: 1fr 1.4fr 1fr 0.8fr;
   gap: 16px;
   margin-top: 8px;
   min-height: 400px;
@@ -224,6 +224,7 @@ body {
   border-radius: 999px;
 }
 
+.kanban-column[data-status="inbox"] .kanban-header h2 { color: var(--warn); }
 .kanban-column[data-status="open"] .kanban-header h2 { color: var(--accent); }
 .kanban-column[data-status="done"] .kanban-header h2 { color: var(--ok); }
 .kanban-column[data-status="eliminated"] .kanban-header h2 { color: var(--muted); }
@@ -1221,122 +1222,24 @@ dialog.confirm-dialog {
   margin-top: 8px;
 }
 
-/* ---- Inbox Processing Queue ---- */
-.inbox-section {
-  max-width: 600px;
-  margin: 16px auto 0;
+/* ---- Inbox Column (Kanban) ---- */
+.kanban-column[data-status="inbox"] .item-card {
+  border-left: 3px solid var(--warn);
 }
 
-.inbox-header {
+.card-inbox-actions {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 16px;
+  gap: 4px;
+  margin-top: 8px;
+  flex-wrap: wrap;
 }
 
-.inbox-header h2 {
-  margin: 0;
-  font-size: 1.05rem;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.inbox-count-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 4px 14px;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
-.inbox-tab-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 999px;
-  font-size: 0.62rem;
-  font-weight: 700;
-  background: var(--danger);
-  color: #fff;
-  margin-left: 4px;
-  line-height: 1;
-}
-
-.inbox-item-card {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 20px;
-  box-shadow: var(--shadow-sm);
-  animation: cardEnter 0.25s ease-out;
-}
-
-.inbox-item-counter {
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--muted);
-  margin-bottom: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.inbox-item-title {
-  margin: 0 0 8px;
-  font-size: 1rem;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.inbox-item-summary {
-  margin: 0 0 10px;
-  font-size: 0.88rem;
-  line-height: 1.5;
-  color: var(--text);
-}
-
-.inbox-item-raw {
-  background: #f9f8f6;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 10px 12px;
-  font-size: 0.78rem;
-  line-height: 1.5;
-  color: var(--muted);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 120px;
-  overflow-y: auto;
-  margin-bottom: 10px;
-}
-
-.inbox-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 14px;
-  justify-content: center;
-}
-
-.inbox-quick-form {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 18px;
-  margin-top: 14px;
-  box-shadow: var(--shadow-sm);
-  animation: slideDown 0.2s ease-out;
-}
-
-.inbox-form-actions {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-  margin-top: 14px;
+.card-inbox-actions .btn {
+  padding: 4px 10px;
+  font-size: 0.7rem;
+  flex: 1;
+  text-align: center;
+  min-width: 0;
 }
 
 /* ---- Progressive Summarization ---- */
@@ -1400,6 +1303,13 @@ dialog.confirm-dialog {
 }
 
 /* ---- Responsive ---- */
+@media (max-width: 1100px) {
+  .kanban-board {
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+}
+
 @media (max-width: 900px) {
   .kanban-board {
     grid-template-columns: 1fr;
