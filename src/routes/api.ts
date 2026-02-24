@@ -2,6 +2,7 @@ import { Router, text as expressText } from "express";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
+  deleteInboxItem,
   getAttachmentById,
   getInboxItemMetadata,
   getItemFileInfo,
@@ -319,6 +320,44 @@ apiRouter.post("/actions", async (req, res, next) => {
 
     await writeActionBoard(await listOpenActionItems(undefined, 40));
     res.status(201).json({ ok: true, id: itemId });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// --- Delete card permanently ---
+apiRouter.delete("/actions/:id", async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ ok: false, error: "invalid_id" });
+      return;
+    }
+
+    const deleted = await deleteInboxItem(id);
+    if (!deleted) {
+      res.status(404).json({ ok: false, error: "not_found" });
+      return;
+    }
+
+    // Clean up files on disk (best-effort, don't fail if file missing)
+    const pathsToDelete = [
+      deleted.storagePath,
+      ...deleted.attachmentPaths
+    ].filter((p): p is string => Boolean(p));
+
+    const uniquePaths = [...new Set(pathsToDelete)];
+    for (const filePath of uniquePaths) {
+      try {
+        await fs.unlink(filePath);
+        log.info("file:deleted", { path: filePath, itemId: id });
+      } catch {
+        // File may already be gone or path invalid — that's fine
+      }
+    }
+
+    await writeActionBoard(await listOpenActionItems(undefined, 40));
+    res.json({ ok: true, id, filesDeleted: uniquePaths.length });
   } catch (error) {
     next(error);
   }

@@ -432,6 +432,17 @@ body {
 .btn.success:hover { background: #dcfce7; }
 .btn.danger { background: var(--danger-bg); color: var(--danger); border-color: rgba(220,38,38,0.3); }
 .btn.danger:hover { background: #fee2e2; }
+.btn.delete-permanent {
+  background: transparent;
+  color: var(--muted);
+  border-color: var(--line);
+  font-size: 0.7rem;
+}
+.btn.delete-permanent:hover {
+  background: #fee2e2;
+  color: var(--danger);
+  border-color: rgba(220,38,38,0.3);
+}
 .btn.edit { background: var(--accent-soft); color: var(--accent); border-color: rgba(37,99,235,0.3); }
 .btn.edit:hover { background: #dbeafe; }
 

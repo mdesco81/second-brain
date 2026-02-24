@@ -110,6 +110,12 @@ async function fetchAttachments(itemId) {
   return data.attachments || [];
 }
 
+async function deleteItem(id) {
+  const r = await fetch(`/api/actions/${id}`, { method: "DELETE" });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
 async function createItem(fields) {
   const r = await fetch("/api/actions", {
     method: "POST",
@@ -181,6 +187,7 @@ function renderJarbasCard(item) {
       <div class="jarbas-card-actions">
         <a href="/api/items/${item.id}/file" download class="btn secondary">Download MD</a>
         ${uploadBtn}
+        <button class="btn delete-permanent" data-delete-id="${item.id}" title="Deletar permanentemente">Deletar</button>
       </div>
       <div class="jarbas-upload-status" id="upload-status-${item.id}"></div>
     </article>
@@ -492,6 +499,7 @@ function renderCard(item) {
         ` : `
           <button class="btn secondary" data-status-id="${item.id}" data-status="open">Reabrir</button>
         `}
+        <button class="btn delete-permanent" data-delete-id="${item.id}" title="Deletar permanentemente">Deletar</button>
       </div>
     </div>
   `;
@@ -633,6 +641,33 @@ document.addEventListener("click", async (e) => {
     alert(`Erro ao atualizar #${id}: ${err}`);
   } finally {
     statusBtn.disabled = false;
+  }
+});
+
+// --- Events: Delete button (permanent) ---
+document.addEventListener("click", async (e) => {
+  const deleteBtn = e.target.closest("[data-delete-id]");
+  if (!deleteBtn) return;
+
+  e.stopPropagation();
+  const id = Number(deleteBtn.dataset.deleteId);
+  if (!confirm(`Deletar permanentemente o card #${id}? Esta acao nao pode ser desfeita.`)) return;
+
+  deleteBtn.disabled = true;
+  deleteBtn.textContent = "Deletando...";
+
+  try {
+    await deleteItem(id);
+    // Refresh both views
+    if (state.activeTab === "jarbas") {
+      await loadJarbasOutputs();
+    }
+    await load();
+  } catch (err) {
+    alert(`Erro ao deletar #${id}: ${err}`);
+  } finally {
+    deleteBtn.disabled = false;
+    deleteBtn.textContent = "Deletar";
   }
 });
 

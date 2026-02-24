@@ -1478,6 +1478,31 @@ export async function updateInboxItemMetadata(
   );
 }
 
+export async function deleteInboxItem(itemId: number): Promise<{
+  storagePath: string | null;
+  attachmentPaths: string[];
+} | null> {
+  // Gather file paths before deleting (so we can clean up files on disk)
+  const itemResult = await pool.query<{ storage_path: string | null }>(
+    `SELECT storage_path FROM inbox_items WHERE id = $1::INTEGER`,
+    [itemId]
+  );
+  if (itemResult.rows.length === 0) return null;
+
+  const attachResult = await pool.query<{ storage_path: string }>(
+    `SELECT storage_path FROM item_attachments WHERE item_id = $1::INTEGER`,
+    [itemId]
+  );
+
+  const storagePath = itemResult.rows[0].storage_path;
+  const attachmentPaths = attachResult.rows.map((r) => r.storage_path);
+
+  // Delete the item (cascades to item_attachments, item_embeddings)
+  await pool.query(`DELETE FROM inbox_items WHERE id = $1::INTEGER`, [itemId]);
+
+  return { storagePath, attachmentPaths };
+}
+
 export async function closePool(): Promise<void> {
   await pool.end();
 }
