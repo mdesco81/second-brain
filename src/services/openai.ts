@@ -361,6 +361,60 @@ export async function embedText(text: string): Promise<number[] | null> {
   }
 }
 
+// ── Progressive Summarization (distillation) ────────────────────────
+
+export async function generateDistillation(params: {
+  normalizedText: string;
+  rawText: string | null;
+  summaryPtBr: string;
+  layer: 2 | 3;
+}): Promise<string[] | string | null> {
+  const content = [
+    params.normalizedText,
+    params.rawText ? `\n\nTexto original: ${params.rawText}` : "",
+    `\n\nResumo: ${params.summaryPtBr}`
+  ].join("");
+
+  if (params.layer === 2) {
+    const result = await callClaude({
+      system: [
+        "Voce e um especialista em destilacao progressiva de conhecimento (metodo BASB de Tiago Forte).",
+        "Extraia as 3 a 5 frases-chave mais importantes do texto abaixo.",
+        "Cada frase deve capturar uma ideia central, insight acionavel, ou dado relevante.",
+        "Maximo 20 palavras por frase.",
+        "Retorne APENAS um JSON array de strings. Sem explicacoes.",
+        "Exemplo: [\"IA generativa reduz custos em 40%\", \"Empresas early-adopters crescem 3x mais rapido\"]"
+      ].join("\n"),
+      userMessage: content.slice(0, 4000),
+      model: "fast",
+      maxTokens: 512
+    });
+
+    if (!result) return null;
+    try {
+      const cleaned = result.replace(/```json\n?|```\n?/g, "").trim();
+      const parsed = JSON.parse(cleaned) as string[];
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Layer 3: executive summary
+  const result = await callClaude({
+    system: [
+      "Gere UMA unica frase executiva que resume a essencia deste conteudo.",
+      "A frase deve ser acionavel e direta, maximo 30 palavras.",
+      "Retorne APENAS a frase, sem aspas, sem explicacoes, sem JSON."
+    ].join("\n"),
+    userMessage: content.slice(0, 4000),
+    model: "fast",
+    maxTokens: 128
+  });
+
+  return result?.trim() || null;
+}
+
 // ── JSON schema description (shared by planner & classifier) ─────────
 
 const CLASSIFICATION_SCHEMA_DESCRIPTION = `You MUST respond with ONLY a valid JSON object (no markdown, no backticks, no explanation).

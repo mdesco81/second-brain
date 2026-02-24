@@ -93,6 +93,11 @@ export interface DashboardSummary {
     processingError?: string;
     hasFile?: boolean;
     attachmentCount?: number;
+    progressive?: {
+      layer2?: string[];
+      layer3?: string;
+      expandCount?: number;
+    };
   }>;
   todayFocus: Array<{
     id: number;

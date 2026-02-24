@@ -15,7 +15,8 @@ import {
   formatResearchContext,
   SearchMode
 } from "./search.js";
-import { buildGhostwriterPrompt } from "./prompts.js";
+import { buildGhostwriterPrompt, buildHashtagPrompt, buildHooksPrompt } from "./prompts.js";
+import { updateInboxItemMetadata } from "../../db/schema.js";
 
 async function handleGhostwriter(
   request: AgentRequest
@@ -66,6 +67,55 @@ async function handleGhostwriter(
     });
   }
 
+  // 2.5. Generate hooks
+  let hooks: Array<{ type: string; text: string; selected: boolean }> = [];
+  try {
+    const hooksPrompt = buildHooksPrompt({
+      topic,
+      contentType,
+      researchContext,
+      learnedStyle
+    });
+
+    const hooksRaw = await callClaude({
+      system: hooksPrompt.system,
+      userMessage: hooksPrompt.user,
+      model: "fast",
+      maxTokens: 1024
+    });
+
+    if (hooksRaw) {
+      const cleaned = hooksRaw.replace(/```json\n?|```\n?/g, "").trim();
+      const parsed = JSON.parse(cleaned) as Array<{ type: string; text: string }>;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        hooks = parsed.map((h, i) => ({ type: h.type, text: h.text, selected: i === 0 }));
+        log.info("ghostwriter:hooks-generated", { count: hooks.length });
+
+        // Send hooks to user via Telegram
+        const hooksMessage = [
+          `Ganchos gerados para "${topic}":`,
+          "",
+          ...hooks.map((h, i) => `${i + 1}. [${h.type}] ${h.text}${i === 0 ? " ← selecionado" : ""}`)
+        ].join("\n");
+        await sendText(chatId, hooksMessage);
+      }
+    }
+  } catch (hookError) {
+    log.warn("ghostwriter: hook generation failed, proceeding without", {
+      error: hookError instanceof Error ? hookError.message : String(hookError)
+    });
+  }
+
+  // Build additional instructions with selected hook
+  const selectedHook = hooks.find((h) => h.selected);
+  const hookInstruction = selectedHook
+    ? `GANCHO OBRIGATORIO: Comece o texto com este gancho (adapte se necessario): "${selectedHook.text}"`
+    : undefined;
+
+  const finalAdditionalInstructions = [additionalInstructions, hookInstruction]
+    .filter(Boolean)
+    .join("\n\n") || undefined;
+
   // 3. Writing phase
   await sendText(
     chatId,
@@ -80,7 +130,7 @@ async function handleGhostwriter(
     learnedStyle,
     referenceSamples,
     researchContext,
-    additionalInstructions: additionalInstructions ?? undefined
+    additionalInstructions: finalAdditionalInstructions
   });
 
   const maxTokens = contentType === "article" ? 8192 : 4096;
@@ -112,6 +162,102 @@ async function handleGhostwriter(
       summary: "Falha ao gerar o rascunho.",
       error: "Claude returned empty response"
     };
+  }
+
+  // Post format validation + retry
+  if (contentType === "post") {
+    const validation = validateLinkedInFormat(draft);
+    log.info("ghostwriter:post-validation", {
+      charCount: validation.charCount,
+      hasShortParagraphs: validation.hasShortParagraphs,
+      hasLineBreaks: validation.hasLineBreaks,
+      hasExternalLinks: validation.hasExternalLinks
+    });
+
+    if (validation.charCount < 1000 || validation.charCount > 2200) {
+      log.info("ghostwriter:post-retry", {
+        reason: validation.charCount < 1000 ? "too_short" : "too_long",
+        charCount: validation.charCount
+      });
+
+      const adjustInstruction = validation.charCount < 1000
+        ? `O post gerado tem apenas ${validation.charCount} caracteres. Preciso que tenha entre 1300 e 1900 caracteres. Expanda com mais detalhes, exemplos e argumentacao, mantendo o mesmo tom e estrutura.`
+        : `O post gerado tem ${validation.charCount} caracteres. Preciso que tenha entre 1300 e 1900 caracteres. Condense mantendo os pontos principais, sem perder o gancho e o CTA.`;
+
+      try {
+        const retryDraft = await callClaude({
+          system: prompt.system,
+          userMessage: `${prompt.user}\n\n## AJUSTE OBRIGATORIO\n${adjustInstruction}`,
+          model: "default",
+          maxTokens
+        });
+
+        if (retryDraft) {
+          const retryValidation = validateLinkedInFormat(retryDraft);
+          log.info("ghostwriter:post-retry-result", {
+            charCount: retryValidation.charCount
+          });
+          draft = retryDraft;
+        }
+      } catch (retryError) {
+        log.warn("ghostwriter: retry failed, using original draft", {
+          error: retryError instanceof Error ? retryError.message : String(retryError)
+        });
+      }
+    }
+  }
+
+  // 3.5. Generate hashtags
+  let hashtags: string[] = [];
+  try {
+    const hashtagPrompt = buildHashtagPrompt({
+      topic,
+      contentType,
+      researchContext,
+      draft
+    });
+
+    const hashtagRaw = await callClaude({
+      system: hashtagPrompt.system,
+      userMessage: hashtagPrompt.user,
+      model: "fast",
+      maxTokens: 256
+    });
+
+    if (hashtagRaw) {
+      const cleaned = hashtagRaw.replace(/```json\n?|```\n?/g, "").trim();
+      const parsed = JSON.parse(cleaned) as string[];
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        // Extract any inline hashtags from draft
+        const inlineHashtags = (draft.match(/#[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9]+/g) || []).map((h) => h.toLowerCase());
+
+        // Deduplicate: merge AI hashtags + inline, removing duplicates
+        const seen = new Set<string>();
+        for (const tag of [...parsed, ...inlineHashtags]) {
+          const normalized = tag.startsWith("#") ? tag : `#${tag}`;
+          if (!seen.has(normalized.toLowerCase())) {
+            seen.add(normalized.toLowerCase());
+            hashtags.push(normalized);
+          }
+        }
+
+        // Remove inline hashtags from draft to avoid duplication
+        if (inlineHashtags.length > 0) {
+          draft = draft.replace(/\n*(?:#[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9]+\s*)+$/m, "").trimEnd();
+        }
+
+        log.info("ghostwriter:hashtags-generated", { count: hashtags.length, hashtags });
+      }
+    }
+  } catch (hashtagError) {
+    log.warn("ghostwriter: hashtag generation failed, proceeding without", {
+      error: hashtagError instanceof Error ? hashtagError.message : String(hashtagError)
+    });
+  }
+
+  // Append hashtags to draft
+  if (hashtags.length > 0) {
+    draft = draft.trimEnd() + "\n\n" + hashtags.join(" ");
   }
 
   // 4. Append sources to draft if available
@@ -169,6 +315,17 @@ async function handleGhostwriter(
     summary: `${typeLabel} sobre "${topic}" gerado e salvo.`
   });
 
+  // 7.5. Save hooks and hashtags in metadata
+  if (itemId && (hooks.length > 0 || hashtags.length > 0)) {
+    const extraMetadata: Record<string, unknown> = {};
+    if (hooks.length > 0) extraMetadata.hooks = hooks;
+    if (hashtags.length > 0) extraMetadata.hashtags = hashtags;
+
+    await updateInboxItemMetadata(itemId, extraMetadata).catch((err) => {
+      log.warn("ghostwriter: failed to save hooks/hashtags metadata", { err });
+    });
+  }
+
   log.info("ghostwriter:complete", { topic, outputPath, itemId });
 
   const sourcesNote = research?.citations?.length
@@ -186,6 +343,23 @@ async function handleGhostwriter(
       `Voce pode baixar o arquivo, editar e subir a versao final para que eu aprenda seu estilo.${sourcesNote}`
     ].join("\n")
   };
+}
+
+interface LinkedInValidation {
+  charCount: number;
+  hasShortParagraphs: boolean;
+  hasLineBreaks: boolean;
+  hasExternalLinks: boolean;
+}
+
+function validateLinkedInFormat(text: string): LinkedInValidation {
+  const charCount = text.length;
+  const paragraphs = text.split(/\n\s*\n/).filter((p) => p.trim());
+  const hasShortParagraphs = paragraphs.every((p) => p.trim().split("\n").length <= 4);
+  const hasLineBreaks = text.includes("\n\n");
+  const hasExternalLinks = /https?:\/\/[^\s)]+/i.test(text);
+
+  return { charCount, hasShortParagraphs, hasLineBreaks, hasExternalLinks };
 }
 
 function buildSearchQuery(

@@ -2,25 +2,36 @@ import { Router, text as expressText } from "express";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
+  countInboxQueue,
   deleteInboxItem,
   getAttachmentById,
   getInboxItemMetadata,
   getItemFileInfo,
+  getItemForDistill,
+  incrementExpandCount,
   insertDashboardItem,
   listAgentOutputs,
   listCategories,
+  listInboxQueue,
   listItemAttachments,
   listOpenActionItems,
+  loadAllEmbeddings,
   loadDashboardSummary,
+  processInboxItem,
+  searchItemsByIds,
+  textSearchItems,
   updateInboxItemFields,
   updateInboxItemMetadata,
   updateInboxItemStatusById,
+  updateProgressiveLayer,
   upsertCategory
 } from "../db/schema.js";
 import { ActionPriority, ActionStatus } from "../types/domain.js";
 import { writeActionBoard } from "../services/storage.js";
 import { analyzeFinalVersion, saveFinalVersion } from "../agents/ghostwriter/knowledge.js";
+import { embedText, generateDistillation } from "../services/openai.js";
 import { log } from "../utils/logger.js";
+import { cosineSimilarity } from "../utils/math.js";
 
 export const apiRouter = Router();
 
@@ -358,6 +369,226 @@ apiRouter.delete("/actions/:id", async (req, res, next) => {
 
     await writeActionBoard(await listOpenActionItems(undefined, 40));
     res.json({ ok: true, id, filesDeleted: uniquePaths.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Progressive Summarization ────────────────────────────────────────
+
+apiRouter.post("/items/:id/expand", async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ ok: false, error: "invalid_id" });
+      return;
+    }
+
+    const newCount = await incrementExpandCount(id);
+
+    // Trigger layer generation async (fire-and-forget, sequential to avoid race conditions)
+    const item = await getItemForDistill(id);
+    if (item) {
+      const progressive = (item.metadata?.progressive as Record<string, unknown>) ?? {};
+      const needsLayer2 = !progressive.layer2 && newCount >= 1;
+      const needsLayer3 = !progressive.layer3 && newCount >= 3;
+
+      if (needsLayer2 || needsLayer3) {
+        (async () => {
+          try {
+            // Layer 2: generate on first expand
+            if (needsLayer2) {
+              const highlights = await generateDistillation({
+                normalizedText: item.normalizedText,
+                rawText: item.rawText,
+                summaryPtBr: item.summaryPtBr,
+                layer: 2
+              });
+              if (highlights && Array.isArray(highlights)) {
+                await updateProgressiveLayer(id, "layer2", highlights, newCount);
+              }
+            }
+
+            // Layer 3: generate after 3+ expands (sequential after layer2 to avoid race)
+            if (needsLayer3) {
+              const summary = await generateDistillation({
+                normalizedText: item.normalizedText,
+                rawText: item.rawText,
+                summaryPtBr: item.summaryPtBr,
+                layer: 3
+              });
+              if (summary && typeof summary === "string") {
+                await updateProgressiveLayer(id, "layer3", summary, newCount);
+              }
+            }
+          } catch (err) {
+            log.warn("progressive:generation-failed", { id, error: String(err) });
+          }
+        })();
+      }
+    }
+
+    res.json({ ok: true, expandCount: newCount });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.post("/items/:id/distill", async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ ok: false, error: "invalid_id" });
+      return;
+    }
+
+    const item = await getItemForDistill(id);
+    if (!item) {
+      res.status(404).json({ ok: false, error: "not_found" });
+      return;
+    }
+
+    const progressive = (item.metadata?.progressive as Record<string, unknown>) ?? {};
+    const updates: Record<string, unknown> = { ...progressive };
+
+    // Generate Layer 2 if missing
+    if (!progressive.layer2) {
+      const highlights = await generateDistillation({
+        normalizedText: item.normalizedText,
+        rawText: item.rawText,
+        summaryPtBr: item.summaryPtBr,
+        layer: 2
+      });
+      if (highlights && Array.isArray(highlights)) {
+        updates.layer2 = highlights;
+        updates.layer2At = new Date().toISOString();
+      }
+    }
+
+    // Generate Layer 3 if missing
+    if (!progressive.layer3) {
+      const summary = await generateDistillation({
+        normalizedText: item.normalizedText,
+        rawText: item.rawText,
+        summaryPtBr: item.summaryPtBr,
+        layer: 3
+      });
+      if (summary && typeof summary === "string") {
+        updates.layer3 = summary;
+        updates.layer3At = new Date().toISOString();
+      }
+    }
+
+    await updateInboxItemMetadata(id, { progressive: updates });
+
+    res.json({ ok: true, progressive: updates });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Semantic Search ──────────────────────────────────────────────────
+
+apiRouter.get("/search", async (req, res, next) => {
+  try {
+    const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    if (!q || q.length < 2) {
+      res.json({ ok: true, results: [], mode: "none" });
+      return;
+    }
+
+    // Try semantic search first
+    const queryEmbedding = await embedText(q);
+    if (queryEmbedding) {
+      const allEmbeddings = await loadAllEmbeddings();
+      if (allEmbeddings.length > 0) {
+        // Compute similarity scores
+        const scored = allEmbeddings
+          .map((item) => ({
+            itemId: item.itemId,
+            score: cosineSimilarity(queryEmbedding, item.vector)
+          }))
+          .filter((s) => s.score > 0.3)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 10);
+
+        if (scored.length > 0) {
+          const ids = scored.map((s) => s.itemId);
+          const items = await searchItemsByIds(ids);
+
+          // Merge items with scores and maintain order
+          const scoreMap = new Map(scored.map((s) => [s.itemId, s.score]));
+          const results = ids
+            .map((id) => {
+              const item = items.find((i) => i.id === id);
+              if (!item) return null;
+              return { ...item, score: scoreMap.get(id) ?? 0 };
+            })
+            .filter(Boolean);
+
+          res.json({ ok: true, results, mode: "semantic" });
+          return;
+        }
+      }
+    }
+
+    // Fallback to text search
+    const textResults = await textSearchItems(q, 10);
+    res.json({
+      ok: true,
+      results: textResults.map((item) => ({ ...item, score: null })),
+      mode: "text"
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Inbox Processing Queue ───────────────────────────────────────────
+
+apiRouter.get("/inbox-queue", async (_req, res, next) => {
+  try {
+    const [items, count] = await Promise.all([
+      listInboxQueue(30),
+      countInboxQueue()
+    ]);
+    res.json({ ok: true, items, count });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.post("/inbox-queue/:id/process", async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ ok: false, error: "invalid_id" });
+      return;
+    }
+
+    const body = req.body ?? {};
+    const mode = body.mode as "actionable" | "reference" | "trash";
+    if (!["actionable", "reference", "trash"].includes(mode)) {
+      res.status(400).json({ ok: false, error: "invalid_mode" });
+      return;
+    }
+
+    const validPriorities: ActionPriority[] = ["ALTA", "MEDIA", "BAIXA"];
+    const updated = await processInboxItem(id, {
+      mode,
+      priority: validPriorities.includes(body.priority) ? body.priority : undefined,
+      nextStep: typeof body.nextStep === "string" ? body.nextStep.trim() : undefined,
+      followUpWith: typeof body.followUpWith === "string" ? body.followUpWith.trim() : undefined,
+      dueAt: typeof body.dueAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.dueAt) ? body.dueAt : undefined
+    });
+
+    if (!updated) {
+      res.status(404).json({ ok: false, error: "not_found" });
+      return;
+    }
+
+    await writeActionBoard(await listOpenActionItems(undefined, 40));
+    res.json({ ok: true, id, mode });
   } catch (error) {
     next(error);
   }

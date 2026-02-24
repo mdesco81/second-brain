@@ -41,6 +41,7 @@ import { appendProjectStatus, storeIncomingMedia, writeActionBoard, writeKnowled
 import { InputType, ProcessingStage } from "../types/domain.js";
 import { log } from "../utils/logger.js";
 import { containsJarbasKeyword, stripJarbasKeyword, routeToAgent } from "../agents/router.js";
+import { cosineSimilarity } from "../utils/math.js";
 
 interface ExtractedContent {
   inputType: InputType;
@@ -415,23 +416,6 @@ interface PendingRelationPayload {
   contextCandidates: PlannerContextCandidate[];
 }
 
-function cosineSimilarity(a: number[], b: number[]): number {
-  if (!a.length || !b.length || a.length !== b.length) {
-    return 0;
-  }
-  let dot = 0;
-  let na = 0;
-  let nb = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  if (!na || !nb) {
-    return 0;
-  }
-  return dot / (Math.sqrt(na) * Math.sqrt(nb));
-}
 
 function lexicalOverlapScore(a: string, b: string): number {
   // Accept tokens with 3+ chars to catch names (Joao, TI, ERP) and short keywords

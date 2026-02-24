@@ -24,15 +24,17 @@ export function buildGhostwriterPrompt(params: {
         "- IMPORTANTE: o texto deve ter entre 900 e 1500 palavras. Menos que isso esta incompleto."
       ]
     : [
-        "FORMATO: Post LinkedIn — formato curto e de alto impacto (150 a 300 palavras)",
+        "FORMATO: Post LinkedIn — formato otimizado para alcance (1300 a 1900 caracteres)",
         "- Produza EXATAMENTE UM post. NAO gere multiplas opcoes ou variantes.",
         "- Gancho forte na primeira linha (frase curta, provocativa, que faz parar o scroll)",
-        "- Espacamento generoso: 1-3 linhas por paragrafo, nunca blocos densos de texto",
-        "- Use quebras de linha para criar ritmo e impacto visual",
+        "- Quebra de linha a cada 1-2 frases. Linha vazia entre paragrafos para criar ritmo visual",
+        "- Paragrafos curtos: maximo 2-3 linhas cada. Nunca blocos densos de texto",
         "- Foque em UMA ideia central com 1-2 dados ou exemplos concretos",
-        "- Fechamento com pergunta aberta ou call-to-action para engajamento",
-        "- 3-5 hashtags relevantes no final (linha separada)",
-        "- IMPORTANTE: o texto deve ter entre 150 e 300 palavras. Post LinkedIn ideal e conciso."
+        "- NAO inclua links externos no corpo do post (reduz alcance no algoritmo do LinkedIn)",
+        "- NAO use engagement bait generico ('Concorda?', 'Curta se...', 'Comenta ai')",
+        "- Fechamento com CTA genuino: convite a reflexao, pergunta provocativa real, ou acao concreta",
+        "- NAO inclua hashtags no texto — elas serao geradas separadamente",
+        "- IMPORTANTE: o texto DEVE ter entre 1300 e 1900 caracteres (incluindo espacos e quebras de linha). Este e o range ideal para maximizar o Depth Score do LinkedIn."
       ];
 
   const systemParts: string[] = [
@@ -119,4 +121,68 @@ export function buildGhostwriterPrompt(params: {
     system: systemParts.join("\n"),
     user: userParts.join("\n")
   };
+}
+
+export function buildHashtagPrompt(params: {
+  topic: string;
+  contentType: "post" | "article";
+  researchContext: string;
+  draft: string;
+}): { system: string; user: string } {
+  const system = [
+    "Voce e um especialista em LinkedIn SEO e hashtags.",
+    "Gere hashtags otimizadas para maximizar alcance no LinkedIn.",
+    "",
+    "## Regras",
+    "- Gere exatamente 5-6 hashtags",
+    "- Mix obrigatorio: 2 amplas (ex: #Lideranca, #Inovacao, #Gestao) + 2-3 de nicho (ex: #IAGenerativa, #B2BSaaS, #FintechBrasil) + 1 trending/momento",
+    "- Use CamelCase em portugues (ex: #InteligenciaArtificial, nao #inteligenciaartificial)",
+    "- Sem espacos, sem acentos nas hashtags",
+    "- Retorne APENAS um JSON array de strings. Exemplo: [\"#Lideranca\", \"#IAGenerativa\"]",
+    "- Nao inclua nenhum texto adicional, explicacao ou formatacao markdown"
+  ].join("\n");
+
+  const user = [
+    `Gere hashtags para um ${params.contentType === "article" ? "artigo" : "post"} LinkedIn sobre: ${params.topic}`,
+    "",
+    "## Trecho do conteudo",
+    params.draft.slice(0, 800),
+    "",
+    params.researchContext ? `## Contexto da pesquisa\n${params.researchContext.slice(0, 500)}` : ""
+  ].join("\n");
+
+  return { system, user };
+}
+
+export function buildHooksPrompt(params: {
+  topic: string;
+  contentType: "post" | "article";
+  researchContext: string;
+  learnedStyle: string;
+}): { system: string; user: string } {
+  const system = [
+    "Voce e um copywriter especialista em ganchos (hooks) para LinkedIn.",
+    "Gere 5 hooks distintos, um de cada tipo abaixo:",
+    "",
+    "1. ESTATISTICA — Comece com um dado/numero impactante real (da pesquisa fornecida)",
+    "2. CONTRARIO — Desafie uma crenca comum do setor. Comece com 'A maioria acredita...' ou similar",
+    "3. HISTORIA — Mini-narrativa pessoal/profissional em 1-2 frases que conecta emocionalmente",
+    "4. DOR — Descreva uma frustracao real que o leitor sente no dia-a-dia profissional",
+    "5. PERGUNTA — Pergunta provocativa que faz o leitor parar e refletir",
+    "",
+    "## Regras",
+    "- Cada hook deve ter no maximo 2 frases (max 200 caracteres)",
+    "- Hooks devem ser em portugues brasileiro, tom profissional mas humano",
+    "- Retorne APENAS um JSON array de objetos: [{\"type\": \"ESTATISTICA\", \"text\": \"...\"}]",
+    "- Nao inclua nenhum texto adicional, explicacao ou formatacao markdown",
+    params.learnedStyle ? `\n## Estilo do autor (para referencia de tom)\n${params.learnedStyle.slice(0, 400)}` : ""
+  ].join("\n");
+
+  const user = [
+    `Gere 5 hooks para um ${params.contentType === "article" ? "artigo" : "post"} LinkedIn sobre: ${params.topic}`,
+    "",
+    params.researchContext ? `## Contexto da pesquisa\n${params.researchContext.slice(0, 800)}` : ""
+  ].join("\n");
+
+  return { system, user };
 }

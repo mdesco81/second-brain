@@ -31,7 +31,10 @@ const state = {
   attachmentsCache: {},
   activeTab: "brain",
   jarbasOutputs: null,
-  jarbasPreviewCache: {}
+  jarbasPreviewCache: {},
+  inboxQueue: [],
+  inboxIndex: 0,
+  inboxCount: 0
 };
 
 // ============================================================================
@@ -197,6 +200,12 @@ async function createItem(fields) {
 // ============================================================================
 // Jarbas API
 // ============================================================================
+async function postExpand(id) {
+  const r = await fetch(`/api/items/${id}/expand`, { method: "POST" });
+  if (!r.ok) return null;
+  return r.json();
+}
+
 async function fetchAgentOutputs() {
   const r = await fetch("/api/agent-outputs");
   if (!r.ok) return [];
@@ -237,6 +246,19 @@ function renderJarbasCard(item) {
     ? `<div class="jarbas-card-preview">${esc(preview.slice(0, 500))}${preview.length > 500 ? "..." : ""}</div>`
     : `<div class="jarbas-card-preview" style="color:var(--muted);font-style:italic">Carregando preview...</div>`;
 
+  // Hashtags display
+  const hashtagsHtml = item.hashtags && item.hashtags.length > 0
+    ? `<div class="jarbas-hashtags">${item.hashtags.map((h) => `<span class="jarbas-hashtag">${esc(h)}</span>`).join("")}</div>`
+    : "";
+
+  // Hooks display
+  const hooksHtml = item.hooks && item.hooks.length > 0
+    ? `<div class="jarbas-hooks">
+        <div class="jarbas-hooks-title">Ganchos gerados:</div>
+        ${item.hooks.map((h) => `<div class="jarbas-hook${h.selected ? " selected" : ""}"><span class="jarbas-hook-type">${esc(h.type)}</span> ${esc(h.text)}</div>`).join("")}
+      </div>`
+    : "";
+
   const uploadBtn = !item.hasFinalVersion
     ? `<label class="jarbas-upload-label">
          Subir versao final
@@ -255,7 +277,9 @@ function renderJarbasCard(item) {
         <span class="tag id-tag">#${item.id}</span>
         <span class="tag due">${date}</span>
       </div>
+      ${hashtagsHtml}
       ${previewHtml}
+      ${hooksHtml}
       <div class="jarbas-card-actions">
         <a href="/api/items/${item.id}/file" download class="btn secondary">Download MD</a>
         ${uploadBtn}
@@ -313,16 +337,29 @@ function switchTab(tab) {
     document.getElementById("stats"),
     document.getElementById("kanban-board"),
     document.getElementById("empty-state"),
+    document.getElementById("search-results"),
     document.getElementById("fab-new-card")
   ];
 
   const jarbasSection = document.getElementById("jarbas-view");
+  const inboxSection = document.getElementById("inbox-section");
+
+  // Hide all non-brain sections
+  jarbasSection.style.display = "none";
+  inboxSection.style.display = "none";
 
   if (tab === "brain") {
     for (const el of brainSections) {
       if (el) el.style.display = "";
     }
-    jarbasSection.style.display = "none";
+    // Re-hide search results if not active
+    document.getElementById("search-results").style.display = "none";
+  } else if (tab === "inbox") {
+    for (const el of brainSections) {
+      if (el) el.style.display = "none";
+    }
+    inboxSection.style.display = "block";
+    loadInboxQueue();
   } else {
     for (const el of brainSections) {
       if (el) el.style.display = "none";
@@ -381,6 +418,187 @@ document.addEventListener("change", async (e) => {
     if (statusEl) statusEl.textContent = "";
   }
 });
+
+// ============================================================================
+// Inbox Processing Queue
+// ============================================================================
+async function fetchInboxQueue() {
+  const r = await fetch("/api/inbox-queue");
+  if (!r.ok) return { items: [], count: 0 };
+  return r.json();
+}
+
+async function processInboxItemApi(id, params) {
+  const r = await fetch(`/api/inbox-queue/${id}/process`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(params)
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+async function loadInboxQueue() {
+  try {
+    const data = await fetchInboxQueue();
+    state.inboxQueue = data.items || [];
+    state.inboxCount = data.count || 0;
+    state.inboxIndex = 0;
+    renderInboxView();
+    updateInboxBadge();
+  } catch {
+    state.inboxQueue = [];
+    state.inboxCount = 0;
+    renderInboxView();
+  }
+}
+
+function updateInboxBadge() {
+  const badge = document.getElementById("inbox-tab-badge");
+  if (state.inboxCount > 0) {
+    badge.textContent = state.inboxCount;
+    badge.style.display = "inline-flex";
+  } else {
+    badge.style.display = "none";
+  }
+}
+
+function renderInboxView() {
+  const container = document.getElementById("inbox-card-container");
+  const actions = document.getElementById("inbox-actions");
+  const empty = document.getElementById("inbox-empty");
+  const form = document.getElementById("inbox-quick-form");
+  const badge = document.getElementById("inbox-count-badge");
+
+  badge.textContent = `${state.inboxCount} iten${state.inboxCount !== 1 ? "s" : ""}`;
+
+  if (state.inboxQueue.length === 0 || state.inboxIndex >= state.inboxQueue.length) {
+    container.innerHTML = "";
+    actions.style.display = "none";
+    form.style.display = "none";
+    empty.style.display = "block";
+    return;
+  }
+
+  empty.style.display = "none";
+  actions.style.display = "flex";
+  form.style.display = "none";
+
+  const item = state.inboxQueue[state.inboxIndex];
+  const date = new Date(item.createdAt).toLocaleDateString("pt-BR");
+
+  container.innerHTML = `
+    <div class="inbox-item-card">
+      <div class="inbox-item-counter">${state.inboxIndex + 1} de ${state.inboxQueue.length}</div>
+      ${item.actionTitle ? `<h3 class="inbox-item-title">${esc(item.actionTitle)}</h3>` : ""}
+      <p class="inbox-item-summary">${esc(item.summaryPtBr)}</p>
+      ${item.rawText && item.rawText !== item.summaryPtBr ? `<div class="inbox-item-raw">${esc(item.rawText.slice(0, 500))}${item.rawText.length > 500 ? "..." : ""}</div>` : ""}
+      <div class="card-meta" style="margin-top:10px">
+        <span class="tag category">${esc(item.categoryName)}</span>
+        <span class="tag type-tag">${inputTypeLabel(item.inputType)}</span>
+        <span class="tag id-tag">#${item.id}</span>
+        <span class="tag due">${date}</span>
+      </div>
+    </div>
+  `;
+}
+
+// Inbox event handlers
+document.getElementById("inbox-btn-actionable").addEventListener("click", () => {
+  document.getElementById("inbox-quick-form").style.display = "block";
+  document.getElementById("inbox-actions").style.display = "none";
+  // Reset form
+  document.getElementById("inbox-priority").value = "MEDIA";
+  document.getElementById("inbox-due").value = "";
+  document.getElementById("inbox-next-step").value = "";
+  document.getElementById("inbox-owner").value = "";
+});
+
+document.getElementById("inbox-form-cancel").addEventListener("click", () => {
+  document.getElementById("inbox-quick-form").style.display = "none";
+  document.getElementById("inbox-actions").style.display = "flex";
+});
+
+document.getElementById("inbox-form-save").addEventListener("click", async () => {
+  const item = state.inboxQueue[state.inboxIndex];
+  if (!item) return;
+
+  const btn = document.getElementById("inbox-form-save");
+  btn.disabled = true;
+  btn.textContent = "Salvando...";
+
+  try {
+    await processInboxItemApi(item.id, {
+      mode: "actionable",
+      priority: document.getElementById("inbox-priority").value,
+      dueAt: document.getElementById("inbox-due").value || undefined,
+      nextStep: document.getElementById("inbox-next-step").value.trim() || undefined,
+      followUpWith: document.getElementById("inbox-owner").value.trim() || undefined
+    });
+    showToast("Item marcado como tarefa", "success", 2500);
+    advanceInbox(true);
+  } catch (err) {
+    showToast(`Erro: ${err.message}`, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Salvar como tarefa";
+  }
+});
+
+document.getElementById("inbox-btn-reference").addEventListener("click", async () => {
+  const item = state.inboxQueue[state.inboxIndex];
+  if (!item) return;
+
+  try {
+    await processInboxItemApi(item.id, { mode: "reference" });
+    showToast("Item arquivado como referencia", "success", 2500);
+    advanceInbox(true);
+  } catch (err) {
+    showToast(`Erro: ${err.message}`, "error");
+  }
+});
+
+document.getElementById("inbox-btn-trash").addEventListener("click", async () => {
+  const item = state.inboxQueue[state.inboxIndex];
+  if (!item) return;
+
+  const confirmed = await showConfirm({
+    title: "Descartar item?",
+    message: `"${(item.summaryPtBr || "").slice(0, 80)}" sera eliminado.`,
+    icon: "\ud83d\uddd1\ufe0f",
+    okText: "Descartar",
+    okClass: "danger"
+  });
+  if (!confirmed) return;
+
+  try {
+    await processInboxItemApi(item.id, { mode: "trash" });
+    showToast("Item descartado", "success", 2500);
+    advanceInbox(true);
+  } catch (err) {
+    showToast(`Erro: ${err.message}`, "error");
+  }
+});
+
+document.getElementById("inbox-btn-skip").addEventListener("click", () => {
+  advanceInbox();
+});
+
+function advanceInbox(wasProcessed = false) {
+  state.inboxIndex++;
+  if (wasProcessed) {
+    state.inboxCount = Math.max(0, state.inboxCount - 1);
+    updateInboxBadge();
+  }
+
+  // If we exhausted the current batch, reload from server (there may be more)
+  if (state.inboxIndex >= state.inboxQueue.length && state.inboxCount > 0) {
+    loadInboxQueue();
+    return;
+  }
+
+  renderInboxView();
+}
 
 // ============================================================================
 // Render: Alerts
@@ -495,6 +713,18 @@ function renderCard(item) {
     }
   }
 
+  // Progressive summarization layers
+  let progressiveHtml = "";
+  const prog = item.progressive;
+  if (prog) {
+    if (prog.layer3) {
+      progressiveHtml += `<div class="progressive-layer3">${esc(prog.layer3)}</div>`;
+    }
+    if (prog.layer2 && Array.isArray(prog.layer2) && prog.layer2.length > 0) {
+      progressiveHtml += `<div class="progressive-layer2">${prog.layer2.map((h) => `<span class="highlight-phrase">${esc(h)}</span>`).join("")}</div>`;
+    }
+  }
+
   // PRIMARY: Action title (or summary fallback)
   const displayTitle = item.actionTitle || ((item.summaryPtBr || "").length > 80 ? (item.summaryPtBr || "").slice(0, 80) + "..." : (item.summaryPtBr || ""));
   const titleHtml = displayTitle ? `<h3 class="card-action-title">${esc(displayTitle)}</h3>` : "";
@@ -600,6 +830,7 @@ function renderCard(item) {
   return `
     <article class="item-card ${priClass}${expandedClass}" draggable="true" data-card-id="${item.id}" data-card-status="${item.status}">
       ${hoverActions}
+      ${progressiveHtml}
       ${titleHtml}
       ${collapsedMeta}
       <div class="card-expandable">
@@ -666,9 +897,15 @@ async function load() {
   if (state.loading) return;
   state.loading = true;
   try {
-    const [summary, categories] = await Promise.all([fetchDashboard(), fetchCategories()]);
+    const [summary, categories, inboxData] = await Promise.all([
+      fetchDashboard(),
+      fetchCategories(),
+      fetchInboxQueue().catch(() => ({ items: [], count: 0 }))
+    ]);
     state.summary = summary;
     state.categories = categories;
+    state.inboxCount = inboxData.count || 0;
+    updateInboxBadge();
     renderAll();
   } catch (error) {
     if (!state.summary) {
@@ -712,6 +949,8 @@ document.addEventListener("click", (e) => {
       if (fileCount > 0) {
         loadAttachmentsForCard(id);
       }
+      // Fire-and-forget: track expand for progressive summarization
+      postExpand(id).catch(() => {});
     }
     return;
   }
@@ -740,15 +979,114 @@ categoryFilter.addEventListener("change", () => {
 });
 
 // ============================================================================
-// Events: Search
+// Semantic Search API
+// ============================================================================
+async function semanticSearch(query) {
+  const r = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+  if (!r.ok) return { results: [], mode: "none" };
+  return r.json();
+}
+
+function renderSearchResults(results, mode, query) {
+  const container = document.getElementById("search-results-cards");
+  const title = document.getElementById("search-results-title");
+  const modeLabel = mode === "semantic" ? "semantica" : "textual";
+  title.textContent = `${results.length} resultado${results.length !== 1 ? "s" : ""} (busca ${modeLabel})`;
+
+  if (results.length === 0) {
+    container.innerHTML = `<div class="empty-state" style="padding:24px">
+      <span class="empty-state-icon">&#128270;</span>
+      <p class="empty-state-text">Nenhum resultado para "${esc(query)}"</p>
+    </div>`;
+    return;
+  }
+
+  container.innerHTML = results.map((item) => {
+    const scoreHtml = item.score !== null && item.score !== undefined
+      ? `<span class="tag" style="background:var(--accent-soft);color:var(--accent)">${Math.round(item.score * 100)}%</span>`
+      : "";
+    const displayTitle = item.actionTitle || (item.summaryPtBr || "").slice(0, 100);
+    const priClass = `pri-${item.priority}`;
+
+    return `<article class="item-card ${priClass}" data-card-id="${item.id}" data-card-status="${item.status}" style="cursor:pointer">
+      <h3 class="card-action-title" style="padding-right:0">${esc(displayTitle)}</h3>
+      <div class="card-meta" style="margin-top:6px">
+        <span class="tag id-tag">#${item.id}</span>
+        <span class="tag priority-${item.priority}">${priorityLabel(item.priority)}</span>
+        <span class="tag category">${esc(item.categoryName)}</span>
+        ${scoreHtml}
+        ${item.dueAt ? `<span class="tag due">${item.dueAt}</span>` : ""}
+      </div>
+      <p class="card-interpretation" style="margin-top:8px">${esc((item.summaryPtBr || "").slice(0, 200))}${(item.summaryPtBr || "").length > 200 ? "..." : ""}</p>
+    </article>`;
+  }).join("");
+}
+
+function showSearchResults(results, mode, query) {
+  document.getElementById("kanban-board").style.display = "none";
+  document.getElementById("empty-state").style.display = "none";
+  document.getElementById("search-results").style.display = "block";
+  renderSearchResults(results, mode, query);
+}
+
+function hideSearchResults() {
+  document.getElementById("search-results").style.display = "none";
+  document.getElementById("kanban-board").style.display = "";
+  renderKanban(state.summary);
+}
+
+document.getElementById("back-to-kanban").addEventListener("click", () => {
+  searchInput.value = "";
+  state.search = "";
+  hideSearchResults();
+});
+
+// Click on a search result card: navigate to kanban and expand that card
+document.getElementById("search-results-cards").addEventListener("click", (e) => {
+  const card = e.target.closest(".item-card[data-card-id]");
+  if (!card) return;
+  const id = Number(card.dataset.cardId);
+  state.expandedId = id;
+  searchInput.value = "";
+  state.search = "";
+  hideSearchResults();
+});
+
+// ============================================================================
+// Events: Search (semantic + client-side fallback)
 // ============================================================================
 let searchTimeout;
 searchInput.addEventListener("input", () => {
   clearTimeout(searchTimeout);
-  searchTimeout = setTimeout(() => {
-    state.search = searchInput.value.trim();
-    renderKanban(state.summary);
-  }, 200);
+  const query = searchInput.value.trim();
+
+  if (!query || query.length < 3) {
+    // Short or empty query: revert to client-side filtering
+    state.search = query;
+    if (document.getElementById("search-results").style.display !== "none") {
+      hideSearchResults();
+    }
+    if (state.summary) renderKanban(state.summary);
+    return;
+  }
+
+  searchTimeout = setTimeout(async () => {
+    state.search = query;
+    try {
+      const data = await semanticSearch(query);
+      if (data.results && data.results.length > 0) {
+        showSearchResults(data.results, data.mode, query);
+      } else {
+        // No semantic results, try client-side filter
+        hideSearchResults();
+        renderKanban(state.summary);
+      }
+    } catch {
+      // On error, fall back to client-side search
+      hideSearchResults();
+      renderKanban(state.summary);
+    }
+  }, 400);
 });
 
 // ============================================================================

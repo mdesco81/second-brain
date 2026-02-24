@@ -921,6 +921,7 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
         processing_error: string | null;
         storage_path: string | null;
         attachment_count: number;
+        metadata: Record<string, unknown>;
       }>(
         `SELECT i.id,
                 i.created_at::TEXT,
@@ -939,6 +940,7 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
                 i.processing_stage,
                 i.processing_error,
                 i.storage_path,
+                i.metadata,
                 (SELECT COUNT(*) FROM item_attachments WHERE item_id = i.id)::INTEGER AS attachment_count
          FROM inbox_items i
          JOIN categories c ON c.id = i.category_id
@@ -1016,7 +1018,8 @@ export async function loadDashboardSummary(): Promise<DashboardSummary> {
       processingStage: normalizeProcessingStage(row.processing_stage),
       processingError: row.processing_error ?? undefined,
       hasFile: row.attachment_count > 0 || Boolean(row.storage_path && !row.storage_path.endsWith(".md")),
-      attachmentCount: row.attachment_count
+      attachmentCount: row.attachment_count,
+      progressive: (row.metadata?.progressive as { layer2?: string[]; layer3?: string; expandCount?: number }) ?? undefined
     })),
     todayFocus: todayFocus.map((item) => ({
       id: item.id,
@@ -1419,6 +1422,8 @@ export interface AgentOutputItem {
   topic: string | null;
   draftPath: string | null;
   hasFinalVersion: boolean;
+  hashtags: string[];
+  hooks: Array<{ type: string; text: string; selected: boolean }>;
 }
 
 export async function listAgentOutputs(): Promise<AgentOutputItem[]> {
@@ -1449,7 +1454,9 @@ export async function listAgentOutputs(): Promise<AgentOutputItem[]> {
     contentType: (row.metadata?.agentContentType as string) ?? null,
     topic: (row.metadata?.agentTopic as string) ?? null,
     draftPath: (row.metadata?.draftPath as string) ?? null,
-    hasFinalVersion: Boolean(row.metadata?.hasFinalVersion)
+    hasFinalVersion: Boolean(row.metadata?.hasFinalVersion),
+    hashtags: Array.isArray(row.metadata?.hashtags) ? (row.metadata.hashtags as string[]) : [],
+    hooks: Array.isArray(row.metadata?.hooks) ? (row.metadata.hooks as Array<{ type: string; text: string; selected: boolean }>) : []
   }));
 }
 
@@ -1501,6 +1508,324 @@ export async function deleteInboxItem(itemId: number): Promise<{
   await pool.query(`DELETE FROM inbox_items WHERE id = $1::INTEGER`, [itemId]);
 
   return { storagePath, attachmentPaths };
+}
+
+export async function listInboxQueue(limit = 20): Promise<Array<{
+  id: number;
+  createdAt: string;
+  inputType: string;
+  categoryName: string;
+  summaryPtBr: string;
+  rawText: string | null;
+  actionTitle: string | null;
+  priority: ActionPriority;
+  processingStage: string;
+}>> {
+  const result = await pool.query<{
+    id: number;
+    created_at: string;
+    input_type: string;
+    category_name: string;
+    summary_pt_br: string;
+    raw_text: string | null;
+    action_title: string | null;
+    priority: string;
+    processing_stage: string;
+  }>(
+    `SELECT i.id, i.created_at::TEXT, i.input_type, c.name AS category_name,
+            i.summary_pt_br, i.raw_text, i.action_title, i.priority, i.processing_stage
+     FROM inbox_items i
+     JOIN categories c ON c.id = i.category_id
+     WHERE i.status = 'open'
+       AND (
+         i.processing_stage IN ('capturado', 'interpretado')
+         OR (i.action_title IS NULL AND i.next_step IS NULL)
+       )
+     ORDER BY i.created_at ASC
+     LIMIT $1`,
+    [limit]
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    createdAt: row.created_at,
+    inputType: row.input_type,
+    categoryName: row.category_name,
+    summaryPtBr: row.summary_pt_br,
+    rawText: row.raw_text,
+    actionTitle: row.action_title,
+    priority: normalizePriority(row.priority),
+    processingStage: row.processing_stage
+  }));
+}
+
+export async function countInboxQueue(): Promise<number> {
+  const result = await pool.query<{ total: string }>(
+    `SELECT COUNT(*)::TEXT AS total
+     FROM inbox_items
+     WHERE status = 'open'
+       AND (
+         processing_stage IN ('capturado', 'interpretado')
+         OR (action_title IS NULL AND next_step IS NULL)
+       )`
+  );
+  return Number(result.rows[0]?.total ?? 0);
+}
+
+export async function processInboxItem(
+  id: number,
+  params: {
+    mode: "actionable" | "reference" | "trash";
+    priority?: ActionPriority;
+    nextStep?: string;
+    followUpWith?: string;
+    dueAt?: string;
+  }
+): Promise<boolean> {
+  let query: string;
+  let queryParams: unknown[];
+
+  if (params.mode === "actionable") {
+    query = `UPDATE inbox_items
+     SET processing_stage = 'planejado',
+         action = 'CREATE_TASK',
+         priority = $2,
+         next_step = $3,
+         follow_up_with = $4,
+         due_at = $5::DATE,
+         updated_at = NOW()
+     WHERE id = $1 AND status = 'open'
+     RETURNING id`;
+    queryParams = [
+      id,
+      params.priority ?? "MEDIA",
+      params.nextStep ?? null,
+      params.followUpWith ?? null,
+      params.dueAt ?? null
+    ];
+  } else if (params.mode === "reference") {
+    query = `UPDATE inbox_items
+     SET processing_stage = 'interpretado',
+         action = 'STORE_REFERENCE',
+         bucket = 'RESOURCES',
+         updated_at = NOW()
+     WHERE id = $1 AND status = 'open'
+     RETURNING id`;
+    queryParams = [id];
+  } else {
+    // trash
+    query = `UPDATE inbox_items
+     SET status = 'eliminated',
+         processing_stage = 'eliminado',
+         updated_at = NOW()
+     WHERE id = $1 AND status = 'open'
+     RETURNING id`;
+    queryParams = [id];
+  }
+
+  const result = await pool.query<{ id: number }>(query, queryParams);
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function getItemForDistill(id: number): Promise<{
+  normalizedText: string;
+  rawText: string | null;
+  summaryPtBr: string;
+  metadata: Record<string, unknown>;
+} | null> {
+  const result = await pool.query<{
+    normalized_text: string;
+    raw_text: string | null;
+    summary_pt_br: string;
+    metadata: Record<string, unknown>;
+  }>(
+    `SELECT normalized_text, raw_text, summary_pt_br, metadata
+     FROM inbox_items WHERE id = $1`,
+    [id]
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    normalizedText: row.normalized_text,
+    rawText: row.raw_text,
+    summaryPtBr: row.summary_pt_br,
+    metadata: row.metadata ?? {}
+  };
+}
+
+export async function incrementExpandCount(id: number): Promise<number> {
+  const result = await pool.query<{ metadata: Record<string, unknown> }>(
+    `UPDATE inbox_items
+     SET metadata = jsonb_set(
+       jsonb_set(
+         metadata,
+         '{progressive}',
+         COALESCE(metadata->'progressive', '{}'::jsonb)
+       ),
+       '{progressive,expandCount}',
+       to_jsonb(COALESCE((metadata->'progressive'->>'expandCount')::int, 0) + 1)
+     ),
+     updated_at = NOW()
+     WHERE id = $1
+     RETURNING metadata`,
+    [id]
+  );
+  const meta = result.rows[0]?.metadata;
+  const progressive = meta?.progressive as Record<string, unknown> | undefined;
+  return (progressive?.expandCount as number) ?? 1;
+}
+
+export async function updateProgressiveLayer(
+  id: number,
+  layer: "layer2" | "layer3",
+  value: unknown,
+  expandCount: number
+): Promise<void> {
+  const timestampKey = layer === "layer2" ? "layer2At" : "layer3At";
+  const now = new Date().toISOString();
+
+  await pool.query(
+    `UPDATE inbox_items
+     SET metadata = jsonb_set(
+       jsonb_set(
+         jsonb_set(
+           jsonb_set(
+             metadata,
+             '{progressive}',
+             COALESCE(metadata->'progressive', '{}'::jsonb)
+           ),
+           '{progressive,${layer}}',
+           $2::jsonb
+         ),
+         '{progressive,${timestampKey}}',
+         to_jsonb($3::text)
+       ),
+       '{progressive,expandCount}',
+       to_jsonb($4::int)
+     ),
+     updated_at = NOW()
+     WHERE id = $1`,
+    [id, JSON.stringify(value), now, expandCount]
+  );
+}
+
+export async function loadAllEmbeddings(): Promise<Array<{ itemId: number; vector: number[] }>> {
+  const result = await pool.query<{ item_id: number; vector: number[] }>(
+    `SELECT item_id, vector::jsonb AS vector FROM item_embeddings`
+  );
+  return result.rows
+    .filter((row) => Array.isArray(row.vector))
+    .map((row) => ({ itemId: row.item_id, vector: row.vector }));
+}
+
+export async function searchItemsByIds(ids: number[]): Promise<Array<{
+  id: number;
+  createdAt: string;
+  inputType: string;
+  categoryName: string;
+  summaryPtBr: string;
+  rawText: string | null;
+  actionTitle: string | null;
+  priority: ActionPriority;
+  status: ActionStatus;
+  dueAt: string | null;
+  nextStep: string | null;
+  followUpWith: string | null;
+}>> {
+  if (ids.length === 0) return [];
+  const result = await pool.query<{
+    id: number;
+    created_at: string;
+    input_type: string;
+    category_name: string;
+    summary_pt_br: string;
+    raw_text: string | null;
+    action_title: string | null;
+    priority: string;
+    status: string;
+    due_at: string | null;
+    next_step: string | null;
+    follow_up_with: string | null;
+  }>(
+    `SELECT i.id, i.created_at::TEXT, i.input_type, c.name AS category_name,
+            i.summary_pt_br, i.raw_text, i.action_title, i.priority, i.status,
+            i.due_at::TEXT, i.next_step, i.follow_up_with
+     FROM inbox_items i
+     JOIN categories c ON c.id = i.category_id
+     WHERE i.id = ANY($1::INTEGER[])`,
+    [ids]
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    createdAt: row.created_at,
+    inputType: row.input_type,
+    categoryName: row.category_name,
+    summaryPtBr: row.summary_pt_br,
+    rawText: row.raw_text,
+    actionTitle: row.action_title,
+    priority: normalizePriority(row.priority),
+    status: row.status as ActionStatus,
+    dueAt: row.due_at,
+    nextStep: row.next_step,
+    followUpWith: row.follow_up_with
+  }));
+}
+
+export async function textSearchItems(query: string, limit = 10): Promise<Array<{
+  id: number;
+  createdAt: string;
+  inputType: string;
+  categoryName: string;
+  summaryPtBr: string;
+  rawText: string | null;
+  actionTitle: string | null;
+  priority: ActionPriority;
+  status: ActionStatus;
+  dueAt: string | null;
+  nextStep: string | null;
+  followUpWith: string | null;
+}>> {
+  const pattern = `%${query}%`;
+  const result = await pool.query<{
+    id: number;
+    created_at: string;
+    input_type: string;
+    category_name: string;
+    summary_pt_br: string;
+    raw_text: string | null;
+    action_title: string | null;
+    priority: string;
+    status: string;
+    due_at: string | null;
+    next_step: string | null;
+    follow_up_with: string | null;
+  }>(
+    `SELECT i.id, i.created_at::TEXT, i.input_type, c.name AS category_name,
+            i.summary_pt_br, i.raw_text, i.action_title, i.priority, i.status,
+            i.due_at::TEXT, i.next_step, i.follow_up_with
+     FROM inbox_items i
+     JOIN categories c ON c.id = i.category_id
+     WHERE i.summary_pt_br ILIKE $1
+        OR i.raw_text ILIKE $1
+        OR i.action_title ILIKE $1
+        OR i.normalized_text ILIKE $1
+     ORDER BY i.created_at DESC
+     LIMIT $2`,
+    [pattern, limit]
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    createdAt: row.created_at,
+    inputType: row.input_type,
+    categoryName: row.category_name,
+    summaryPtBr: row.summary_pt_br,
+    rawText: row.raw_text,
+    actionTitle: row.action_title,
+    priority: normalizePriority(row.priority),
+    status: row.status as ActionStatus,
+    dueAt: row.due_at,
+    nextStep: row.next_step,
+    followUpWith: row.follow_up_with
+  }));
 }
 
 export async function closePool(): Promise<void> {
