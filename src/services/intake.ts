@@ -46,6 +46,8 @@ interface ExtractedContent {
   inputType: InputType;
   rawText: string;
   normalizedText: string;
+  /** Raw audio transcription before cleanup — used for keyword detection (cleanTranscription may strip vocatives). */
+  rawTranscription?: string;
   /** Full text extracted from PDF – used only for AI classification, not persisted as content. */
   pdfExtractedText?: string;
   mediaPath?: string;
@@ -296,6 +298,7 @@ async function extractFromMessage(message: TelegramMessage): Promise<ExtractedCo
       inputType,
       rawText,
       normalizedText,
+      rawTranscription: rawTranscription || undefined,
       mediaPath,
       metadata: {
         telegramFilePath: filePath,
@@ -1065,9 +1068,17 @@ async function processTelegramMessageInner(
   log.info("pipeline:extract_done", { inputType: extracted.inputType, textLen: extracted.normalizedText.length });
 
   // Checkpoint B: audio transcription contains "Jarbas" → route to agent
-  if (extracted.inputType === "audio" && containsJarbasKeyword(extracted.normalizedText)) {
-    await routeToAgent(chatId, messageId, stripJarbasKeyword(extracted.normalizedText), message);
-    return;
+  // Check raw transcription FIRST (before cleanup which may strip "Jarbas" as vocative)
+  if (extracted.inputType === "audio") {
+    const rawCheck = extracted.rawTranscription || "";
+    const normCheck = extracted.normalizedText;
+    if (containsJarbasKeyword(rawCheck) || containsJarbasKeyword(normCheck)) {
+      const agentInput = containsJarbasKeyword(normCheck)
+        ? stripJarbasKeyword(normCheck)
+        : stripJarbasKeyword(rawCheck);
+      await routeToAgent(chatId, messageId, agentInput, message);
+      return;
+    }
   }
 
   const knownCategories = await listCategories();

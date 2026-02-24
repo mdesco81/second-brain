@@ -229,6 +229,7 @@ export async function cleanTranscription(rawTranscription: string): Promise<stri
         "- Remova repeticoes (quando a pessoa fala a mesma coisa duas vezes seguidas).",
         "- Corrija pontuacao e capitalize inicio de frase.",
         "- Mantenha TODOS os nomes proprios, numeros, datas, valores e informacoes factuais intactos.",
+        "- A palavra 'Jarbas' e um comando especial do sistema. NUNCA remova 'Jarbas', mesmo como vocativo (ex: 'Jarbas, faz um artigo'). Mantenha intacta.",
         "- NAO resuma, NAO interprete, NAO adicione informacao. Apenas limpe.",
         "",
         "SEGMENTACAO POR TOPICO (CRITICO):",
