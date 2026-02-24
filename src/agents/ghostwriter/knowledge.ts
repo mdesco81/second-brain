@@ -148,15 +148,21 @@ export async function analyzeFinalVersion(
 
   const userMessage = `## DRAFT (rascunho original):\n\n${draft}\n\n---\n\n## FINAL (versao editada pelo autor):\n\n${final}`;
 
-  const response = await callClaude({
-    system: ANALYSIS_SYSTEM_PROMPT,
-    userMessage,
-    model: "fast",
-    maxTokens: 4096
-  });
+  let response: string | null;
+  try {
+    response = await callClaude({
+      system: ANALYSIS_SYSTEM_PROMPT,
+      userMessage,
+      model: "fast",
+      maxTokens: 4096
+    });
+  } catch (error) {
+    log.warn("analyzeFinalVersion: Claude API error", { error });
+    return [];
+  }
 
   if (!response) {
-    log.warn("analyzeFinalVersion: Claude returned null");
+    log.warn("analyzeFinalVersion: Claude returned empty");
     return [];
   }
 

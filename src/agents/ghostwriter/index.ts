@@ -85,20 +85,32 @@ async function handleGhostwriter(
 
   const maxTokens = contentType === "article" ? 8192 : 4096;
 
-  const draft = await callClaude({
-    system: prompt.system,
-    userMessage: prompt.user,
-    model: "default",
-    maxTokens
-  });
+  let draft: string | null;
+  try {
+    draft = await callClaude({
+      system: prompt.system,
+      userMessage: prompt.user,
+      model: "default",
+      maxTokens
+    });
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    log.error("ghostwriter: Claude API error", { topic, error: errorMsg });
+    return {
+      success: false,
+      agentId: "ghostwriter",
+      summary: `Falha ao gerar rascunho.`,
+      error: `Claude API error: ${errorMsg}`
+    };
+  }
 
   if (!draft) {
-    log.error("ghostwriter: Claude returned null draft", { topic });
+    log.error("ghostwriter: Claude returned empty draft", { topic });
     return {
       success: false,
       agentId: "ghostwriter",
       summary: "Falha ao gerar o rascunho.",
-      error: "Claude returned null"
+      error: "Claude returned empty response"
     };
   }
 
