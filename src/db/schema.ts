@@ -131,6 +131,21 @@ export async function ensureSchema(): Promise<void> {
       ON intake_pending_decisions(chat_id, status, created_at DESC);
   `);
 
+  // Fix projects FK to allow deleting inbox_items without cascade errors
+  await pool.query(`
+    DO $$ BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE constraint_name = 'projects_source_item_id_fkey'
+          AND table_name = 'projects'
+      ) THEN
+        ALTER TABLE projects DROP CONSTRAINT projects_source_item_id_fkey;
+        ALTER TABLE projects ADD CONSTRAINT projects_source_item_id_fkey
+          FOREIGN KEY (source_item_id) REFERENCES inbox_items(id) ON DELETE SET NULL;
+      END IF;
+    END $$;
+  `);
+
   await pool.query(`
     UPDATE inbox_items
     SET processing_stage = CASE
@@ -1503,6 +1518,12 @@ export async function deleteInboxItem(itemId: number): Promise<{
 
   const storagePath = itemResult.rows[0].storage_path;
   const attachmentPaths = attachResult.rows.map((r) => r.storage_path);
+
+  // Nullify project FK references (projects table lacks ON DELETE CASCADE)
+  await pool.query(
+    `UPDATE projects SET source_item_id = NULL WHERE source_item_id = $1::INTEGER`,
+    [itemId]
+  );
 
   // Delete the item (cascades to item_attachments, item_embeddings)
   await pool.query(`DELETE FROM inbox_items WHERE id = $1::INTEGER`, [itemId]);
