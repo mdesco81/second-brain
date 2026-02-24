@@ -1,6 +1,6 @@
 import { registerAgent } from "../registry.js";
 import { AgentRequest, AgentResult } from "../types.js";
-import { saveAgentOutput, trackAgentOutput } from "../base.js";
+import { saveAgentOutput, saveResearchContext, trackAgentOutput } from "../base.js";
 import { sendText } from "../../services/telegram.js";
 import { callClaude } from "../../services/openai.js";
 import { log } from "../../utils/logger.js";
@@ -114,16 +114,48 @@ async function handleGhostwriter(
     };
   }
 
-  // 4. Save output
+  // 4. Append sources to draft if available
+  let draftWithSources = draft;
+  if (research?.citations?.length) {
+    const sourcesSection = [
+      "",
+      "",
+      "---",
+      "",
+      "## Fontes consultadas",
+      "",
+      ...research.citations.map((url, i) => `${i + 1}. ${url}`),
+      ""
+    ].join("\n");
+    draftWithSources = draft + sourcesSection;
+  }
+
+  // 5. Save output (draft + sources)
   const outputPath = await saveAgentOutput({
     agentId: "ghostwriter",
     contentType,
     topic,
-    content: draft,
+    content: draftWithSources,
     timestamp: request.timestamp
   });
 
-  // 5. Track in dashboard
+  // 6. Save research context separately for future reference
+  if (research) {
+    await saveResearchContext({
+      contentType,
+      topic,
+      searchQuery,
+      searchMode,
+      researchText: research.text,
+      citations: research.citations,
+      perplexityModel: research.model,
+      timestamp: request.timestamp
+    }).catch((err) => {
+      log.warn("ghostwriter: failed to save research context", { err });
+    });
+  }
+
+  // 7. Track in dashboard
   const typeLabel =
     contentType === "article" ? "Artigo" : "Post";
 

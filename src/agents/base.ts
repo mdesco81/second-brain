@@ -32,6 +32,61 @@ export async function saveAgentOutput(params: {
   return fullPath;
 }
 
+export async function saveResearchContext(params: {
+  contentType: string;
+  topic: string;
+  searchQuery: string;
+  searchMode: string;
+  researchText: string;
+  citations: string[];
+  perplexityModel: string;
+  timestamp: Date;
+}): Promise<string> {
+  const dateStr = [
+    params.timestamp.getFullYear(),
+    String(params.timestamp.getMonth() + 1).padStart(2, "0"),
+    String(params.timestamp.getDate()).padStart(2, "0")
+  ].join(" ");
+
+  const researchDir = path.join(KNOWLEDGE_PATHS.agentOutputs, "_pesquisas");
+  await fs.mkdir(researchDir, { recursive: true });
+
+  const topicSlug = slugify(params.topic).slice(0, 60);
+  const fileName = `${dateStr} - Pesquisa - ${topicSlug}.md`;
+  const fullPath = path.join(researchDir, fileName);
+
+  const lines: string[] = [
+    `# Pesquisa: ${params.topic}`,
+    "",
+    `**Data:** ${dateStr}`,
+    `**Tipo de conteudo:** ${params.contentType === "article" ? "Artigo" : "Post"}`,
+    `**Modelo Perplexity:** ${params.perplexityModel}`,
+    `**Modo de busca:** ${params.searchMode}`,
+    "",
+    "## Query de pesquisa",
+    "",
+    params.searchQuery,
+    "",
+    "## Resultado da pesquisa",
+    "",
+    params.researchText,
+    ""
+  ];
+
+  if (params.citations.length > 0) {
+    lines.push("## Fontes consultadas", "");
+    for (let i = 0; i < params.citations.length; i++) {
+      lines.push(`${i + 1}. ${params.citations[i]}`);
+    }
+    lines.push("");
+  }
+
+  await fs.writeFile(fullPath, lines.join("\n"), "utf8");
+  log.info("agent:research_saved", { path: fullPath, citations: params.citations.length });
+
+  return fullPath;
+}
+
 export async function trackAgentOutput(params: {
   chatId: number;
   messageId: number;

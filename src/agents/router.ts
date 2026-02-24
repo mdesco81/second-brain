@@ -32,9 +32,10 @@ Responda APENAS com JSON valido:
   }
 }
 
-Regras para contentType:
-- "article": quando o usuario menciona "artigo", "texto longo", "artigo completo", "deep dive"
-- "post": quando menciona "post", "publicacao", "publicacao curta", ou nao especifica (default)`;
+Regras para contentType — PRESTE MUITA ATENCAO:
+- "article": quando o usuario menciona "artigo", "fazer um artigo", "faz um artigo", "quero um artigo", "escreve um artigo", "texto longo", "artigo completo", "deep dive", "analise profunda". Se a palavra "artigo" aparece no pedido, contentType DEVE ser "article".
+- "post": quando menciona "post", "publicacao", "publicacao curta", ou quando NAO especifica o formato (default).
+- Na duvida entre post e article: se o usuario mencionou a palavra "artigo" em qualquer forma, use "article".`;
 
 export async function classifyAgentIntent(text: string): Promise<AgentIntent> {
   const fallback: AgentIntent = {
