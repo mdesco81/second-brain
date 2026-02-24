@@ -690,3 +690,34 @@ export async function classifyWithAI(input: AIClassificationInput): Promise<AICl
     return null;
   }
 }
+
+// ── Generic Claude helper for agents ─────────────────────────────────
+
+export async function callClaude(params: {
+  system: string;
+  userMessage: string;
+  model?: "default" | "fast";
+  maxTokens?: number;
+}): Promise<string | null> {
+  if (!anthropicClient) {
+    log.warn("callClaude skipped — anthropicClient is null");
+    return null;
+  }
+
+  const model = params.model === "fast" ? env.ANTHROPIC_FAST_MODEL : env.ANTHROPIC_MODEL;
+
+  try {
+    const response = await anthropicClient.messages.create({
+      model,
+      max_tokens: params.maxTokens ?? 4096,
+      system: params.system,
+      messages: [{ role: "user", content: params.userMessage }]
+    });
+
+    const textBlock = response.content.find((block) => block.type === "text");
+    return textBlock?.text?.trim() ?? null;
+  } catch (error) {
+    log.error("callClaude failed", { model, error });
+    return null;
+  }
+}

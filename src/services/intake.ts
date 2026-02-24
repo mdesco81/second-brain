@@ -40,6 +40,7 @@ import { buildOpenActionsMessage, buildWeeklyMessage } from "./reports.js";
 import { appendProjectStatus, storeIncomingMedia, writeActionBoard, writeKnowledgeNote } from "./storage.js";
 import { InputType, ProcessingStage } from "../types/domain.js";
 import { log } from "../utils/logger.js";
+import { containsJarbasKeyword, stripJarbasKeyword, routeToAgent } from "../agents/router.js";
 
 interface ExtractedContent {
   inputType: InputType;
@@ -1021,6 +1022,13 @@ async function processTelegramMessageInner(
     return;
   }
 
+  // Checkpoint A: text/caption contains "Jarbas" → route to agent
+  const textContent = message.text || message.caption || "";
+  if (containsJarbasKeyword(textContent)) {
+    await routeToAgent(chatId, messageId, stripJarbasKeyword(textContent), message);
+    return;
+  }
+
   const extracted = await extractFromMessage(message);
   if (!extracted.normalizedText) {
     const categoryId = await upsertCategory("Inbox Geral", "Itens sem extração automatica completa", "agent");
@@ -1055,6 +1063,12 @@ async function processTelegramMessageInner(
   }
 
   log.info("pipeline:extract_done", { inputType: extracted.inputType, textLen: extracted.normalizedText.length });
+
+  // Checkpoint B: audio transcription contains "Jarbas" → route to agent
+  if (extracted.inputType === "audio" && containsJarbasKeyword(extracted.normalizedText)) {
+    await routeToAgent(chatId, messageId, stripJarbasKeyword(extracted.normalizedText), message);
+    return;
+  }
 
   const knownCategories = await listCategories();
   log.info("pipeline:categories_done", { count: knownCategories.length });

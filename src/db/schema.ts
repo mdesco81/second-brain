@@ -1407,6 +1407,77 @@ export async function getAttachmentById(attachmentId: number): Promise<{
   };
 }
 
+export interface AgentOutputItem {
+  id: number;
+  createdAt: string;
+  summaryPtBr: string;
+  actionTitle: string | null;
+  status: ActionStatus;
+  storagePath: string | null;
+  agentId: string | null;
+  contentType: string | null;
+  topic: string | null;
+  draftPath: string | null;
+  hasFinalVersion: boolean;
+}
+
+export async function listAgentOutputs(): Promise<AgentOutputItem[]> {
+  const result = await pool.query<{
+    id: number;
+    created_at: string;
+    summary_pt_br: string;
+    action_title: string | null;
+    status: ActionStatus;
+    storage_path: string | null;
+    metadata: Record<string, unknown>;
+  }>(
+    `SELECT id, created_at::TEXT, summary_pt_br, action_title, status, storage_path, metadata
+     FROM inbox_items
+     WHERE metadata->>'isAgentOutput' = 'true'
+     ORDER BY created_at DESC
+     LIMIT 50`
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    createdAt: row.created_at,
+    summaryPtBr: row.summary_pt_br,
+    actionTitle: row.action_title,
+    status: row.status,
+    storagePath: row.storage_path,
+    agentId: (row.metadata?.agentId as string) ?? null,
+    contentType: (row.metadata?.agentContentType as string) ?? null,
+    topic: (row.metadata?.agentTopic as string) ?? null,
+    draftPath: (row.metadata?.draftPath as string) ?? null,
+    hasFinalVersion: Boolean(row.metadata?.hasFinalVersion)
+  }));
+}
+
+export async function getInboxItemMetadata(
+  itemId: number
+): Promise<{ metadata: Record<string, unknown>; storagePath: string | null } | null> {
+  const result = await pool.query<{
+    metadata: Record<string, unknown>;
+    storage_path: string | null;
+  }>(
+    `SELECT metadata, storage_path FROM inbox_items WHERE id = $1::INTEGER`,
+    [itemId]
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return { metadata: row.metadata ?? {}, storagePath: row.storage_path };
+}
+
+export async function updateInboxItemMetadata(
+  itemId: number,
+  metadata: Record<string, unknown>
+): Promise<void> {
+  await pool.query(
+    `UPDATE inbox_items SET metadata = metadata || $2::JSONB WHERE id = $1::INTEGER`,
+    [itemId, JSON.stringify(metadata)]
+  );
+}
+
 export async function closePool(): Promise<void> {
   await pool.end();
 }

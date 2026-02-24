@@ -742,6 +742,148 @@ dialog::backdrop { background: rgba(0,0,0,0.3); }
   margin-top: 4px;
 }
 
+/* ---- Main Tabs ---- */
+.main-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--line);
+  border-radius: 8px;
+  padding: 2px;
+}
+
+.main-tab {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 0.78rem;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.12s;
+  white-space: nowrap;
+}
+
+.main-tab:hover { color: var(--text); }
+
+.main-tab.active {
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+}
+
+/* ---- Jarbas View ---- */
+.jarbas-view { margin-top: 16px; }
+
+.jarbas-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 12px;
+}
+
+.jarbas-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  transition: box-shadow 0.12s;
+}
+
+.jarbas-card:hover {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+.jarbas-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.jarbas-card-title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text);
+  flex: 1;
+}
+
+.jarbas-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.jarbas-badge.draft { background: var(--warn-bg); color: var(--warn); }
+.jarbas-badge.final { background: var(--ok-bg); color: var(--ok); }
+
+.jarbas-card-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.jarbas-card-meta .tag { font-size: 0.65rem; }
+
+.jarbas-card-preview {
+  background: #f7f6f3;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--text);
+  max-height: 160px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 10px;
+}
+
+.jarbas-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.jarbas-upload-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 14px;
+  border-radius: var(--radius);
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid rgba(22,163,74,0.3);
+  background: var(--ok-bg);
+  color: var(--ok);
+  font-family: inherit;
+  transition: all 0.12s;
+}
+
+.jarbas-upload-label:hover { background: #dcfce7; }
+
+.jarbas-upload-label input[type="file"] {
+  display: none;
+}
+
+.jarbas-upload-status {
+  font-size: 0.72rem;
+  color: var(--ok);
+  margin-top: 6px;
+}
+
 /* ---- Responsive ---- */
 @media (max-width: 900px) {
   .kanban-board {
@@ -758,6 +900,7 @@ dialog::backdrop { background: rgba(0,0,0,0.3); }
 
 @media (max-width: 640px) {
   .topbar { flex-wrap: wrap; }
+  .main-tabs { order: 2; flex-basis: 100%; }
   .search-box { max-width: 100%; order: 3; flex-basis: 100%; }
   .filters-bar { gap: 8px; }
   .filter-group { flex-wrap: wrap; }
@@ -765,4 +908,5 @@ dialog::backdrop { background: rgba(0,0,0,0.3); }
   .fab { bottom: 16px; right: 16px; width: 44px; height: 44px; font-size: 1.2rem; }
   .pdf-preview-frame { height: 200px; }
   .lightbox-img { max-width: 95vw; max-height: 80vh; }
+  .jarbas-grid { grid-template-columns: 1fr; }
 }

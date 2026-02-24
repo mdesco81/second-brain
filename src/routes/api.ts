@@ -1,20 +1,25 @@
-import { Router } from "express";
+import { Router, text as expressText } from "express";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
   getAttachmentById,
+  getInboxItemMetadata,
   getItemFileInfo,
   insertDashboardItem,
+  listAgentOutputs,
   listCategories,
   listItemAttachments,
   listOpenActionItems,
   loadDashboardSummary,
   updateInboxItemFields,
+  updateInboxItemMetadata,
   updateInboxItemStatusById,
   upsertCategory
 } from "../db/schema.js";
 import { ActionPriority, ActionStatus } from "../types/domain.js";
 import { writeActionBoard } from "../services/storage.js";
+import { analyzeFinalVersion, saveFinalVersion } from "../agents/ghostwriter/knowledge.js";
+import { log } from "../utils/logger.js";
 
 export const apiRouter = Router();
 
@@ -128,6 +133,8 @@ apiRouter.patch("/actions/:id", async (req, res, next) => {
 // --- File viewer endpoint ---
 const MIME_MAP: Record<string, string> = {
   ".pdf": "application/pdf",
+  ".md": "text/markdown",
+  ".txt": "text/plain",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".png": "image/png",
@@ -143,6 +150,8 @@ const MIME_MAP: Record<string, string> = {
   ".flac": "audio/flac",
   ".webm": "audio/webm"
 };
+
+const textBodyParser = expressText({ type: ["text/plain", "text/markdown"], limit: "2mb" });
 
 apiRouter.get("/items/:id/file", async (req, res, next) => {
   try {
@@ -314,3 +323,76 @@ apiRouter.post("/actions", async (req, res, next) => {
     next(error);
   }
 });
+
+// ── Agent outputs ────────────────────────────────────────────────────
+
+apiRouter.get("/agent-outputs", async (_req, res, next) => {
+  try {
+    const outputs = await listAgentOutputs();
+    res.json({ ok: true, outputs });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.post(
+  "/agent-outputs/:id/final",
+  textBodyParser,
+  async (req, res, next) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        res.status(400).json({ ok: false, error: "invalid_id" });
+        return;
+      }
+
+      const finalContent = typeof req.body === "string" ? req.body.trim() : "";
+      if (!finalContent) {
+        res.status(400).json({ ok: false, error: "content_required" });
+        return;
+      }
+
+      const itemData = await getInboxItemMetadata(id);
+      if (!itemData) {
+        res.status(404).json({ ok: false, error: "item_not_found" });
+        return;
+      }
+
+      if (!itemData.metadata?.isAgentOutput) {
+        res.status(400).json({ ok: false, error: "not_agent_output" });
+        return;
+      }
+
+      const topic =
+        (itemData.metadata.agentTopic as string) || "unknown-topic";
+      const draftPath =
+        (itemData.metadata.draftPath as string) || itemData.storagePath;
+
+      // Save the final version
+      const finalPath = await saveFinalVersion(topic, finalContent);
+
+      // Analyze differences and extract style learnings
+      let learningCount = 0;
+      if (draftPath) {
+        try {
+          const learnings = await analyzeFinalVersion(draftPath, finalPath);
+          learningCount = learnings.length;
+        } catch (error) {
+          log.warn("Style analysis failed", { id, error });
+        }
+      }
+
+      // Update item metadata
+      await updateInboxItemMetadata(id, {
+        hasFinalVersion: true,
+        finalPath,
+        analysisComplete: true,
+        learningCount
+      });
+
+      res.json({ ok: true, learnings: learningCount, finalPath });
+    } catch (error) {
+      next(error);
+    }
+  }
+);

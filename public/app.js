@@ -28,7 +28,10 @@ const state = {
   editingItem: null,
   loading: false,
   draggedId: null,
-  attachmentsCache: {}
+  attachmentsCache: {},
+  activeTab: "brain",
+  jarbasOutputs: null,
+  jarbasPreviewCache: {}
 };
 
 // --- Helpers ---
@@ -116,6 +119,185 @@ async function createItem(fields) {
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
+
+// --- Jarbas API ---
+async function fetchAgentOutputs() {
+  const r = await fetch("/api/agent-outputs");
+  if (!r.ok) return [];
+  const data = await r.json();
+  return data.outputs || [];
+}
+
+async function fetchFileContent(itemId) {
+  const r = await fetch(`/api/items/${itemId}/file`);
+  if (!r.ok) return null;
+  return r.text();
+}
+
+async function uploadFinalVersion(itemId, fileContent) {
+  const r = await fetch(`/api/agent-outputs/${itemId}/final`, {
+    method: "POST",
+    headers: { "content-type": "text/plain" },
+    body: fileContent
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// --- Render: Jarbas Grid ---
+function renderJarbasCard(item) {
+  const typeLabel = item.contentType === "article" ? "Artigo" : "Post";
+  const statusBadge = item.hasFinalVersion
+    ? '<span class="jarbas-badge final">Finalizado</span>'
+    : '<span class="jarbas-badge draft">Rascunho</span>';
+
+  const date = new Date(item.createdAt).toLocaleDateString("pt-BR");
+  const topic = esc(item.topic || item.summaryPtBr || "Sem titulo");
+
+  const preview = state.jarbasPreviewCache[item.id];
+  const previewHtml = preview
+    ? `<div class="jarbas-card-preview">${esc(preview.slice(0, 500))}${preview.length > 500 ? "..." : ""}</div>`
+    : `<div class="jarbas-card-preview" style="color:var(--muted);font-style:italic">Clique para carregar preview...</div>`;
+
+  const uploadBtn = !item.hasFinalVersion
+    ? `<label class="jarbas-upload-label">
+         Subir versao final
+         <input type="file" accept=".md,.txt" data-upload-id="${item.id}" />
+       </label>`
+    : `<span class="jarbas-badge final" style="font-size:0.72rem">Versao final enviada</span>`;
+
+  return `
+    <article class="jarbas-card" data-jarbas-id="${item.id}">
+      <div class="jarbas-card-header">
+        <h3 class="jarbas-card-title">${topic}</h3>
+        ${statusBadge}
+      </div>
+      <div class="jarbas-card-meta">
+        <span class="tag type-tag">${typeLabel}</span>
+        <span class="tag id-tag">#${item.id}</span>
+        <span class="tag due">${date}</span>
+      </div>
+      ${previewHtml}
+      <div class="jarbas-card-actions">
+        <a href="/api/items/${item.id}/file" download class="btn secondary">Download MD</a>
+        ${uploadBtn}
+      </div>
+      <div class="jarbas-upload-status" id="upload-status-${item.id}"></div>
+    </article>
+  `;
+}
+
+function renderJarbasView() {
+  const grid = document.getElementById("jarbas-grid");
+  const empty = document.getElementById("jarbas-empty");
+  const outputs = state.jarbasOutputs || [];
+
+  if (outputs.length === 0) {
+    grid.innerHTML = "";
+    empty.style.display = "block";
+  } else {
+    grid.innerHTML = outputs.map(renderJarbasCard).join("");
+    empty.style.display = "none";
+  }
+}
+
+async function loadJarbasOutputs() {
+  const outputs = await fetchAgentOutputs();
+  state.jarbasOutputs = outputs;
+  renderJarbasView();
+
+  // Pre-load previews for visible items
+  for (const item of outputs.slice(0, 6)) {
+    if (!state.jarbasPreviewCache[item.id]) {
+      fetchFileContent(item.id).then((content) => {
+        if (content) {
+          state.jarbasPreviewCache[item.id] = content;
+          if (state.activeTab === "jarbas") renderJarbasView();
+        }
+      }).catch(() => {});
+    }
+  }
+}
+
+// --- Tab switching ---
+function switchTab(tab) {
+  state.activeTab = tab;
+  document.querySelectorAll(".main-tab").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.tab === tab);
+  });
+
+  const brainSections = [
+    document.getElementById("alerts"),
+    document.querySelector(".filters-bar"),
+    document.getElementById("stats"),
+    document.getElementById("kanban-board"),
+    document.getElementById("empty-state"),
+    document.getElementById("fab-new-card")
+  ];
+
+  const jarbasSection = document.getElementById("jarbas-view");
+
+  if (tab === "brain") {
+    for (const el of brainSections) {
+      if (el) el.style.display = "";
+    }
+    jarbasSection.style.display = "none";
+  } else {
+    for (const el of brainSections) {
+      if (el) el.style.display = "none";
+    }
+    jarbasSection.style.display = "block";
+    if (!state.jarbasOutputs) loadJarbasOutputs();
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const tab = e.target.closest(".main-tab");
+  if (tab) {
+    switchTab(tab.dataset.tab);
+    return;
+  }
+});
+
+// --- Jarbas: load preview on card click ---
+document.addEventListener("click", async (e) => {
+  const card = e.target.closest(".jarbas-card");
+  if (!card || e.target.closest("a") || e.target.closest("label") || e.target.closest("input")) return;
+
+  const id = Number(card.dataset.jarbasId);
+  if (state.jarbasPreviewCache[id]) return;
+
+  const content = await fetchFileContent(id).catch(() => null);
+  if (content) {
+    state.jarbasPreviewCache[id] = content;
+    renderJarbasView();
+  }
+});
+
+// --- Jarbas: upload final version ---
+document.addEventListener("change", async (e) => {
+  const input = e.target.closest("[data-upload-id]");
+  if (!input) return;
+
+  const id = Number(input.dataset.uploadId);
+  const file = input.files?.[0];
+  if (!file) return;
+
+  const statusEl = document.getElementById(`upload-status-${id}`);
+
+  try {
+    if (statusEl) statusEl.textContent = "Enviando...";
+    const content = await file.text();
+    const result = await uploadFinalVersion(id, content);
+    if (statusEl) {
+      statusEl.textContent = `Versao final salva! ${result.learnings || 0} padroes de estilo aprendidos.`;
+    }
+    // Refresh
+    await loadJarbasOutputs();
+  } catch (err) {
+    if (statusEl) statusEl.textContent = `Erro: ${err.message}`;
+  }
+});
 
 // --- Render: Alerts ---
 function renderAlerts(summary) {

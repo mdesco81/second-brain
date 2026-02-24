@@ -8,6 +8,7 @@ export const KNOWLEDGE_PATHS = {
   resources: path.join(env.STORAGE_ROOT, "30_RESOURCES"),
   research: path.join(env.STORAGE_ROOT, "31_RESEARCH"),
   archive: path.join(env.STORAGE_ROOT, "40_ARCHIVE"),
+  agentOutputs: path.join(env.STORAGE_ROOT, "50_AGENT_OUTPUTS"),
   status: path.join(env.STORAGE_ROOT, "80_STATUS"),
   system: path.join(env.STORAGE_ROOT, "90_SYSTEM")
 } as const;

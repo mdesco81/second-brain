@@ -1,0 +1,84 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { KNOWLEDGE_PATHS, slugify } from "../utils/paths.js";
+import { insertInboxItem, insertItemAttachment, upsertCategory } from "../db/schema.js";
+import { log } from "../utils/logger.js";
+
+export async function saveAgentOutput(params: {
+  agentId: string;
+  contentType: string;
+  topic: string;
+  content: string;
+  timestamp: Date;
+}): Promise<string> {
+  const dateStr = [
+    params.timestamp.getFullYear(),
+    String(params.timestamp.getMonth() + 1).padStart(2, "0"),
+    String(params.timestamp.getDate()).padStart(2, "0")
+  ].join(" ");
+
+  const subFolder = params.contentType === "article" ? "Artigos" : "Posts";
+  const outputDir = path.join(KNOWLEDGE_PATHS.agentOutputs, subFolder);
+  await fs.mkdir(outputDir, { recursive: true });
+
+  const typeLabel = params.contentType === "article" ? "Artigo Linkedin" : "Post Linkedin";
+  const topicSlug = slugify(params.topic).slice(0, 60);
+  const fileName = `${dateStr} - ${typeLabel} - ${topicSlug}.md`;
+  const fullPath = path.join(outputDir, fileName);
+
+  await fs.writeFile(fullPath, params.content, "utf8");
+  log.info("agent:output_saved", { path: fullPath, agent: params.agentId });
+
+  return fullPath;
+}
+
+export async function trackAgentOutput(params: {
+  chatId: number;
+  messageId: number;
+  agentId: string;
+  topic: string;
+  contentType: string;
+  outputPath: string;
+  summary: string;
+}): Promise<number> {
+  const categoryId = await upsertCategory(
+    "Conteudo LinkedIn",
+    "Artigos e posts gerados pelo agente ghostwriter",
+    "agent"
+  );
+
+  const itemId = await insertInboxItem({
+    chatId: params.chatId,
+    messageId: params.messageId,
+    inputType: "text",
+    rawText: `[Jarbas Ghostwriter] ${params.topic}`,
+    normalizedText: params.summary,
+    summaryPtBr: params.summary,
+    categoryId,
+    bucket: "PROJECTS",
+    action: "STORE_REFERENCE",
+    priority: "MEDIA",
+    actionTitle: `Revisar ${params.contentType === "article" ? "artigo" : "post"}: ${params.topic}`,
+    actionDetails: `Gerado pelo agente ghostwriter.`,
+    processingStage: "planejado",
+    confidence: 0.99,
+    storagePath: params.outputPath,
+    metadata: {
+      agentId: params.agentId,
+      agentContentType: params.contentType,
+      agentTopic: params.topic,
+      isAgentOutput: true,
+      draftPath: params.outputPath
+    }
+  });
+
+  await insertItemAttachment({
+    itemId,
+    storagePath: params.outputPath,
+    fileName: path.basename(params.outputPath),
+    inputType: "text"
+  });
+
+  log.info("agent:output_tracked", { itemId, agent: params.agentId });
+  return itemId;
+}

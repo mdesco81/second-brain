@@ -8,6 +8,7 @@ import { ensureKnowledgeTree } from "./services/storage.js";
 import { deleteWebhook, setWebhook } from "./services/telegram.js";
 import { hasAI } from "./services/openai.js";
 import { log } from "./utils/logger.js";
+import { registerGhostwriter } from "./agents/ghostwriter/index.js";
 
 async function configureWebhookWithRetry(): Promise<NodeJS.Timeout> {
   const attempt = async () => {
@@ -36,6 +37,7 @@ async function bootstrap(): Promise<void> {
   }
 
   startProactiveScheduler();
+  registerGhostwriter();
 
   if (!hasAI()) {
     log.warn("⚠ Claude AI is NOT available — check ANTHROPIC_API_KEY. Cards will use keyword-only fallback.");

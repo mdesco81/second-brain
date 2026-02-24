@@ -16,6 +16,10 @@
     <main class="app">
       <header class="topbar">
         <h1 class="logo">Second Brain</h1>
+        <nav class="main-tabs">
+          <button class="main-tab active" data-tab="brain">Second Brain</button>
+          <button class="main-tab" data-tab="jarbas">Trabalhos do Jarbas</button>
+        </nav>
         <div class="search-box">
           <input type="search" id="search" placeholder="Buscar cards..." autocomplete="off" />
         </div>
@@ -66,6 +70,14 @@
       <div class="empty-state" id="empty-state" style="display:none">
         Nenhum card encontrado com os filtros atuais.
       </div>
+
+      <!-- Jarbas Tab Content -->
+      <section class="jarbas-view" id="jarbas-view" style="display:none">
+        <div class="jarbas-grid" id="jarbas-grid"></div>
+        <div class="empty-state" id="jarbas-empty" style="display:none">
+          Nenhum trabalho do Jarbas ainda. Envie uma mensagem no Telegram com "Jarbas escreve um post sobre..." para comecar.
+        </div>
+      </section>
     </main>
 
     <!-- FAB: New Card -->
