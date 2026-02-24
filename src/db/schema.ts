@@ -1292,7 +1292,7 @@ export async function getItemFileInfo(itemId: number): Promise<{
     [itemId]
   );
   const row = result.rows[0];
-  if (!row?.storage_path || row.storage_path.endsWith(".md")) return null;
+  if (!row?.storage_path) return null;
   return { storagePath: row.storage_path, inputType: row.input_type };
 }
 
