@@ -34,7 +34,73 @@ const state = {
   jarbasPreviewCache: {}
 };
 
-// --- Helpers ---
+// ============================================================================
+// Toast Notification System
+// ============================================================================
+const toastContainer = document.getElementById("toast-container");
+
+function showToast(message, type = "info", duration = 3500) {
+  const icons = {
+    success: "\u2705",
+    error: "\u274c",
+    info: "\u2139\ufe0f"
+  };
+
+  const toast = document.createElement("div");
+  toast.className = `toast ${type}`;
+  toast.innerHTML = `<span class="toast-icon">${icons[type] || icons.info}</span><span>${esc(message)}</span>`;
+  toastContainer.appendChild(toast);
+
+  setTimeout(() => {
+    toast.classList.add("removing");
+    toast.addEventListener("animationend", () => toast.remove());
+  }, duration);
+}
+
+// ============================================================================
+// Styled Confirm Dialog
+// ============================================================================
+const confirmDialog = document.getElementById("confirm-dialog");
+const confirmIcon = document.getElementById("confirm-icon");
+const confirmTitle = document.getElementById("confirm-title");
+const confirmMessage = document.getElementById("confirm-message");
+const confirmOk = document.getElementById("confirm-ok");
+const confirmCancel = document.getElementById("confirm-cancel");
+
+let confirmResolver = null;
+
+function showConfirm({ title, message, icon = "\u26a0\ufe0f", okText = "Confirmar", okClass = "danger" }) {
+  return new Promise((resolve) => {
+    confirmResolver = resolve;
+    confirmIcon.textContent = icon;
+    confirmTitle.textContent = title;
+    confirmMessage.textContent = message;
+    confirmOk.textContent = okText;
+    confirmOk.className = `btn ${okClass}`;
+    confirmDialog.showModal();
+  });
+}
+
+confirmOk.addEventListener("click", () => {
+  confirmDialog.close();
+  if (confirmResolver) confirmResolver(true);
+  confirmResolver = null;
+});
+
+confirmCancel.addEventListener("click", () => {
+  confirmDialog.close();
+  if (confirmResolver) confirmResolver(false);
+  confirmResolver = null;
+});
+
+confirmDialog.addEventListener("close", () => {
+  if (confirmResolver) confirmResolver(false);
+  confirmResolver = null;
+});
+
+// ============================================================================
+// Helpers
+// ============================================================================
 function esc(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -71,7 +137,9 @@ function inputTypeLabel(t) {
   return "Texto";
 }
 
-// --- API ---
+// ============================================================================
+// API
+// ============================================================================
 async function fetchDashboard() {
   const r = await fetch("/api/dashboard");
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -126,7 +194,9 @@ async function createItem(fields) {
   return r.json();
 }
 
-// --- Jarbas API ---
+// ============================================================================
+// Jarbas API
+// ============================================================================
 async function fetchAgentOutputs() {
   const r = await fetch("/api/agent-outputs");
   if (!r.ok) return [];
@@ -150,7 +220,9 @@ async function uploadFinalVersion(itemId, fileContent) {
   return r.json();
 }
 
-// --- Render: Jarbas Grid ---
+// ============================================================================
+// Render: Jarbas Grid
+// ============================================================================
 function renderJarbasCard(item) {
   const typeLabel = item.contentType === "article" ? "Artigo" : "Post";
   const statusBadge = item.hasFinalVersion
@@ -163,7 +235,7 @@ function renderJarbasCard(item) {
   const preview = state.jarbasPreviewCache[item.id];
   const previewHtml = preview
     ? `<div class="jarbas-card-preview">${esc(preview.slice(0, 500))}${preview.length > 500 ? "..." : ""}</div>`
-    : `<div class="jarbas-card-preview" style="color:var(--muted);font-style:italic">Clique para carregar preview...</div>`;
+    : `<div class="jarbas-card-preview" style="color:var(--muted);font-style:italic">Carregando preview...</div>`;
 
   const uploadBtn = !item.hasFinalVersion
     ? `<label class="jarbas-upload-label">
@@ -213,8 +285,8 @@ async function loadJarbasOutputs() {
   state.jarbasOutputs = outputs;
   renderJarbasView();
 
-  // Pre-load previews for visible items
-  for (const item of outputs.slice(0, 6)) {
+  // Pre-load previews for all items
+  for (const item of outputs) {
     if (!state.jarbasPreviewCache[item.id]) {
       fetchFileContent(item.id).then((content) => {
         if (content) {
@@ -226,7 +298,9 @@ async function loadJarbasOutputs() {
   }
 }
 
-// --- Tab switching ---
+// ============================================================================
+// Tab switching
+// ============================================================================
 function switchTab(tab) {
   state.activeTab = tab;
   document.querySelectorAll(".main-tab").forEach((btn) => {
@@ -266,10 +340,12 @@ document.addEventListener("click", (e) => {
   }
 });
 
-// --- Jarbas: load preview on card click ---
+// ============================================================================
+// Jarbas: load preview on card click
+// ============================================================================
 document.addEventListener("click", async (e) => {
   const card = e.target.closest(".jarbas-card");
-  if (!card || e.target.closest("a") || e.target.closest("label") || e.target.closest("input")) return;
+  if (!card || e.target.closest("a") || e.target.closest("label") || e.target.closest("input") || e.target.closest("button")) return;
 
   const id = Number(card.dataset.jarbasId);
   if (state.jarbasPreviewCache[id]) return;
@@ -281,7 +357,9 @@ document.addEventListener("click", async (e) => {
   }
 });
 
-// --- Jarbas: upload final version ---
+// ============================================================================
+// Jarbas: upload final version
+// ============================================================================
 document.addEventListener("change", async (e) => {
   const input = e.target.closest("[data-upload-id]");
   if (!input) return;
@@ -296,17 +374,17 @@ document.addEventListener("change", async (e) => {
     if (statusEl) statusEl.textContent = "Enviando...";
     const content = await file.text();
     const result = await uploadFinalVersion(id, content);
-    if (statusEl) {
-      statusEl.textContent = `Versao final salva! ${result.learnings || 0} padroes de estilo aprendidos.`;
-    }
-    // Refresh
+    showToast(`Versao final salva! ${result.learnings || 0} padroes aprendidos.`, "success");
     await loadJarbasOutputs();
   } catch (err) {
-    if (statusEl) statusEl.textContent = `Erro: ${err.message}`;
+    showToast(`Erro ao enviar: ${err.message}`, "error");
+    if (statusEl) statusEl.textContent = "";
   }
 });
 
-// --- Render: Alerts ---
+// ============================================================================
+// Render: Alerts
+// ============================================================================
 function renderAlerts(summary) {
   const alerts = summary.alerts || {};
   const chips = [];
@@ -322,7 +400,9 @@ function renderAlerts(summary) {
   alertsNode.innerHTML = chips.join("");
 }
 
-// --- Render: Stats ---
+// ============================================================================
+// Render: Stats
+// ============================================================================
 function renderStats(summary) {
   const s = summary.statusBreakdown || {};
   statsNode.innerHTML = [
@@ -334,7 +414,9 @@ function renderStats(summary) {
   ].join("");
 }
 
-// --- Render: Category filter ---
+// ============================================================================
+// Render: Category filter
+// ============================================================================
 function renderCategoryFilter(summary) {
   const current = state.filterCategory;
   const cats = summary.categories || [];
@@ -346,21 +428,20 @@ function renderCategoryFilter(summary) {
   categoryFilter.innerHTML = html;
 }
 
-// --- Filter items ---
+// ============================================================================
+// Filter items
+// ============================================================================
 function getFilteredItems(summary) {
   let items = summary.recentItems || [];
 
-  // Priority filter
   if (state.filterPriority !== "all") {
     items = items.filter((i) => i.priority === state.filterPriority);
   }
 
-  // Category filter
   if (state.filterCategory !== "all") {
     items = items.filter((i) => i.categoryName === state.filterCategory);
   }
 
-  // Search
   if (state.search) {
     const q = state.search.toLowerCase();
     items = items.filter((i) =>
@@ -374,12 +455,10 @@ function getFilteredItems(summary) {
     );
   }
 
-  // Sort: priority (ALTA > MEDIA > BAIXA), then by due date, then newest
   const priOrder = { ALTA: 3, MEDIA: 2, BAIXA: 1 };
   items.sort((a, b) => {
     const pd = (priOrder[b.priority] || 0) - (priOrder[a.priority] || 0);
     if (pd !== 0) return pd;
-    // Due date: items with due date first, earliest first
     if (a.dueAt && !b.dueAt) return -1;
     if (!a.dueAt && b.dueAt) return 1;
     if (a.dueAt && b.dueAt) {
@@ -392,7 +471,9 @@ function getFilteredItems(summary) {
   return items;
 }
 
-// --- Render: Single Card ---
+// ============================================================================
+// Render: Single Card
+// ============================================================================
 function renderCard(item) {
   const isExpanded = state.expandedId === item.id;
   const expandedClass = isExpanded ? " expanded" : "";
@@ -418,14 +499,22 @@ function renderCard(item) {
   const displayTitle = item.actionTitle || ((item.summaryPtBr || "").length > 80 ? (item.summaryPtBr || "").slice(0, 80) + "..." : (item.summaryPtBr || ""));
   const titleHtml = displayTitle ? `<h3 class="card-action-title">${esc(displayTitle)}</h3>` : "";
 
-  // Quick edit button (only for open cards)
-  const quickEditBtn = item.status === "open"
-    ? `<button class="card-quick-edit" data-edit-id="${item.id}" title="Editar">&#9998;</button>`
-    : "";
+  // Quick hover actions (only for open cards)
+  let hoverActions = "";
+  if (item.status === "open") {
+    hoverActions = `<div class="card-hover-actions">
+      <button class="card-hover-btn action-done" data-status-id="${item.id}" data-status="done" title="Resolver">&#10003;</button>
+      <button class="card-hover-btn action-eliminate" data-status-id="${item.id}" data-status="eliminated" title="Eliminar">&#10005;</button>
+      <button class="card-hover-btn" data-edit-id="${item.id}" title="Editar">&#9998;</button>
+    </div>`;
+  } else {
+    hoverActions = `<div class="card-hover-actions">
+      <button class="card-hover-btn" data-status-id="${item.id}" data-status="open" title="Reabrir">&#8634;</button>
+    </div>`;
+  }
 
-  // Collapsed meta: only priority + category + urgent due
+  // Collapsed meta
   const collapsedMeta = `<div class="card-meta-collapsed">
-    <span class="tag priority-${item.priority}">${priorityLabel(item.priority)}</span>
     <span class="tag category">${esc(item.categoryName)}</span>
     ${urgentDueTag}
   </div>`;
@@ -482,7 +571,7 @@ function renderCard(item) {
     }
   }
 
-  // Detail section (expanded)
+  // Detail section (expanded) — with separated danger zone
   const detail = `
     <div class="card-detail">
       ${fileSection}
@@ -492,21 +581,25 @@ function renderCard(item) {
       <div class="detail-row"><span class="detail-label">Criado</span><span class="detail-value">${new Date(item.createdAt).toLocaleString("pt-BR")}</span></div>
       ${item.processingError ? `<div class="detail-row"><span class="detail-label" style="color:var(--danger)">Erro</span><span class="detail-value" style="color:var(--danger)">${esc(item.processingError)}</span></div>` : ""}
       <div class="card-actions">
-        ${item.status === "open" ? `
-          <button class="btn edit" data-edit-id="${item.id}">Editar</button>
-          <button class="btn success" data-status-id="${item.id}" data-status="done">Resolver</button>
-          <button class="btn danger" data-status-id="${item.id}" data-status="eliminated">Eliminar</button>
-        ` : `
-          <button class="btn secondary" data-status-id="${item.id}" data-status="open">Reabrir</button>
-        `}
-        <button class="btn delete-permanent" data-delete-id="${item.id}" title="Deletar permanentemente">Deletar</button>
+        <div class="card-actions-main">
+          ${item.status === "open" ? `
+            <button class="btn edit" data-edit-id="${item.id}">Editar</button>
+            <button class="btn success" data-status-id="${item.id}" data-status="done">Resolver</button>
+            <button class="btn danger" data-status-id="${item.id}" data-status="eliminated">Eliminar</button>
+          ` : `
+            <button class="btn secondary" data-status-id="${item.id}" data-status="open">Reabrir</button>
+          `}
+        </div>
+        <div class="card-actions-danger">
+          <button class="btn delete-permanent" data-delete-id="${item.id}" title="Deletar permanentemente">Deletar</button>
+        </div>
       </div>
     </div>
   `;
 
   return `
     <article class="item-card ${priClass}${expandedClass}" draggable="true" data-card-id="${item.id}" data-card-status="${item.status}">
-      ${quickEditBtn}
+      ${hoverActions}
       ${titleHtml}
       ${collapsedMeta}
       <div class="card-expandable">
@@ -519,7 +612,9 @@ function renderCard(item) {
   `;
 }
 
-// --- Render: Kanban ---
+// ============================================================================
+// Render: Kanban
+// ============================================================================
 function renderKanban(summary) {
   const items = getFilteredItems(summary);
 
@@ -539,7 +634,12 @@ function renderKanban(summary) {
     counts[status].textContent = group.length;
 
     if (group.length === 0) {
-      col.innerHTML = `<div class="empty-state" style="padding:20px 10px;font-size:0.78rem">Nenhum card</div>`;
+      const msgs = {
+        open: "Nenhum card aberto",
+        done: "Nenhum resolvido",
+        eliminated: "Nenhum eliminado"
+      };
+      col.innerHTML = `<div class="empty-state" style="padding:24px 10px;font-size:0.82rem">${msgs[status]}</div>`;
     } else {
       col.innerHTML = group.map(renderCard).join("");
     }
@@ -548,7 +648,9 @@ function renderKanban(summary) {
   emptyNode.style.display = totalFiltered === 0 ? "block" : "none";
 }
 
-// --- Full render ---
+// ============================================================================
+// Full render
+// ============================================================================
 function renderAll() {
   if (!state.summary) return;
   renderAlerts(state.summary);
@@ -557,7 +659,9 @@ function renderAll() {
   renderKanban(state.summary);
 }
 
-// --- Load data ---
+// ============================================================================
+// Load data
+// ============================================================================
 async function load() {
   if (state.loading) return;
   state.loading = true;
@@ -568,7 +672,10 @@ async function load() {
     renderAll();
   } catch (error) {
     if (!state.summary) {
-      colOpen.innerHTML = `<div class="empty-state">Erro ao carregar: ${esc(String(error))}</div>`;
+      colOpen.innerHTML = `<div class="empty-state" style="padding:24px">
+        <span class="empty-state-icon">&#128533;</span>
+        <p class="empty-state-text">Erro ao carregar dados</p>
+      </div>`;
     }
   } finally {
     state.loading = false;
@@ -578,7 +685,9 @@ async function load() {
 load();
 setInterval(load, 30000);
 
-// --- Events: Filters ---
+// ============================================================================
+// Events: Filters
+// ============================================================================
 document.addEventListener("click", (e) => {
   const priChip = e.target.closest("[data-filter-priority]");
   if (priChip) {
@@ -608,13 +717,31 @@ document.addEventListener("click", (e) => {
   }
 });
 
-// --- Events: Category filter ---
+// ============================================================================
+// Events: Clear filters button (empty state CTA)
+// ============================================================================
+document.getElementById("clear-filters-btn").addEventListener("click", () => {
+  state.filterPriority = "all";
+  state.filterCategory = "all";
+  state.search = "";
+  searchInput.value = "";
+  document.querySelectorAll("[data-filter-priority]").forEach((b) => b.classList.remove("active"));
+  document.querySelector('[data-filter-priority="all"]').classList.add("active");
+  categoryFilter.value = "all";
+  renderKanban(state.summary);
+});
+
+// ============================================================================
+// Events: Category filter
+// ============================================================================
 categoryFilter.addEventListener("change", () => {
   state.filterCategory = categoryFilter.value;
   renderKanban(state.summary);
 });
 
-// --- Events: Search ---
+// ============================================================================
+// Events: Search
+// ============================================================================
 let searchTimeout;
 searchInput.addEventListener("input", () => {
   clearTimeout(searchTimeout);
@@ -624,7 +751,9 @@ searchInput.addEventListener("input", () => {
   }, 200);
 });
 
-// --- Events: Status buttons ---
+// ============================================================================
+// Events: Status buttons (including quick hover actions)
+// ============================================================================
 document.addEventListener("click", async (e) => {
   const statusBtn = e.target.closest("[data-status-id]");
   if (!statusBtn) return;
@@ -634,44 +763,76 @@ document.addEventListener("click", async (e) => {
   const status = statusBtn.dataset.status;
   statusBtn.disabled = true;
 
+  // Animate card removal
+  const card = statusBtn.closest(".item-card");
+  if (card) card.classList.add("removing");
+
   try {
     await patchStatus(id, status);
+    const statusMessages = {
+      done: "Card marcado como resolvido",
+      eliminated: "Card eliminado",
+      open: "Card reaberto"
+    };
+    showToast(statusMessages[status] || "Status atualizado", "success", 2500);
+    // Small delay to let animation play
+    await new Promise((r) => setTimeout(r, 200));
     await load();
   } catch (err) {
-    alert(`Erro ao atualizar #${id}: ${err}`);
+    showToast(`Erro ao atualizar #${id}: ${err.message}`, "error");
+    if (card) card.classList.remove("removing");
   } finally {
     statusBtn.disabled = false;
   }
 });
 
-// --- Events: Delete button (permanent) ---
+// ============================================================================
+// Events: Delete button (permanent) — with styled confirm
+// ============================================================================
 document.addEventListener("click", async (e) => {
   const deleteBtn = e.target.closest("[data-delete-id]");
   if (!deleteBtn) return;
 
   e.stopPropagation();
   const id = Number(deleteBtn.dataset.deleteId);
-  if (!confirm(`Deletar permanentemente o card #${id}? Esta acao nao pode ser desfeita.`)) return;
+
+  const confirmed = await showConfirm({
+    title: "Deletar permanentemente?",
+    message: `O card #${id} e seus arquivos serao removidos. Esta acao nao pode ser desfeita.`,
+    icon: "\ud83d\uddd1\ufe0f",
+    okText: "Deletar",
+    okClass: "danger"
+  });
+
+  if (!confirmed) return;
 
   deleteBtn.disabled = true;
   deleteBtn.textContent = "Deletando...";
 
+  // Animate card removal
+  const card = deleteBtn.closest(".item-card") || deleteBtn.closest(".jarbas-card");
+  if (card) card.classList.add("removing");
+
   try {
     await deleteItem(id);
-    // Refresh both views
+    showToast("Card deletado permanentemente", "success", 2500);
+    await new Promise((r) => setTimeout(r, 250));
     if (state.activeTab === "jarbas") {
       await loadJarbasOutputs();
     }
     await load();
   } catch (err) {
-    alert(`Erro ao deletar #${id}: ${err}`);
+    showToast(`Erro ao deletar #${id}: ${err.message}`, "error");
+    if (card) card.classList.remove("removing");
   } finally {
     deleteBtn.disabled = false;
     deleteBtn.textContent = "Deletar";
   }
 });
 
-// --- Events: Edit button ---
+// ============================================================================
+// Events: Edit button
+// ============================================================================
 document.addEventListener("click", (e) => {
   const editBtn = e.target.closest("[data-edit-id]");
   if (!editBtn) return;
@@ -684,7 +845,9 @@ document.addEventListener("click", (e) => {
   openEditModal(item);
 });
 
-// --- Events: Raw text toggle ---
+// ============================================================================
+// Events: Raw text toggle
+// ============================================================================
 document.addEventListener("click", (e) => {
   const toggle = e.target.closest("[data-raw-toggle]");
   if (!toggle) return;
@@ -698,7 +861,9 @@ document.addEventListener("click", (e) => {
   }
 });
 
-// --- Events: PDF preview toggle ---
+// ============================================================================
+// Events: PDF preview toggle
+// ============================================================================
 document.addEventListener("click", (e) => {
   const toggle = e.target.closest("[data-pdf-toggle]");
   if (!toggle) return;
@@ -712,7 +877,9 @@ document.addEventListener("click", (e) => {
   }
 });
 
-// --- Events: Image lightbox ---
+// ============================================================================
+// Events: Image lightbox
+// ============================================================================
 document.addEventListener("click", (e) => {
   const trigger = e.target.closest(".lightbox-trigger");
   if (!trigger) return;
@@ -736,14 +903,18 @@ document.getElementById("image-lightbox").addEventListener("click", (e) => {
   }
 });
 
-// --- Render single attachment from API data ---
+// ============================================================================
+// Render single attachment from API data
+// ============================================================================
 function renderAttachment(att) {
   const url = att.url;
   const name = esc(att.fileName || "Arquivo");
   return renderAttachmentByType(url, att.inputType, `att-${att.id}`, name);
 }
 
-// --- Render attachment by type (works with any URL) ---
+// ============================================================================
+// Render attachment by type (works with any URL)
+// ============================================================================
 function renderAttachmentByType(url, inputType, uniqueId, name) {
   name = name || "Arquivo";
   const downloadUrl = url;
@@ -763,7 +934,6 @@ function renderAttachmentByType(url, inputType, uniqueId, name) {
       </div>`;
   }
   if (inputType === "pdf") {
-    const pdfId = `pdf-${uniqueId}`;
     return `
       <div class="file-attachment">
         <div class="file-header">
@@ -798,14 +968,15 @@ function renderAttachmentByType(url, inputType, uniqueId, name) {
     </div>`;
 }
 
-// --- Auto-load attachments when card expands ---
+// ============================================================================
+// Auto-load attachments when card expands
+// ============================================================================
 async function loadAttachmentsForCard(itemId) {
   if (state.attachmentsCache[itemId]) return;
   try {
     const attachments = await fetchAttachments(itemId);
     if (attachments.length > 0) {
       state.attachmentsCache[itemId] = attachments;
-      // Re-render to show loaded attachments
       if (state.expandedId === itemId) {
         renderKanban(state.summary);
       }
@@ -815,7 +986,9 @@ async function loadAttachmentsForCard(itemId) {
   }
 }
 
-// --- Drag and Drop ---
+// ============================================================================
+// Drag and Drop
+// ============================================================================
 document.addEventListener("dragstart", (e) => {
   const card = e.target.closest(".item-card[draggable]");
   if (!card) return;
@@ -831,11 +1004,9 @@ document.addEventListener("dragend", (e) => {
   if (card) card.classList.remove("dragging");
   state.draggedId = null;
 
-  // Remove all drag-over highlights
   document.querySelectorAll(".kanban-column.drag-over").forEach((col) => col.classList.remove("drag-over"));
 });
 
-// Allow drop on kanban columns
 for (const colEl of document.querySelectorAll(".kanban-column")) {
   colEl.addEventListener("dragover", (e) => {
     e.preventDefault();
@@ -844,7 +1015,6 @@ for (const colEl of document.querySelectorAll(".kanban-column")) {
   });
 
   colEl.addEventListener("dragleave", (e) => {
-    // Only remove if leaving the column itself
     if (!colEl.contains(e.relatedTarget)) {
       colEl.classList.remove("drag-over");
     }
@@ -858,20 +1028,27 @@ for (const colEl of document.querySelectorAll(".kanban-column")) {
     const newStatus = colEl.dataset.status;
     if (!cardId || !newStatus) return;
 
-    // Find the item to check current status
     const item = state.summary?.recentItems?.find((i) => i.id === cardId);
     if (!item || item.status === newStatus) return;
 
     try {
       await patchStatus(cardId, newStatus);
+      const statusMessages = {
+        done: "Card marcado como resolvido",
+        eliminated: "Card eliminado",
+        open: "Card reaberto"
+      };
+      showToast(statusMessages[newStatus] || "Status atualizado", "success", 2500);
       await load();
     } catch (err) {
-      alert(`Erro ao mover #${cardId}: ${err}`);
+      showToast(`Erro ao mover #${cardId}: ${err.message}`, "error");
     }
   });
 }
 
-// --- Edit modal ---
+// ============================================================================
+// Edit modal
+// ============================================================================
 function openEditModal(item) {
   state.editingItem = item;
 
@@ -883,7 +1060,6 @@ function openEditModal(item) {
   document.getElementById("edit-next-step").value = item.nextStep || "";
   document.getElementById("edit-owner").value = item.followUpWith || "";
 
-  // Populate category dropdown
   const catSelect = document.getElementById("edit-category");
   let catHtml = "";
   for (const cat of state.categories) {
@@ -920,21 +1096,23 @@ editForm.addEventListener("submit", async (e) => {
   try {
     await patchItem(id, fields);
     editModal.close();
+    showToast("Card atualizado", "success", 2500);
     await load();
   } catch (err) {
-    alert(`Erro ao salvar #${id}: ${err}`);
+    showToast(`Erro ao salvar #${id}: ${err.message}`, "error");
   } finally {
     saveBtn.disabled = false;
     saveBtn.textContent = "Salvar";
   }
 });
 
-// --- New Card modal ---
+// ============================================================================
+// New Card modal
+// ============================================================================
 const newModal = document.getElementById("new-modal");
 const newForm = document.getElementById("new-form");
 
 document.getElementById("fab-new-card").addEventListener("click", () => {
-  // Reset form
   document.getElementById("new-summary").value = "";
   document.getElementById("new-action-title").value = "";
   document.getElementById("new-priority").value = "MEDIA";
@@ -942,7 +1120,6 @@ document.getElementById("fab-new-card").addEventListener("click", () => {
   document.getElementById("new-next-step").value = "";
   document.getElementById("new-owner").value = "";
 
-  // Populate category dropdown
   const catSelect = document.getElementById("new-category");
   let catHtml = "";
   for (const cat of state.categories) {
@@ -981,18 +1158,21 @@ newForm.addEventListener("submit", async (e) => {
   saveBtn.textContent = "Criando...";
 
   try {
-    const result = await createItem(fields);
+    await createItem(fields);
     newModal.close();
+    showToast("Card criado com sucesso", "success", 2500);
     await load();
   } catch (err) {
-    alert(`Erro ao criar card: ${err}`);
+    showToast(`Erro ao criar card: ${err.message}`, "error");
   } finally {
     saveBtn.disabled = false;
     saveBtn.textContent = "Criar";
   }
 });
 
-// --- Voice Dictation (Web Speech API) ---
+// ============================================================================
+// Voice Dictation (Web Speech API)
+// ============================================================================
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
 if (SpeechRecognition) {
@@ -1010,13 +1190,11 @@ if (SpeechRecognition) {
     const textarea = document.getElementById(targetId);
     if (!textarea) return;
 
-    // If already recording on this button, stop
     if (activeBtn === micBtn && activeRecognition) {
       activeRecognition.stop();
       return;
     }
 
-    // If recording on another button, stop that first
     if (activeRecognition) {
       activeRecognition.stop();
     }
@@ -1052,7 +1230,6 @@ if (SpeechRecognition) {
     };
 
     recognition.onend = () => {
-      // Keep only final text
       const separator = baseText && !baseText.endsWith(" ") ? " " : "";
       textarea.value = baseText + separator + finalText;
       activeRecognition = null;
@@ -1072,7 +1249,6 @@ if (SpeechRecognition) {
     recognition.start();
   });
 } else {
-  // Hide all mic buttons if Speech API not available
   document.querySelectorAll(".mic-btn").forEach((btn) => {
     btn.style.display = "none";
   });

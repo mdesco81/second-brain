@@ -15,12 +15,13 @@
   <body>
     <main class="app">
       <header class="topbar">
-        <h1 class="logo">Second Brain</h1>
+        <h1 class="logo"><span class="logo-icon">&#129504;</span> Second Brain</h1>
         <nav class="main-tabs">
           <button class="main-tab active" data-tab="brain">Second Brain</button>
-          <button class="main-tab" data-tab="jarbas">Trabalhos do Jarbas</button>
+          <button class="main-tab" data-tab="jarbas">Jarbas</button>
         </nav>
         <div class="search-box">
+          <span class="search-icon">&#128269;</span>
           <input type="search" id="search" placeholder="Buscar cards..." autocomplete="off" />
         </div>
       </header>
@@ -68,20 +69,39 @@
       </section>
 
       <div class="empty-state" id="empty-state" style="display:none">
-        Nenhum card encontrado com os filtros atuais.
+        <span class="empty-state-icon">&#128270;</span>
+        <p class="empty-state-text">Nenhum card encontrado com os filtros atuais.</p>
+        <button type="button" class="empty-state-cta" id="clear-filters-btn">Limpar filtros</button>
       </div>
 
       <!-- Jarbas Tab Content -->
       <section class="jarbas-view" id="jarbas-view" style="display:none">
         <div class="jarbas-grid" id="jarbas-grid"></div>
         <div class="empty-state" id="jarbas-empty" style="display:none">
-          Nenhum trabalho do Jarbas ainda. Envie uma mensagem no Telegram com "Jarbas escreve um post sobre..." para comecar.
+          <span class="empty-state-icon">&#9997;&#65039;</span>
+          <p class="empty-state-text">Nenhum trabalho do Jarbas ainda.<br>Envie uma mensagem no Telegram com <strong>"Jarbas escreve um post sobre..."</strong> para comecar.</p>
         </div>
       </section>
     </main>
 
     <!-- FAB: New Card -->
     <button type="button" class="fab" id="fab-new-card" title="Novo card">+</button>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <!-- Confirm Dialog -->
+    <dialog id="confirm-dialog" class="confirm-dialog">
+      <div class="confirm-body">
+        <span class="confirm-icon" id="confirm-icon"></span>
+        <h3 class="confirm-title" id="confirm-title"></h3>
+        <p class="confirm-message" id="confirm-message"></p>
+        <div class="confirm-buttons">
+          <button type="button" class="btn secondary" id="confirm-cancel">Cancelar</button>
+          <button type="button" class="btn danger" id="confirm-ok">Confirmar</button>
+        </div>
+      </div>
+    </dialog>
 
     <!-- New Card Modal -->
     <dialog id="new-modal">
