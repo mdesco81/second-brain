@@ -1,18 +1,23 @@
 import cron from "node-cron";
 import { env } from "../config/env.js";
 import {
+  decayUnusedMemories,
   escalateOverdueItems,
+  expireStaleConversations,
   insertProactiveRun,
   listArchiveSuggestions,
+  listItemsByPerson,
   listOpenActionItems,
   listOverdueItems,
+  listPeople,
   listProactiveChats,
   listStaleItems,
   loadDoneToday,
   loadLast24hSnapshot,
-  loadWeeklySummary
+  loadWeeklySummary,
+  Person
 } from "../db/schema.js";
-import { buildAfternoonMessage, buildDailyMessage, buildEveningMessage, buildWeeklyMessage } from "./reports.js";
+import { buildAfternoonMessage, buildDailyMessage, buildEveningMessage, buildMartaCrossTeamInsight, buildMartaPreOneOnOneAlert, buildWeeklyMessage } from "./reports.js";
 import { sendText } from "./telegram.js";
 import { log } from "../utils/logger.js";
 
@@ -183,11 +188,175 @@ export function startProactiveScheduler(): void {
     { timezone: env.TIMEZONE }
   );
 
+  // ── Marta (Chief of Staff) proactive alerts ──────────────────────────
+
+  // Pre-1:1 alert: Mon/Wed/Fri 30min before morning report
+  let preOneOnOneHour = env.PROACTIVE_HOUR;
+  let preOneOnOneMinute = env.PROACTIVE_MINUTE - 30;
+  if (preOneOnOneMinute < 0) {
+    preOneOnOneMinute += 60;
+    preOneOnOneHour = Math.max(preOneOnOneHour - 1, 0);
+  }
+  const preOneOnOneExpression = `${preOneOnOneMinute} ${preOneOnOneHour} * * 1,3,5`;
+  cron.schedule(
+    preOneOnOneExpression,
+    async () => {
+      try {
+        const chatIds = await listProactiveChats();
+        if (chatIds.length === 0) return;
+        await deliverMartaPreOneOnOne(chatIds);
+      } catch (error) {
+        log.error("Marta pre-1:1 alert failed", { error });
+      }
+    },
+    { timezone: env.TIMEZONE }
+  );
+
+  // Cross-team insights: weekly, same day as weekly report, 1h after
+  const insightHour = Math.min(env.WEEKLY_REPORT_HOUR + 1, 21);
+  const insightExpression = `0 ${insightHour} * * ${env.WEEKLY_REPORT_DAY}`;
+  cron.schedule(
+    insightExpression,
+    async () => {
+      try {
+        const chatIds = await listProactiveChats();
+        if (chatIds.length === 0) return;
+        await deliverMartaCrossTeamInsight(chatIds);
+      } catch (error) {
+        log.error("Marta cross-team insight failed", { error });
+      }
+    },
+    { timezone: env.TIMEZONE }
+  );
+
+  // Housekeeping: expire stale conversations and decay unused memories (daily at 3am)
+  cron.schedule(
+    "0 3 * * *",
+    async () => {
+      try {
+        const expired = await expireStaleConversations();
+        const decayed = await decayUnusedMemories();
+        if (expired > 0 || decayed > 0) {
+          log.info("Marta housekeeping completed", { expiredConversations: expired, decayedMemories: decayed });
+        }
+      } catch (error) {
+        log.error("Marta housekeeping failed", { error });
+      }
+    },
+    { timezone: env.TIMEZONE }
+  );
+
   log.info("Proactive scheduler started", {
     timezone: env.TIMEZONE,
     morning: { hour: env.PROACTIVE_HOUR, minute: env.PROACTIVE_MINUTE },
     afternoon: { hour: afternoonHour, minute: 0 },
     evening: { hour: eveningHour, minute: 0 },
-    weekly: { day: env.WEEKLY_REPORT_DAY, hour: env.WEEKLY_REPORT_HOUR, minute: env.WEEKLY_REPORT_MINUTE }
+    weekly: { day: env.WEEKLY_REPORT_DAY, hour: env.WEEKLY_REPORT_HOUR, minute: env.WEEKLY_REPORT_MINUTE },
+    martaPreOneOnOne: { days: "Mon/Wed/Fri", hour: preOneOnOneHour, minute: preOneOnOneMinute },
+    martaInsights: { day: env.WEEKLY_REPORT_DAY, hour: insightHour }
   });
+}
+
+// ── Marta proactive delivery functions ────────────────────────────────
+
+function cadenceDays(cadence: string): number {
+  switch (cadence) {
+    case "weekly": return 7;
+    case "biweekly": return 14;
+    case "monthly": return 30;
+    default: return 7;
+  }
+}
+
+async function deliverMartaPreOneOnOne(chatIds: number[]): Promise<void> {
+  const people = await listPeople(true);
+  if (people.length === 0) return;
+
+  const now = Date.now();
+  const directReports = people.filter((p) => p.relationship === "direct_report");
+
+  // Calculate who needs a 1:1 and fetch items in parallel
+  const dueCandidates = directReports.filter((person) => {
+    const daysSince = person.lastOneOnOne
+      ? Math.floor((now - new Date(person.lastOneOnOne).getTime()) / (1000 * 60 * 60 * 24))
+      : 999;
+    return daysSince >= cadenceDays(person.oneOnOneCadence) - 2;
+  });
+
+  if (dueCandidates.length === 0) return;
+
+  const itemCounts = await Promise.all(
+    dueCandidates.map((p) => listItemsByPerson(p.name, ["open"]).then((items) => items.length))
+  );
+
+  const dueForOneOnOne = dueCandidates.map((p, i) => ({ ...p, pendingCount: itemCounts[i] }));
+
+  if (dueForOneOnOne.length === 0) return;
+
+  const message = buildMartaPreOneOnOneAlert(dueForOneOnOne);
+  if (!message) return;
+
+  for (const chatId of chatIds) {
+    try {
+      await sendText(chatId, message);
+      await insertProactiveRun(chatId, message, "daily");
+    } catch (error) {
+      log.error("Marta pre-1:1 delivery failed", { chatId, error });
+    }
+  }
+  log.info("Marta pre-1:1 alert delivered", { recipients: chatIds.length, peopleAlerted: dueForOneOnOne.length });
+}
+
+async function deliverMartaCrossTeamInsight(chatIds: number[]): Promise<void> {
+  const people = await listPeople(true);
+  if (people.length === 0) return;
+
+  const directReports = people.filter((p) => p.relationship === "direct_report");
+  if (directReports.length === 0) return;
+
+  // Fetch all items in parallel
+  const allItems = await Promise.all(
+    directReports.map((p) => listItemsByPerson(p.name, ["open"]))
+  );
+
+  const insights: Array<{ type: string; message: string }> = [];
+
+  for (let i = 0; i < directReports.length; i++) {
+    const person = directReports[i];
+    const items = allItems[i];
+    const overdueItems = items.filter((it) => it.dueAt && new Date(it.dueAt) < new Date());
+
+    if (overdueItems.length >= 3) {
+      insights.push({
+        type: "overdue_cluster",
+        message: `${person.name} tem ${overdueItems.length} items atrasados — considere abordar no proximo 1:1.`
+      });
+    }
+
+    const daysSince = person.lastOneOnOne
+      ? Math.floor((Date.now() - new Date(person.lastOneOnOne).getTime()) / (1000 * 60 * 60 * 24))
+      : null;
+
+    if (daysSince !== null && daysSince > 14) {
+      insights.push({
+        type: "stale_1on1",
+        message: `Sem 1:1 com ${person.name} ha ${daysSince} dias — pode estar acumulando blockers.`
+      });
+    }
+  }
+
+  if (insights.length === 0) return;
+
+  const message = buildMartaCrossTeamInsight(insights);
+  if (!message) return;
+
+  for (const chatId of chatIds) {
+    try {
+      await sendText(chatId, message);
+      await insertProactiveRun(chatId, message, "weekly");
+    } catch (error) {
+      log.error("Marta cross-team insight delivery failed", { chatId, error });
+    }
+  }
+  log.info("Marta cross-team insight delivered", { recipients: chatIds.length, insightsCount: insights.length });
 }

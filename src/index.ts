@@ -9,6 +9,7 @@ import { deleteWebhook, setWebhook } from "./services/telegram.js";
 import { hasAI } from "./services/openai.js";
 import { log } from "./utils/logger.js";
 import { registerGhostwriter } from "./agents/ghostwriter/index.js";
+import { registerChiefOfStaff } from "./agents/chiefofstaff/index.js";
 import { getInflightCount, waitForInflight } from "./services/intake.js";
 
 async function configureWebhookWithRetry(): Promise<NodeJS.Timeout | null> {
@@ -68,6 +69,7 @@ async function bootstrap(): Promise<void> {
 
   startProactiveScheduler();
   registerGhostwriter();
+  registerChiefOfStaff();
 
   if (!hasAI()) {
     log.warn("⚠ Claude AI is NOT available — check ANTHROPIC_API_KEY. Cards will use keyword-only fallback.");

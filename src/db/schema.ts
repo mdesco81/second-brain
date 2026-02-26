@@ -108,6 +108,106 @@ export async function ensureSchema(): Promise<void> {
 
     CREATE INDEX IF NOT EXISTS idx_item_attachments_item_id
       ON item_attachments(item_id);
+
+    -- ── Chief of Staff (Marta) tables ─────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS people (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      name_variants TEXT[] DEFAULT '{}',
+      role TEXT,
+      relationship TEXT NOT NULL DEFAULT 'direct_report',
+      email TEXT,
+      one_on_one_cadence TEXT DEFAULT 'weekly',
+      last_one_on_one TIMESTAMPTZ,
+      notes TEXT,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_people_name ON people(LOWER(name));
+    CREATE INDEX IF NOT EXISTS idx_people_active ON people(active) WHERE active = TRUE;
+
+    CREATE TABLE IF NOT EXISTS cos_outputs (
+      id SERIAL PRIMARY KEY,
+      chat_id BIGINT NOT NULL,
+      output_type TEXT NOT NULL,
+      person_id INTEGER REFERENCES people(id),
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      metadata JSONB DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'draft',
+      version INTEGER NOT NULL DEFAULT 1,
+      parent_id INTEGER REFERENCES cos_outputs(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cos_outputs_chat ON cos_outputs(chat_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_cos_outputs_person ON cos_outputs(person_id, output_type, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_cos_outputs_type ON cos_outputs(output_type, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS cos_memory (
+      id SERIAL PRIMARY KEY,
+      memory_type TEXT NOT NULL,
+      person_id INTEGER REFERENCES people(id),
+      key TEXT NOT NULL,
+      content TEXT NOT NULL,
+      source TEXT,
+      source_output_id INTEGER REFERENCES cos_outputs(id),
+      confidence REAL DEFAULT 0.7,
+      times_confirmed INTEGER DEFAULT 0,
+      times_used INTEGER DEFAULT 0,
+      last_used_at TIMESTAMPTZ,
+      superseded_by INTEGER REFERENCES cos_memory(id),
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cos_memory_person ON cos_memory(person_id, memory_type) WHERE active = TRUE;
+    CREATE INDEX IF NOT EXISTS idx_cos_memory_type ON cos_memory(memory_type) WHERE active = TRUE;
+
+    CREATE TABLE IF NOT EXISTS cos_conversations (
+      id SERIAL PRIMARY KEY,
+      chat_id BIGINT NOT NULL,
+      intent TEXT NOT NULL,
+      person_id INTEGER REFERENCES people(id),
+      state TEXT NOT NULL DEFAULT 'active',
+      context JSONB DEFAULT '{}',
+      messages JSONB DEFAULT '[]',
+      turns INTEGER DEFAULT 0,
+      max_turns INTEGER DEFAULT 2,
+      output_id INTEGER REFERENCES cos_outputs(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expired_at TIMESTAMPTZ
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cos_conv_active
+      ON cos_conversations(chat_id, state, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS cos_events (
+      id SERIAL PRIMARY KEY,
+      chat_id BIGINT NOT NULL,
+      event_type TEXT NOT NULL,
+      person_id INTEGER REFERENCES people(id),
+      output_id INTEGER REFERENCES cos_outputs(id),
+      memory_id INTEGER REFERENCES cos_memory(id),
+      conversation_id INTEGER REFERENCES cos_conversations(id),
+      details JSONB DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cos_events_chat ON cos_events(chat_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_cos_events_person ON cos_events(person_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_cos_events_type ON cos_events(event_type, created_at DESC);
+  `);
+
+  // Unique partial index for cos_memory (can't be inline in CREATE TABLE)
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_cos_memory_unique_active
+      ON cos_memory(memory_type, key) WHERE active = TRUE;
   `);
 
   await pool.query(`
@@ -2017,6 +2117,963 @@ export async function textSearchItemsForChat(chatId: number, query: string, limi
     createdAt: row.created_at,
     priority: normalizePriority(row.priority)
   }));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Chief of Staff (Marta) — People, Outputs, Memory, Conversations, Events
+// ══════════════════════════════════════════════════════════════════════
+
+// ── People ────────────────────────────────────────────────────────────
+
+export interface Person {
+  id: number;
+  name: string;
+  nameVariants: string[];
+  role: string | null;
+  relationship: string;
+  email: string | null;
+  oneOnOneCadence: string;
+  lastOneOnOne: string | null;
+  notes: string | null;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function upsertPerson(params: {
+  name: string;
+  role?: string;
+  relationship?: string;
+  email?: string;
+}): Promise<number> {
+  // Check for existing person by name (case-insensitive)
+  const existing = await pool.query<{ id: number }>(
+    `SELECT id FROM people WHERE LOWER(name) = LOWER($1) AND active = TRUE LIMIT 1`,
+    [params.name]
+  );
+
+  if (existing.rows[0]) {
+    await pool.query(
+      `UPDATE people SET
+         role = COALESCE($2, role),
+         relationship = COALESCE($3, relationship),
+         email = COALESCE($4, email),
+         updated_at = NOW()
+       WHERE id = $1`,
+      [existing.rows[0].id, params.role ?? null, params.relationship ?? null, params.email ?? null]
+    );
+    return existing.rows[0].id;
+  }
+
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO people (name, role, relationship, email)
+     VALUES ($1, $2, $3, $4)
+     RETURNING id`,
+    [params.name, params.role ?? null, params.relationship ?? "direct_report", params.email ?? null]
+  );
+  return result.rows[0].id;
+}
+
+export async function listPeople(onlyActive = true): Promise<Person[]> {
+  const result = await pool.query<{
+    id: number;
+    name: string;
+    name_variants: string[];
+    role: string | null;
+    relationship: string;
+    email: string | null;
+    one_on_one_cadence: string;
+    last_one_on_one: string | null;
+    notes: string | null;
+    active: boolean;
+    created_at: string;
+    updated_at: string;
+  }>(
+    `SELECT id, name, name_variants, role, relationship, email,
+            one_on_one_cadence, last_one_on_one::TEXT, notes, active,
+            created_at::TEXT, updated_at::TEXT
+     FROM people
+     WHERE ($1::BOOLEAN = FALSE OR active = TRUE)
+     ORDER BY name`,
+    [onlyActive]
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    nameVariants: row.name_variants ?? [],
+    role: row.role,
+    relationship: row.relationship,
+    email: row.email,
+    oneOnOneCadence: row.one_on_one_cadence,
+    lastOneOnOne: row.last_one_on_one,
+    notes: row.notes,
+    active: row.active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }));
+}
+
+export async function findPersonByName(namePart: string): Promise<Person[]> {
+  const pattern = `%${namePart.toLowerCase()}%`;
+  const result = await pool.query<{
+    id: number;
+    name: string;
+    name_variants: string[];
+    role: string | null;
+    relationship: string;
+    email: string | null;
+    one_on_one_cadence: string;
+    last_one_on_one: string | null;
+    notes: string | null;
+    active: boolean;
+    created_at: string;
+    updated_at: string;
+  }>(
+    `SELECT id, name, name_variants, role, relationship, email,
+            one_on_one_cadence, last_one_on_one::TEXT, notes, active,
+            created_at::TEXT, updated_at::TEXT
+     FROM people
+     WHERE active = TRUE
+       AND (LOWER(name) LIKE $1 OR $2 = ANY(SELECT LOWER(unnest(name_variants))))
+     ORDER BY name
+     LIMIT 5`,
+    [pattern, namePart.toLowerCase()]
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    nameVariants: row.name_variants ?? [],
+    role: row.role,
+    relationship: row.relationship,
+    email: row.email,
+    oneOnOneCadence: row.one_on_one_cadence,
+    lastOneOnOne: row.last_one_on_one,
+    notes: row.notes,
+    active: row.active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }));
+}
+
+export async function updateLastOneOnOne(personId: number): Promise<void> {
+  await pool.query(
+    `UPDATE people SET last_one_on_one = NOW(), updated_at = NOW() WHERE id = $1`,
+    [personId]
+  );
+}
+
+export async function addNameVariant(personId: number, variant: string): Promise<void> {
+  await pool.query(
+    `UPDATE people
+     SET name_variants = array_append(name_variants, $2),
+         updated_at = NOW()
+     WHERE id = $1
+       AND NOT ($2 = ANY(name_variants))`,
+    [personId, variant.toLowerCase()]
+  );
+}
+
+export async function listItemsByPerson(
+  personName: string,
+  statuses?: string[]
+): Promise<Array<OpenActionItem & { status: string }>> {
+  const validStatuses = statuses && statuses.length > 0 ? statuses : ["open", "done", "eliminated"];
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    category_name: string;
+    summary_pt_br: string;
+    action: string;
+    action_title: string | null;
+    next_step: string | null;
+    follow_up_with: string | null;
+    due_at: string | null;
+    created_at: string;
+    priority: string | null;
+    status: string;
+  }>(
+    `SELECT i.id, i.chat_id::TEXT, c.name AS category_name,
+            i.summary_pt_br, i.action, i.action_title,
+            i.next_step, i.follow_up_with, i.due_at::TEXT,
+            i.created_at::TEXT, i.priority, i.status
+     FROM inbox_items i
+     JOIN categories c ON c.id = i.category_id
+     WHERE i.follow_up_with ILIKE '%' || regexp_replace($1, '([%_\\\\])', '\\\\\\1', 'g') || '%'
+       AND i.action <> 'NONE'
+       AND i.status = ANY($2::TEXT[])
+     ORDER BY
+       CASE i.status WHEN 'open' THEN 0 WHEN 'done' THEN 1 ELSE 2 END,
+       CASE i.priority WHEN 'ALTA' THEN 3 WHEN 'MEDIA' THEN 2 ELSE 1 END DESC,
+       i.created_at DESC
+     LIMIT 50`,
+    [personName, validStatuses]
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    chatId: Number(row.chat_id),
+    categoryName: row.category_name,
+    summaryPtBr: row.summary_pt_br,
+    action: row.action,
+    actionTitle: row.action_title ?? undefined,
+    nextStep: row.next_step ?? undefined,
+    followUpWith: row.follow_up_with ?? undefined,
+    dueAt: row.due_at ?? undefined,
+    createdAt: row.created_at,
+    priority: normalizePriority(row.priority),
+    status: row.status
+  }));
+}
+
+// ── CoS Outputs ───────────────────────────────────────────────────────
+
+export interface CosOutput {
+  id: number;
+  chatId: number;
+  outputType: string;
+  personId: number | null;
+  title: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  status: string;
+  version: number;
+  parentId: number | null;
+  createdAt: string;
+}
+
+export async function insertCosOutput(params: {
+  chatId: number;
+  outputType: string;
+  personId?: number;
+  title: string;
+  content: string;
+  metadata?: Record<string, unknown>;
+  status?: string;
+  parentId?: number;
+}): Promise<number> {
+  const version = params.parentId
+    ? (await pool.query<{ v: number }>(
+        `SELECT COALESCE(MAX(version), 0) + 1 AS v FROM cos_outputs WHERE id = $1 OR parent_id = $1`,
+        [params.parentId]
+      )).rows[0].v
+    : 1;
+
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO cos_outputs (chat_id, output_type, person_id, title, content, metadata, status, version, parent_id)
+     VALUES ($1, $2, $3, $4, $5, $6::JSONB, $7, $8, $9)
+     RETURNING id`,
+    [
+      params.chatId,
+      params.outputType,
+      params.personId ?? null,
+      params.title,
+      params.content,
+      JSON.stringify(params.metadata ?? {}),
+      params.status ?? "draft",
+      version,
+      params.parentId ?? null
+    ]
+  );
+  return result.rows[0].id;
+}
+
+export async function listCosOutputs(
+  chatId?: number,
+  filters?: { outputType?: string; personId?: number; status?: string; limit?: number }
+): Promise<CosOutput[]> {
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+  let idx = 1;
+
+  if (chatId !== undefined) {
+    conditions.push(`chat_id = $${idx}`);
+    params.push(chatId);
+    idx++;
+  }
+  if (filters?.outputType) {
+    conditions.push(`output_type = $${idx}`);
+    params.push(filters.outputType);
+    idx++;
+  }
+  if (filters?.personId) {
+    conditions.push(`person_id = $${idx}`);
+    params.push(filters.personId);
+    idx++;
+  }
+  if (filters?.status) {
+    conditions.push(`status = $${idx}`);
+    params.push(filters.status);
+    idx++;
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const limit = filters?.limit ?? 50;
+
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    output_type: string;
+    person_id: number | null;
+    title: string;
+    content: string;
+    metadata: Record<string, unknown>;
+    status: string;
+    version: number;
+    parent_id: number | null;
+    created_at: string;
+  }>(
+    `SELECT id, chat_id::TEXT, output_type, person_id, title, content,
+            metadata, status, version, parent_id, created_at::TEXT
+     FROM cos_outputs
+     ${where}
+     ORDER BY created_at DESC
+     LIMIT ${limit}`
+  , params);
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    chatId: Number(row.chat_id),
+    outputType: row.output_type,
+    personId: row.person_id,
+    title: row.title,
+    content: row.content,
+    metadata: row.metadata ?? {},
+    status: row.status,
+    version: row.version,
+    parentId: row.parent_id,
+    createdAt: row.created_at
+  }));
+}
+
+export async function getCosOutput(id: number): Promise<CosOutput | null> {
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    output_type: string;
+    person_id: number | null;
+    title: string;
+    content: string;
+    metadata: Record<string, unknown>;
+    status: string;
+    version: number;
+    parent_id: number | null;
+    created_at: string;
+  }>(
+    `SELECT id, chat_id::TEXT, output_type, person_id, title, content,
+            metadata, status, version, parent_id, created_at::TEXT
+     FROM cos_outputs WHERE id = $1`,
+    [id]
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    chatId: Number(row.chat_id),
+    outputType: row.output_type,
+    personId: row.person_id,
+    title: row.title,
+    content: row.content,
+    metadata: row.metadata ?? {},
+    status: row.status,
+    version: row.version,
+    parentId: row.parent_id,
+    createdAt: row.created_at
+  };
+}
+
+export async function updateCosOutputStatus(id: number, status: string): Promise<void> {
+  await pool.query(`UPDATE cos_outputs SET status = $2 WHERE id = $1`, [id, status]);
+}
+
+export async function getLatestCosOutput(personId: number, outputType: string): Promise<CosOutput | null> {
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    output_type: string;
+    person_id: number | null;
+    title: string;
+    content: string;
+    metadata: Record<string, unknown>;
+    status: string;
+    version: number;
+    parent_id: number | null;
+    created_at: string;
+  }>(
+    `SELECT id, chat_id::TEXT, output_type, person_id, title, content,
+            metadata, status, version, parent_id, created_at::TEXT
+     FROM cos_outputs
+     WHERE person_id = $1 AND output_type = $2
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [personId, outputType]
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    chatId: Number(row.chat_id),
+    outputType: row.output_type,
+    personId: row.person_id,
+    title: row.title,
+    content: row.content,
+    metadata: row.metadata ?? {},
+    status: row.status,
+    version: row.version,
+    parentId: row.parent_id,
+    createdAt: row.created_at
+  };
+}
+
+// ── CoS Memory ────────────────────────────────────────────────────────
+
+export interface CosMemory {
+  id: number;
+  memoryType: string;
+  personId: number | null;
+  key: string;
+  content: string;
+  source: string | null;
+  sourceOutputId: number | null;
+  confidence: number;
+  timesConfirmed: number;
+  timesUsed: number;
+  lastUsedAt: string | null;
+  active: boolean;
+  createdAt: string;
+}
+
+export async function upsertCosMemory(params: {
+  memoryType: string;
+  personId?: number;
+  key: string;
+  content: string;
+  source?: string;
+  sourceOutputId?: number;
+}): Promise<number> {
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO cos_memory (memory_type, person_id, key, content, source, source_output_id)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (memory_type, key) WHERE active = TRUE
+     DO UPDATE SET
+       content = EXCLUDED.content,
+       source = COALESCE(EXCLUDED.source, cos_memory.source),
+       source_output_id = COALESCE(EXCLUDED.source_output_id, cos_memory.source_output_id),
+       times_confirmed = cos_memory.times_confirmed + 1,
+       confidence = LEAST(cos_memory.confidence + 0.1, 1.0),
+       updated_at = NOW()
+     RETURNING id`,
+    [
+      params.memoryType,
+      params.personId ?? null,
+      params.key,
+      params.content,
+      params.source ?? null,
+      params.sourceOutputId ?? null
+    ]
+  );
+  return result.rows[0].id;
+}
+
+export async function loadMemoriesForPerson(personId: number, limit = 20): Promise<CosMemory[]> {
+  const result = await pool.query<{
+    id: number;
+    memory_type: string;
+    person_id: number | null;
+    key: string;
+    content: string;
+    source: string | null;
+    source_output_id: number | null;
+    confidence: number;
+    times_confirmed: number;
+    times_used: number;
+    last_used_at: string | null;
+    active: boolean;
+    created_at: string;
+  }>(
+    `SELECT id, memory_type, person_id, key, content, source, source_output_id,
+            confidence, times_confirmed, times_used, last_used_at::TEXT,
+            active, created_at::TEXT
+     FROM cos_memory
+     WHERE person_id = $1 AND active = TRUE
+     ORDER BY confidence DESC, updated_at DESC
+     LIMIT $2`,
+    [personId, limit]
+  );
+  return result.rows.map(mapCosMemoryRow);
+}
+
+export async function loadMemoriesByType(memoryType: string, limit = 20): Promise<CosMemory[]> {
+  const result = await pool.query<{
+    id: number;
+    memory_type: string;
+    person_id: number | null;
+    key: string;
+    content: string;
+    source: string | null;
+    source_output_id: number | null;
+    confidence: number;
+    times_confirmed: number;
+    times_used: number;
+    last_used_at: string | null;
+    active: boolean;
+    created_at: string;
+  }>(
+    `SELECT id, memory_type, person_id, key, content, source, source_output_id,
+            confidence, times_confirmed, times_used, last_used_at::TEXT,
+            active, created_at::TEXT
+     FROM cos_memory
+     WHERE memory_type = $1 AND active = TRUE
+     ORDER BY confidence DESC, updated_at DESC
+     LIMIT $2`,
+    [memoryType, limit]
+  );
+  return result.rows.map(mapCosMemoryRow);
+}
+
+export async function loadAllRelevantMemories(params?: {
+  personId?: number;
+  types?: string[];
+  limit?: number;
+}): Promise<CosMemory[]> {
+  const conditions: string[] = ["active = TRUE"];
+  const queryParams: unknown[] = [];
+  let idx = 1;
+
+  if (params?.personId) {
+    conditions.push(`(person_id = $${idx} OR person_id IS NULL)`);
+    queryParams.push(params.personId);
+    idx++;
+  }
+  if (params?.types && params.types.length > 0) {
+    conditions.push(`memory_type = ANY($${idx}::TEXT[])`);
+    queryParams.push(params.types);
+    idx++;
+  }
+
+  const limit = params?.limit ?? 30;
+
+  const result = await pool.query<{
+    id: number;
+    memory_type: string;
+    person_id: number | null;
+    key: string;
+    content: string;
+    source: string | null;
+    source_output_id: number | null;
+    confidence: number;
+    times_confirmed: number;
+    times_used: number;
+    last_used_at: string | null;
+    active: boolean;
+    created_at: string;
+  }>(
+    `SELECT id, memory_type, person_id, key, content, source, source_output_id,
+            confidence, times_confirmed, times_used, last_used_at::TEXT,
+            active, created_at::TEXT
+     FROM cos_memory
+     WHERE ${conditions.join(" AND ")}
+     ORDER BY confidence DESC, updated_at DESC
+     LIMIT ${limit}`,
+    queryParams
+  );
+  return result.rows.map(mapCosMemoryRow);
+}
+
+export async function markMemoryUsed(memoryId: number): Promise<void> {
+  await pool.query(
+    `UPDATE cos_memory
+     SET times_used = times_used + 1,
+         last_used_at = NOW(),
+         updated_at = NOW()
+     WHERE id = $1`,
+    [memoryId]
+  );
+}
+
+export async function supersedMemory(oldId: number, newId: number): Promise<void> {
+  await pool.query(
+    `UPDATE cos_memory
+     SET superseded_by = $2, active = FALSE, updated_at = NOW()
+     WHERE id = $1`,
+    [oldId, newId]
+  );
+}
+
+export async function decayUnusedMemories(unusedDays = 60, decayAmount = 0.05): Promise<number> {
+  const result = await pool.query<{ id: number }>(
+    `UPDATE cos_memory
+     SET confidence = GREATEST(confidence - $3, 0.1),
+         updated_at = NOW()
+     WHERE active = TRUE
+       AND (last_used_at IS NULL OR last_used_at < NOW() - INTERVAL '1 day' * $1)
+       AND created_at < NOW() - INTERVAL '1 day' * $2
+       AND confidence > 0.1
+     RETURNING id`,
+    [unusedDays, unusedDays, decayAmount]
+  );
+  return result.rowCount ?? 0;
+}
+
+function mapCosMemoryRow(row: {
+  id: number;
+  memory_type: string;
+  person_id: number | null;
+  key: string;
+  content: string;
+  source: string | null;
+  source_output_id: number | null;
+  confidence: number;
+  times_confirmed: number;
+  times_used: number;
+  last_used_at: string | null;
+  active: boolean;
+  created_at: string;
+}): CosMemory {
+  return {
+    id: row.id,
+    memoryType: row.memory_type,
+    personId: row.person_id,
+    key: row.key,
+    content: row.content,
+    source: row.source,
+    sourceOutputId: row.source_output_id,
+    confidence: row.confidence,
+    timesConfirmed: row.times_confirmed,
+    timesUsed: row.times_used,
+    lastUsedAt: row.last_used_at,
+    active: row.active,
+    createdAt: row.created_at
+  };
+}
+
+// ── CoS Conversations ─────────────────────────────────────────────────
+
+export interface CosConversation {
+  id: number;
+  chatId: number;
+  intent: string;
+  personId: number | null;
+  state: string;
+  context: Record<string, unknown>;
+  messages: Array<{ role: string; content: string; timestamp: string }>;
+  turns: number;
+  maxTurns: number;
+  outputId: number | null;
+  createdAt: string;
+  updatedAt: string;
+  expiredAt: string | null;
+}
+
+export async function createCosConversation(params: {
+  chatId: number;
+  intent: string;
+  personId?: number;
+  context?: Record<string, unknown>;
+}): Promise<number> {
+  // Expire any existing active conversations for this chat
+  await pool.query(
+    `UPDATE cos_conversations
+     SET state = 'expired', expired_at = NOW(), updated_at = NOW()
+     WHERE chat_id = $1 AND state IN ('active', 'clarifying')`,
+    [params.chatId]
+  );
+
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO cos_conversations (chat_id, intent, person_id, context)
+     VALUES ($1, $2, $3, $4::JSONB)
+     RETURNING id`,
+    [params.chatId, params.intent, params.personId ?? null, JSON.stringify(params.context ?? {})]
+  );
+  return result.rows[0].id;
+}
+
+export async function getActiveCosConversation(chatId: number): Promise<CosConversation | null> {
+  // Auto-expire conversations older than 30 minutes
+  await pool.query(
+    `UPDATE cos_conversations
+     SET state = 'expired', expired_at = NOW(), updated_at = NOW()
+     WHERE chat_id = $1
+       AND state IN ('active', 'clarifying')
+       AND updated_at < NOW() - INTERVAL '30 minutes'`,
+    [chatId]
+  );
+
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    intent: string;
+    person_id: number | null;
+    state: string;
+    context: Record<string, unknown>;
+    messages: Array<{ role: string; content: string; timestamp: string }>;
+    turns: number;
+    max_turns: number;
+    output_id: number | null;
+    created_at: string;
+    updated_at: string;
+    expired_at: string | null;
+  }>(
+    `SELECT id, chat_id::TEXT, intent, person_id, state, context, messages,
+            turns, max_turns, output_id, created_at::TEXT, updated_at::TEXT,
+            expired_at::TEXT
+     FROM cos_conversations
+     WHERE chat_id = $1 AND state IN ('active', 'clarifying')
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [chatId]
+  );
+
+  const row = result.rows[0];
+  if (!row) return null;
+  return mapCosConversationRow(row);
+}
+
+export async function appendConversationMessage(
+  convId: number,
+  role: string,
+  content: string
+): Promise<void> {
+  const message = { role, content, timestamp: new Date().toISOString() };
+  await pool.query(
+    `UPDATE cos_conversations
+     SET messages = messages || $2::JSONB,
+         turns = turns + CASE WHEN $3 = 'user' THEN 1 ELSE 0 END,
+         updated_at = NOW()
+     WHERE id = $1`,
+    [convId, JSON.stringify([message]), role]
+  );
+}
+
+export async function updateCosConversation(
+  convId: number,
+  updates: { state?: string; context?: Record<string, unknown>; outputId?: number }
+): Promise<void> {
+  const setClauses: string[] = ["updated_at = NOW()"];
+  const params: unknown[] = [convId];
+  let idx = 2;
+
+  if (updates.state) {
+    setClauses.push(`state = $${idx}`);
+    params.push(updates.state);
+    idx++;
+  }
+  if (updates.context) {
+    setClauses.push(`context = context || $${idx}::JSONB`);
+    params.push(JSON.stringify(updates.context));
+    idx++;
+  }
+  if (updates.outputId) {
+    setClauses.push(`output_id = $${idx}`);
+    params.push(updates.outputId);
+    idx++;
+  }
+
+  await pool.query(
+    `UPDATE cos_conversations SET ${setClauses.join(", ")} WHERE id = $1`,
+    params
+  );
+}
+
+export async function completeCosConversation(convId: number, outputId?: number): Promise<void> {
+  await pool.query(
+    `UPDATE cos_conversations
+     SET state = 'completed',
+         output_id = COALESCE($2, output_id),
+         updated_at = NOW()
+     WHERE id = $1`,
+    [convId, outputId ?? null]
+  );
+}
+
+export async function expireStaleConversations(): Promise<number> {
+  const result = await pool.query<{ id: number }>(
+    `UPDATE cos_conversations
+     SET state = 'expired', expired_at = NOW(), updated_at = NOW()
+     WHERE state IN ('active', 'clarifying')
+       AND updated_at < NOW() - INTERVAL '30 minutes'
+     RETURNING id`
+  );
+  return result.rowCount ?? 0;
+}
+
+function mapCosConversationRow(row: {
+  id: number;
+  chat_id: string;
+  intent: string;
+  person_id: number | null;
+  state: string;
+  context: Record<string, unknown>;
+  messages: Array<{ role: string; content: string; timestamp: string }>;
+  turns: number;
+  max_turns: number;
+  output_id: number | null;
+  created_at: string;
+  updated_at: string;
+  expired_at: string | null;
+}): CosConversation {
+  return {
+    id: row.id,
+    chatId: Number(row.chat_id),
+    intent: row.intent,
+    personId: row.person_id,
+    state: row.state,
+    context: row.context ?? {},
+    messages: Array.isArray(row.messages) ? row.messages : [],
+    turns: row.turns,
+    maxTurns: row.max_turns,
+    outputId: row.output_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    expiredAt: row.expired_at
+  };
+}
+
+// ── CoS Events ────────────────────────────────────────────────────────
+
+export interface CosEvent {
+  id: number;
+  chatId: number;
+  eventType: string;
+  personId: number | null;
+  outputId: number | null;
+  memoryId: number | null;
+  conversationId: number | null;
+  details: Record<string, unknown>;
+  createdAt: string;
+}
+
+export async function logCosEvent(params: {
+  chatId: number;
+  eventType: string;
+  personId?: number;
+  outputId?: number;
+  memoryId?: number;
+  conversationId?: number;
+  details?: Record<string, unknown>;
+}): Promise<number> {
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO cos_events (chat_id, event_type, person_id, output_id, memory_id, conversation_id, details)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::JSONB)
+     RETURNING id`,
+    [
+      params.chatId,
+      params.eventType,
+      params.personId ?? null,
+      params.outputId ?? null,
+      params.memoryId ?? null,
+      params.conversationId ?? null,
+      JSON.stringify(params.details ?? {})
+    ]
+  );
+  return result.rows[0].id;
+}
+
+export async function listEventsForPerson(personId: number, limit = 20): Promise<CosEvent[]> {
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    event_type: string;
+    person_id: number | null;
+    output_id: number | null;
+    memory_id: number | null;
+    conversation_id: number | null;
+    details: Record<string, unknown>;
+    created_at: string;
+  }>(
+    `SELECT id, chat_id::TEXT, event_type, person_id, output_id, memory_id,
+            conversation_id, details, created_at::TEXT
+     FROM cos_events
+     WHERE person_id = $1
+     ORDER BY created_at DESC
+     LIMIT $2`,
+    [personId, limit]
+  );
+  return result.rows.map(mapCosEventRow);
+}
+
+export async function listRecentCosEvents(chatId: number, limit = 20): Promise<CosEvent[]> {
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    event_type: string;
+    person_id: number | null;
+    output_id: number | null;
+    memory_id: number | null;
+    conversation_id: number | null;
+    details: Record<string, unknown>;
+    created_at: string;
+  }>(
+    `SELECT id, chat_id::TEXT, event_type, person_id, output_id, memory_id,
+            conversation_id, details, created_at::TEXT
+     FROM cos_events
+     WHERE chat_id = $1
+     ORDER BY created_at DESC
+     LIMIT $2`,
+    [chatId, limit]
+  );
+  return result.rows.map(mapCosEventRow);
+}
+
+function mapCosEventRow(row: {
+  id: number;
+  chat_id: string;
+  event_type: string;
+  person_id: number | null;
+  output_id: number | null;
+  memory_id: number | null;
+  conversation_id: number | null;
+  details: Record<string, unknown>;
+  created_at: string;
+}): CosEvent {
+  return {
+    id: row.id,
+    chatId: Number(row.chat_id),
+    eventType: row.event_type,
+    personId: row.person_id,
+    outputId: row.output_id,
+    memoryId: row.memory_id,
+    conversationId: row.conversation_id,
+    details: row.details ?? {},
+    createdAt: row.created_at
+  };
+}
+
+// ── People with Items (for Dashboard Kanban) ──────────────────────────
+
+export async function listPeopleWithItems(): Promise<Array<Person & {
+  items: { open: (OpenActionItem & { status: string })[]; done: (OpenActionItem & { status: string })[]; eliminated: (OpenActionItem & { status: string })[] };
+  stats: { totalOpen: number; totalOverdue: number; totalDone: number; daysSinceLastOneOnOne: number | null };
+}>> {
+  const people = await listPeople(true);
+  if (people.length === 0) return [];
+
+  // Fetch all items for all people in parallel (3 queries per person, all concurrent)
+  const itemPromises = people.map((person) =>
+    Promise.all([
+      listItemsByPerson(person.name, ["open"]),
+      listItemsByPerson(person.name, ["done"]),
+      listItemsByPerson(person.name, ["eliminated"])
+    ])
+  );
+  const allItems = await Promise.all(itemPromises);
+
+  return people.map((person, idx) => {
+    const [openItems, doneItems, eliminatedItems] = allItems[idx];
+    const overdueCount = openItems.filter((item) => item.dueAt && new Date(item.dueAt) < new Date()).length;
+    const daysSince = person.lastOneOnOne
+      ? Math.floor((Date.now() - new Date(person.lastOneOnOne).getTime()) / (1000 * 60 * 60 * 24))
+      : null;
+
+    return {
+      ...person,
+      items: { open: openItems, done: doneItems.slice(0, 20), eliminated: eliminatedItems.slice(0, 10) },
+      stats: {
+        totalOpen: openItems.length,
+        totalOverdue: overdueCount,
+        totalDone: doneItems.length,
+        daysSinceLastOneOnOne: daysSince
+      }
+    };
+  });
 }
 
 export async function closePool(): Promise<void> {

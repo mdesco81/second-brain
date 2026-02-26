@@ -1,4 +1,4 @@
-import { OpenActionItem } from "../db/schema.js";
+import { OpenActionItem, Person } from "../db/schema.js";
 
 function actionLabel(item: OpenActionItem): string {
   const title = item.actionTitle || item.summaryPtBr;
@@ -210,4 +210,49 @@ export function buildWeeklyMessage(summary: {
   lines.push("Use /prioridades para ver a fila completa.");
 
   return lines.join("\n");
+}
+
+// ── Marta (Chief of Staff) proactive messages ─────────────────────────
+
+export function buildMartaPreOneOnOneAlert(
+  people: Array<Person & { pendingCount: number }>
+): string | null {
+  if (people.length === 0) return null;
+
+  const lines: string[] = ["Marta aqui. Lembrete de 1:1s pendentes:"];
+  lines.push("");
+
+  for (const person of people) {
+    const pendingNote = person.pendingCount > 0
+      ? ` (${person.pendingCount} item${person.pendingCount > 1 ? "s" : ""} pendente${person.pendingCount > 1 ? "s" : ""})`
+      : "";
+    lines.push(`- ${person.name}${person.role ? ` (${person.role})` : ""}${pendingNote}`);
+  }
+
+  lines.push("");
+  lines.push("Quer que eu prepare um briefing? Diga: \"Marta briefing [nome]\"");
+
+  return lines.join("\n");
+}
+
+export function buildMartaCrossTeamInsight(
+  insights: Array<{ type: string; message: string }>
+): string | null {
+  if (insights.length === 0) return null;
+
+  const lines: string[] = ["Marta aqui — insights da semana:"];
+  lines.push("");
+
+  for (const insight of insights) {
+    lines.push(`- ${insight.message}`);
+  }
+
+  lines.push("");
+  lines.push("Quer um panorama completo? Diga: \"Marta como ta a equipe?\"");
+
+  return lines.join("\n");
+}
+
+export function buildMartaStrategicNudge(nudge: string): string {
+  return `Marta aqui — reflexao quinzenal:\n\n${nudge}\n\nPara uma analise mais profunda: "Marta reflexao"`;
 }

@@ -5,6 +5,7 @@ import {
   countInboxQueue,
   deleteInboxItem,
   getAttachmentById,
+  getCosOutput,
   getInboxItemMetadata,
   getItemFileInfo,
   getItemForDistill,
@@ -12,14 +13,17 @@ import {
   insertDashboardItem,
   listAgentOutputs,
   listCategories,
+  listCosOutputs,
   listInboxQueue,
   listItemAttachments,
   listOpenActionItems,
+  listPeopleWithItems,
   loadAllEmbeddings,
   loadDashboardSummary,
   processInboxItem,
   searchItemsByIds,
   textSearchItems,
+  updateCosOutputStatus,
   updateInboxItemFields,
   updateInboxItemMetadata,
   updateInboxItemStatusById,
@@ -666,3 +670,71 @@ apiRouter.post(
     }
   }
 );
+
+// ── Chief of Staff (Marta) API ────────────────────────────────────────
+
+apiRouter.get("/cos", async (_req, res, next) => {
+  try {
+    const [peopleWithItems, outputs] = await Promise.all([
+      listPeopleWithItems(),
+      listCosOutputs(undefined, { limit: 30 })
+    ]);
+
+    res.json({
+      people: peopleWithItems.map((p) => ({
+        id: p.id,
+        name: p.name,
+        role: p.role,
+        relationship: p.relationship,
+        lastOneOnOne: p.lastOneOnOne,
+        oneOnOneCadence: p.oneOnOneCadence,
+        items: p.items,
+        stats: p.stats
+      })),
+      outputs: outputs.map((o) => ({
+        id: o.id,
+        outputType: o.outputType,
+        personId: o.personId,
+        title: o.title,
+        content: o.content.slice(0, 200),
+        status: o.status,
+        createdAt: o.createdAt
+      }))
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.get("/cos/output/:id", async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) {
+      res.status(400).json({ error: "Invalid output ID" });
+      return;
+    }
+    const output = await getCosOutput(id);
+    if (!output) {
+      res.status(404).json({ error: "Output not found" });
+      return;
+    }
+    res.json(output);
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.patch("/cos/output/:id/status", async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { status } = req.body as { status?: string };
+    if (isNaN(id) || !status) {
+      res.status(400).json({ error: "Invalid parameters" });
+      return;
+    }
+    await updateCosOutputStatus(id, status);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});

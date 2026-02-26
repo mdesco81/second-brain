@@ -4,8 +4,11 @@ import { log } from "../utils/logger.js";
 import { getAgent, listAgents } from "./registry.js";
 import { AgentIntent, AgentRequest } from "./types.js";
 import { TelegramMessage } from "../types/telegram.js";
+import { getActiveCosConversation } from "../db/schema.js";
+import { handleFollowUp } from "./chiefofstaff/index.js";
 
 const JARBAS_PATTERN = /\bjarbas\b/i;
+const MARTA_PATTERN = /\bmarta\b/i;
 
 export function containsJarbasKeyword(text: string): boolean {
   return JARBAS_PATTERN.test(text);
@@ -124,5 +127,71 @@ export async function routeToAgent(
   } catch (error) {
     log.error("Agent execution failed", { agentId: intent.agentId, chatId, error });
     await sendText(chatId, "Ocorreu um erro ao processar seu pedido. Tente novamente.");
+  }
+}
+
+// ── Marta (Chief of Staff) routing ────────────────────────────────────
+
+export function containsMartaKeyword(text: string): boolean {
+  return MARTA_PATTERN.test(text);
+}
+
+export function stripMartaKeyword(text: string): string {
+  return text.replace(MARTA_PATTERN, "").replace(/[,\s]+/g, " ").trim();
+}
+
+export async function routeToMarta(
+  chatId: number,
+  messageId: number,
+  strippedText: string,
+  _originalMessage: TelegramMessage
+): Promise<void> {
+  const handler = getAgent("chiefofstaff");
+  if (!handler) {
+    await sendText(chatId, "Agente Marta nao esta disponivel no momento.");
+    return;
+  }
+
+  const request: AgentRequest = {
+    chatId,
+    messageId,
+    agentId: "chiefofstaff",
+    rawRequest: strippedText,
+    intent: {
+      agentId: "chiefofstaff",
+      confidence: 1.0,
+      rawRequest: strippedText,
+      metadata: {}
+    },
+    timestamp: new Date()
+  };
+
+  try {
+    const result = await handler(request);
+    if (!result.success) {
+      log.error("Marta execution failed", { chatId, error: result.error });
+    }
+    // Note: Marta sends her own messages via sendText internally.
+    // The result.summary is for logging, not for sending to user.
+  } catch (error) {
+    log.error("Marta execution error", { chatId, error });
+    await sendText(chatId, "Ocorreu um erro ao processar seu pedido. Tente novamente.");
+  }
+}
+
+export async function handleMartaFollowUpFromIntake(
+  chatId: number,
+  messageId: number,
+  text: string
+): Promise<boolean> {
+  const activeConv = await getActiveCosConversation(chatId);
+  if (!activeConv) return false;
+
+  try {
+    await handleFollowUp(chatId, messageId, text, activeConv);
+    return true;
+  } catch (error) {
+    log.error("Marta follow-up error", { chatId, error });
+    return false;
   }
 }

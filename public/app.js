@@ -34,7 +34,8 @@ const state = {
   activeTab: "brain",
   jarbasOutputs: null,
   jarbasPreviewCache: {},
-  inboxItemIds: new Set()
+  inboxItemIds: new Set(),
+  martaData: null
 };
 
 // ============================================================================
@@ -323,6 +324,174 @@ async function loadJarbasOutputs() {
 }
 
 // ============================================================================
+// Marta (Chief of Staff) view
+// ============================================================================
+async function loadMartaData() {
+  try {
+    const res = await fetch("/api/cos");
+    if (!res.ok) throw new Error("Failed to load CoS data");
+    state.martaData = await res.json();
+    renderMartaView();
+  } catch (err) {
+    console.error("loadMartaData error:", err);
+    const emptyState = document.getElementById("marta-empty");
+    if (emptyState) {
+      emptyState.style.display = "flex";
+      emptyState.innerHTML = '<p>Erro ao carregar dados da Marta. <button onclick="loadMartaData()" class="btn btn-secondary" style="margin-top:8px">Tentar novamente</button></p>';
+    }
+  }
+}
+
+function renderMartaView() {
+  const data = state.martaData;
+  const peopleContainer = document.getElementById("marta-people");
+  const outputsContainer = document.getElementById("marta-outputs");
+  const emptyState = document.getElementById("marta-empty");
+
+  if (!data || (data.people.length === 0 && data.outputs.length === 0)) {
+    peopleContainer.innerHTML = "";
+    outputsContainer.innerHTML = "";
+    emptyState.style.display = "flex";
+    return;
+  }
+  emptyState.style.display = "none";
+
+  // Render people kanban boards
+  peopleContainer.innerHTML = data.people.map((person) => {
+    const alertClass = person.stats.totalOverdue > 0 ? "person-alert" : "person-ok";
+    const alertIcon = person.stats.totalOverdue > 0
+      ? `&#9888;&#65039; ${person.stats.totalOverdue} atrasado${person.stats.totalOverdue > 1 ? "s" : ""}`
+      : "&#9989; Em dia";
+    const lastOO = person.lastOneOnOne
+      ? new Date(person.lastOneOnOne).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })
+      : "nunca";
+
+    const openCards = (person.items.open || []).map((item) => renderMartaCard(item)).join("");
+    const doneCards = (person.items.done || []).slice(0, 8).map((item) => renderMartaCard(item)).join("");
+
+    return `<div class="marta-person-board">
+      <div class="marta-person-header ${alertClass}">
+        <span class="marta-person-name">&#128100; ${escapeHtml(person.name)}${person.role ? ` (${escapeHtml(person.role)})` : ""}</span>
+        <span class="marta-person-meta">1:1: ${lastOO} | ${alertIcon}</span>
+      </div>
+      <div class="marta-person-kanban">
+        <div class="marta-kanban-col">
+          <div class="marta-kanban-header">Pendente (${(person.items.open || []).length})</div>
+          <div class="marta-kanban-cards">${openCards || '<div class="marta-empty-col">Nenhum item</div>'}</div>
+        </div>
+        <div class="marta-kanban-col done-col">
+          <div class="marta-kanban-header">Concluido (${person.stats.totalDone})</div>
+          <div class="marta-kanban-cards">${doneCards || '<div class="marta-empty-col">Nenhum item</div>'}</div>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+
+  // Render outputs
+  const outputTypeIcons = {
+    briefing: "&#128203;",
+    email_draft: "&#9993;&#65039;",
+    status_report: "&#128202;",
+    reflection: "&#128302;",
+    one_on_one_notes: "&#128221;"
+  };
+
+  outputsContainer.innerHTML = data.outputs.length > 0
+    ? data.outputs.map((output) => {
+      const icon = outputTypeIcons[output.outputType] || "&#128196;";
+      const preview = output.content.slice(0, 120).replace(/\n/g, " ");
+      const date = new Date(output.createdAt).toLocaleString("pt-BR", {
+        day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"
+      });
+
+      return `<div class="marta-output-card" data-output-id="${output.id}">
+        <div class="marta-output-header">
+          <span class="marta-output-icon">${icon}</span>
+          <span class="marta-output-title">${escapeHtml(output.title)}</span>
+          <span class="marta-output-date">${date}</span>
+        </div>
+        <div class="marta-output-preview">${escapeHtml(preview)}...</div>
+        <div class="marta-output-actions">
+          <button class="btn-copy-output" data-output-id="${output.id}" title="Copiar conteudo">&#128203; Copiar</button>
+          <button class="btn-expand-output" data-output-id="${output.id}" title="Ver completo">&#128065; Ver completo</button>
+        </div>
+        <div class="marta-output-full" id="output-full-${output.id}" style="display:none">
+          <pre class="marta-output-content">Carregando...</pre>
+        </div>
+      </div>`;
+    }).join("")
+    : '<div class="marta-empty-col">Nenhum output ainda.</div>';
+}
+
+function renderMartaCard(item) {
+  const priorityClass = item.priority === "ALTA" ? "priority-alta" : item.priority === "MEDIA" ? "priority-media" : "priority-baixa";
+  const title = item.actionTitle || item.summaryPtBr;
+  const dueTag = item.dueAt ? `<span class="marta-card-due">${item.dueAt}</span>` : "";
+  const isDone = item.status === "done";
+
+  return `<div class="marta-card ${priorityClass}${isDone ? " marta-card-done" : ""}">
+    <div class="marta-card-title">#${item.id} ${escapeHtml(title.length > 60 ? title.slice(0, 60) + "..." : title)}</div>
+    ${dueTag}
+    ${item.nextStep ? `<div class="marta-card-next">${escapeHtml(item.nextStep)}</div>` : ""}
+  </div>`;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// Marta output actions: copy and expand (fetch full content on demand)
+const martaFullContentCache = {};
+
+async function fetchMartaOutputFull(id) {
+  if (martaFullContentCache[id]) return martaFullContentCache[id];
+  const res = await fetch(`/api/cos/output/${id}`);
+  if (!res.ok) throw new Error("Failed to fetch output");
+  const data = await res.json();
+  martaFullContentCache[id] = data.content;
+  return data.content;
+}
+
+document.addEventListener("click", async (e) => {
+  const copyBtn = e.target.closest(".btn-copy-output");
+  if (copyBtn) {
+    const id = copyBtn.dataset.outputId;
+    try {
+      const fullContent = await fetchMartaOutputFull(id);
+      await navigator.clipboard.writeText(fullContent);
+      showToast("Conteudo copiado!");
+    } catch {
+      showToast("Erro ao copiar", "error");
+    }
+    return;
+  }
+
+  const expandBtn = e.target.closest(".btn-expand-output");
+  if (expandBtn) {
+    const id = expandBtn.dataset.outputId;
+    const fullEl = document.getElementById(`output-full-${id}`);
+    if (fullEl) {
+      if (fullEl.style.display === "none") {
+        try {
+          const fullContent = await fetchMartaOutputFull(id);
+          fullEl.querySelector(".marta-output-content").textContent = fullContent;
+          fullEl.style.display = "block";
+          expandBtn.innerHTML = "&#128065; Recolher";
+        } catch {
+          showToast("Erro ao carregar conteudo", "error");
+        }
+      } else {
+        fullEl.style.display = "none";
+        expandBtn.innerHTML = "&#128065; Ver completo";
+      }
+    }
+    return;
+  }
+});
+
+// ============================================================================
 // Tab switching
 // ============================================================================
 function switchTab(tab) {
@@ -342,22 +511,29 @@ function switchTab(tab) {
   ];
 
   const jarbasSection = document.getElementById("jarbas-view");
+  const martaSection = document.getElementById("marta-view");
 
-  // Hide non-brain sections
+  // Hide all non-brain sections
   jarbasSection.style.display = "none";
+  martaSection.style.display = "none";
 
   if (tab === "brain") {
     for (const el of brainSections) {
       if (el) el.style.display = "";
     }
-    // Re-hide search results if not active
     document.getElementById("search-results").style.display = "none";
-  } else {
+  } else if (tab === "jarbas") {
     for (const el of brainSections) {
       if (el) el.style.display = "none";
     }
     jarbasSection.style.display = "block";
     if (!state.jarbasOutputs) loadJarbasOutputs();
+  } else if (tab === "marta") {
+    for (const el of brainSections) {
+      if (el) el.style.display = "none";
+    }
+    martaSection.style.display = "block";
+    if (!state.martaData) loadMartaData();
   }
 }
 

@@ -46,7 +46,7 @@ import { buildOpenActionsMessage, buildWeeklyMessage } from "./reports.js";
 import { appendProjectStatus, storeIncomingMedia, writeActionBoard, writeKnowledgeNote } from "./storage.js";
 import { InputType, ProcessingStage } from "../types/domain.js";
 import { log } from "../utils/logger.js";
-import { containsJarbasKeyword, stripJarbasKeyword, routeToAgent } from "../agents/router.js";
+import { containsJarbasKeyword, stripJarbasKeyword, routeToAgent, containsMartaKeyword, stripMartaKeyword, routeToMarta, handleMartaFollowUpFromIntake } from "../agents/router.js";
 import { cosineSimilarity } from "../utils/math.js";
 
 interface ExtractedContent {
@@ -1198,6 +1198,13 @@ async function processTelegramMessageInner(
     return;
   }
 
+  // ★ Checkpoint: Active Marta conversation → route follow-up without keyword
+  const rawText = message.text || message.caption || "";
+  if (rawText && (await handleMartaFollowUpFromIntake(chatId, messageId, rawText))) {
+    log.info("Marta follow-up handled", { chatId, messageId });
+    return;
+  }
+
   if (message.text && (await tryResolvePendingRelation(chatId, message))) {
     return;
   }
@@ -1210,6 +1217,12 @@ async function processTelegramMessageInner(
   const textContent = message.text || message.caption || "";
   if (containsJarbasKeyword(textContent)) {
     await routeToAgent(chatId, messageId, stripJarbasKeyword(textContent), message);
+    return;
+  }
+
+  // ★ Checkpoint: text/caption contains "Marta" → route to Chief of Staff
+  if (containsMartaKeyword(textContent)) {
+    await routeToMarta(chatId, messageId, stripMartaKeyword(textContent), message);
     return;
   }
 
@@ -1258,6 +1271,15 @@ async function processTelegramMessageInner(
         ? stripJarbasKeyword(normCheck)
         : stripJarbasKeyword(rawCheck);
       await routeToAgent(chatId, messageId, agentInput, message);
+      return;
+    }
+
+    // ★ Checkpoint: audio transcription contains "Marta" → route to Chief of Staff
+    if (containsMartaKeyword(rawCheck) || containsMartaKeyword(normCheck)) {
+      const martaInput = containsMartaKeyword(normCheck)
+        ? stripMartaKeyword(normCheck)
+        : stripMartaKeyword(rawCheck);
+      await routeToMarta(chatId, messageId, martaInput, message);
       return;
     }
   }
