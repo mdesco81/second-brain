@@ -148,7 +148,7 @@ export function buildHashtagPrompt(params: {
     "## Trecho do conteudo",
     params.draft.slice(0, 800),
     "",
-    params.researchContext ? `## Contexto da pesquisa\n${params.researchContext.slice(0, 500)}` : ""
+    params.researchContext ? `## Contexto da pesquisa\n${params.researchContext.slice(0, 2000)}` : ""
   ].join("\n");
 
   return { system, user };
@@ -181,7 +181,7 @@ export function buildHooksPrompt(params: {
   const user = [
     `Gere 5 hooks para um ${params.contentType === "article" ? "artigo" : "post"} LinkedIn sobre: ${params.topic}`,
     "",
-    params.researchContext ? `## Contexto da pesquisa\n${params.researchContext.slice(0, 800)}` : ""
+    params.researchContext ? `## Contexto da pesquisa\n${params.researchContext.slice(0, 2000)}` : ""
   ].join("\n");
 
   return { system, user };
