@@ -734,10 +734,13 @@ export async function classifyWithAI(input: AIClassificationInput): Promise<AICl
     });
 
     const textBlock = response.content.find((block) => block.type === "text");
-    const raw = textBlock?.text?.trim();
+    let raw = textBlock?.text?.trim();
     if (!raw) {
       return null;
     }
+
+    // Strip markdown code fences if present (models sometimes wrap JSON in ```json...```)
+    raw = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?\s*```$/i, "").trim();
 
     return JSON.parse(raw) as AIClassificationOutput;
   } catch (error) {
@@ -760,14 +763,29 @@ export async function callClaude(params: {
   }
 
   const model = params.model === "fast" ? env.ANTHROPIC_FAST_MODEL : env.ANTHROPIC_MODEL;
+  const maxAttempts = 2;
 
-  const response = await anthropicClient.messages.create({
-    model,
-    max_tokens: params.maxTokens ?? 4096,
-    system: params.system,
-    messages: [{ role: "user", content: params.userMessage }]
-  });
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await anthropicClient.messages.create({
+        model,
+        max_tokens: params.maxTokens ?? 4096,
+        system: params.system,
+        messages: [{ role: "user", content: params.userMessage }]
+      });
 
-  const textBlock = response.content.find((block) => block.type === "text");
-  return textBlock?.text?.trim() ?? null;
+      const textBlock = response.content.find((block) => block.type === "text");
+      return textBlock?.text?.trim() ?? null;
+    } catch (error) {
+      if (attempt < maxAttempts) {
+        log.warn("callClaude failed, retrying after backoff", { attempt, model, error });
+        await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+      } else {
+        log.error("callClaude failed after retries", { attempts: maxAttempts, model, error });
+        return null;
+      }
+    }
+  }
+
+  return null;
 }

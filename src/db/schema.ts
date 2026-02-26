@@ -118,7 +118,15 @@ export async function ensureSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS follow_up_with TEXT,
       ADD COLUMN IF NOT EXISTS processing_stage TEXT NOT NULL DEFAULT 'capturado',
       ADD COLUMN IF NOT EXISTS processing_error TEXT,
-      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ADD COLUMN IF NOT EXISTS snoozed_until DATE;
+  `);
+
+  // Deduplication: prevent processing same Telegram message twice
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_items_chat_message
+      ON inbox_items(chat_id, telegram_message_id)
+      WHERE telegram_message_id > 0;
   `);
 
   await pool.query(`
@@ -369,7 +377,7 @@ export interface PendingDecision {
 export async function insertProactiveRun(
   chatId: number,
   messageText: string,
-  runType: "daily" | "weekly" | "manual" = "daily"
+  runType: "daily" | "afternoon" | "evening" | "weekly" | "manual" = "daily"
 ): Promise<void> {
   await pool.query(`INSERT INTO proactive_runs(chat_id, message_text, run_type) VALUES ($1, $2, $3)`, [
     chatId,
@@ -436,6 +444,7 @@ export async function listOpenActionItems(chatId?: number, limit = 10): Promise<
      JOIN categories c ON c.id = i.category_id
      WHERE i.status = 'open'
        AND i.action <> 'NONE'
+       AND (i.snoozed_until IS NULL OR i.snoozed_until <= CURRENT_DATE)
        AND ($1::BIGINT IS NULL OR i.chat_id = $1)
      ORDER BY
        CASE i.priority WHEN 'ALTA' THEN 3 WHEN 'MEDIA' THEN 2 ELSE 1 END DESC,
@@ -1701,31 +1710,25 @@ export async function updateProgressiveLayer(
   value: unknown,
   expandCount: number
 ): Promise<void> {
-  const timestampKey = layer === "layer2" ? "layer2At" : "layer3At";
   const now = new Date().toISOString();
+
+  // Build the progressive JSON object in JS instead of nesting jsonb_set with interpolated paths
+  const progressiveUpdate: Record<string, unknown> = {
+    [layer]: value,
+    [layer === "layer2" ? "layer2At" : "layer3At"]: now,
+    expandCount
+  };
 
   await pool.query(
     `UPDATE inbox_items
      SET metadata = jsonb_set(
-       jsonb_set(
-         jsonb_set(
-           jsonb_set(
-             metadata,
-             '{progressive}',
-             COALESCE(metadata->'progressive', '{}'::jsonb)
-           ),
-           '{progressive,${layer}}',
-           $2::jsonb
-         ),
-         '{progressive,${timestampKey}}',
-         to_jsonb($3::text)
-       ),
-       '{progressive,expandCount}',
-       to_jsonb($4::int)
+       metadata,
+       '{progressive}',
+       COALESCE(metadata->'progressive', '{}'::jsonb) || $2::jsonb
      ),
      updated_at = NOW()
      WHERE id = $1`,
-    [id, JSON.stringify(value), now, expandCount]
+    [id, JSON.stringify(progressiveUpdate)]
   );
 }
 
@@ -1805,7 +1808,8 @@ export async function textSearchItems(query: string, limit = 10): Promise<Array<
   nextStep: string | null;
   followUpWith: string | null;
 }>> {
-  const pattern = `%${query}%`;
+  const escaped = query.replace(/[%_\\]/g, (ch) => `\\${ch}`);
+  const pattern = `%${escaped}%`;
   const result = await pool.query<{
     id: number;
     created_at: string;
@@ -1846,6 +1850,158 @@ export async function textSearchItems(query: string, limit = 10): Promise<Array<
     dueAt: row.due_at,
     nextStep: row.next_step,
     followUpWith: row.follow_up_with
+  }));
+}
+
+// ── Snooze ───────────────────────────────────────────────────────────
+
+export async function snoozeInboxItem(chatId: number, itemId: number, untilDate: string): Promise<boolean> {
+  const result = await pool.query<{ id: number }>(
+    `UPDATE inbox_items
+     SET snoozed_until = $3::DATE,
+         updated_at = NOW()
+     WHERE id = $1
+       AND chat_id = $2
+       AND status = 'open'
+     RETURNING id`,
+    [itemId, chatId, untilDate]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+// ── Auto-escalation ──────────────────────────────────────────────────
+
+export async function escalateOverdueItems(overdueDays: number): Promise<number[]> {
+  const result = await pool.query<{ id: number }>(
+    `UPDATE inbox_items
+     SET priority = 'ALTA',
+         updated_at = NOW()
+     WHERE status = 'open'
+       AND action <> 'NONE'
+       AND priority <> 'ALTA'
+       AND due_at < CURRENT_DATE - $1::INTEGER
+     RETURNING id`,
+    [overdueDays]
+  );
+  return result.rows.map((r) => r.id);
+}
+
+// ── Auto-archive suggestions ─────────────────────────────────────────
+
+export async function listArchiveSuggestions(chatId: number, staleDays = 30, limit = 5): Promise<OpenActionItem[]> {
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    category_name: string;
+    summary_pt_br: string;
+    action: string;
+    action_title: string | null;
+    next_step: string | null;
+    follow_up_with: string | null;
+    due_at: string | null;
+    created_at: string;
+    priority: string | null;
+  }>(
+    `SELECT i.id,
+            i.chat_id::TEXT,
+            c.name AS category_name,
+            i.summary_pt_br,
+            i.action,
+            i.action_title,
+            i.next_step,
+            i.follow_up_with,
+            i.due_at::TEXT,
+            i.created_at::TEXT,
+            i.priority
+     FROM inbox_items i
+     JOIN categories c ON c.id = i.category_id
+     WHERE i.status = 'open'
+       AND i.action <> 'NONE'
+       AND i.updated_at < NOW() - INTERVAL '1 day' * $2
+       AND i.chat_id = $1
+     ORDER BY i.updated_at ASC
+     LIMIT $3`,
+    [chatId, staleDays, limit]
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    chatId: Number(row.chat_id),
+    categoryName: row.category_name,
+    summaryPtBr: row.summary_pt_br,
+    action: row.action,
+    actionTitle: row.action_title ?? undefined,
+    nextStep: row.next_step ?? undefined,
+    followUpWith: row.follow_up_with ?? undefined,
+    dueAt: row.due_at ?? undefined,
+    createdAt: row.created_at,
+    priority: normalizePriority(row.priority)
+  }));
+}
+
+// ── Deduplication check ──────────────────────────────────────────────
+
+export async function isDuplicateMessage(chatId: number, messageId: number): Promise<boolean> {
+  const result = await pool.query<{ id: number }>(
+    `SELECT id FROM inbox_items WHERE chat_id = $1 AND telegram_message_id = $2 LIMIT 1`,
+    [chatId, messageId]
+  );
+  return result.rows.length > 0;
+}
+
+// ── Search for Telegram /busca command ───────────────────────────────
+
+export async function textSearchItemsForChat(chatId: number, query: string, limit = 5): Promise<OpenActionItem[]> {
+  const escaped = query.replace(/[%_\\]/g, (ch) => `\\${ch}`);
+  const pattern = `%${escaped}%`;
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    category_name: string;
+    summary_pt_br: string;
+    action: string;
+    action_title: string | null;
+    next_step: string | null;
+    follow_up_with: string | null;
+    due_at: string | null;
+    created_at: string;
+    priority: string | null;
+  }>(
+    `SELECT i.id,
+            i.chat_id::TEXT,
+            c.name AS category_name,
+            i.summary_pt_br,
+            i.action,
+            i.action_title,
+            i.next_step,
+            i.follow_up_with,
+            i.due_at::TEXT,
+            i.created_at::TEXT,
+            i.priority
+     FROM inbox_items i
+     JOIN categories c ON c.id = i.category_id
+     WHERE i.chat_id = $1
+       AND (i.summary_pt_br ILIKE $2
+            OR i.raw_text ILIKE $2
+            OR i.action_title ILIKE $2
+            OR i.normalized_text ILIKE $2)
+     ORDER BY i.created_at DESC
+     LIMIT $3`,
+    [chatId, pattern, limit]
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    chatId: Number(row.chat_id),
+    categoryName: row.category_name,
+    summaryPtBr: row.summary_pt_br,
+    action: row.action,
+    actionTitle: row.action_title ?? undefined,
+    nextStep: row.next_step ?? undefined,
+    followUpWith: row.follow_up_with ?? undefined,
+    dueAt: row.due_at ?? undefined,
+    createdAt: row.created_at,
+    priority: normalizePriority(row.priority)
   }));
 }
 

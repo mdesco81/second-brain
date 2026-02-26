@@ -10,8 +10,10 @@ import {
   embedText,
   embeddingModel,
   planIntakeWithContext,
-  transcribeAudio
+  transcribeAudio,
+  callClaude
 } from "./openai.js";
+import { addDaysLocal } from "../utils/dates.js";
 import { getFileBuffer, sendText } from "./telegram.js";
 import { TelegramMessage } from "../types/telegram.js";
 import {
@@ -21,6 +23,7 @@ import {
   getPendingDecision,
   insertProactiveRun,
   insertInboxItem,
+  isDuplicateMessage,
   listCategories,
   listOpenContextCandidates,
   listOpenActionItems,
@@ -28,6 +31,9 @@ import {
   mergeIntoInboxItem,
   loadWeeklySummary,
   resolvePendingDecision,
+  snoozeInboxItem,
+  textSearchItemsForChat,
+  updateInboxItemFields,
   updateInboxItemOwnerById,
   updateInboxItemStatus,
   updateInboxItemStoragePath,
@@ -871,6 +877,46 @@ function parseDoneCommand(text: string): number | null {
   return id;
 }
 
+function parseSnoozeCommand(text: string): { itemId: number; days: number } | null {
+  const match = text.trim().match(/^\/snooze\s+(\d+)\s+(\d+)$/i);
+  if (!match) {
+    return null;
+  }
+  const itemId = Number(match[1]);
+  const days = Number(match[2]);
+  if (!Number.isInteger(itemId) || itemId <= 0 || !Number.isInteger(days) || days <= 0 || days > 90) {
+    return null;
+  }
+  return { itemId, days };
+}
+
+function parseEditCommand(text: string): { itemId: number; field: string; value: string } | null {
+  const match = text.trim().match(/^\/edit\s+(\d+)\s+(\w+)\s+(.+)$/i);
+  if (!match) {
+    return null;
+  }
+  const itemId = Number(match[1]);
+  const field = match[2].toLowerCase();
+  const value = match[3].trim();
+  if (!Number.isInteger(itemId) || itemId <= 0 || !value) {
+    return null;
+  }
+  const allowedFields = ["titulo", "prioridade", "prazo", "proximo", "responsavel"];
+  if (!allowedFields.includes(field)) {
+    return null;
+  }
+  return { itemId, field, value };
+}
+
+function parseBuscaCommand(text: string): string | null {
+  const match = text.trim().match(/^\/busca\s+(.+)$/i);
+  if (!match) {
+    return null;
+  }
+  const query = match[1].trim();
+  return query.length >= 2 ? query : null;
+}
+
 async function handleTextCommand(chatId: number, text: string): Promise<boolean> {
   const normalized = text.trim();
 
@@ -884,6 +930,10 @@ async function handleTextCommand(chatId: number, text: string): Promise<boolean>
         "Comandos:",
         "- /prioridades -> lista acoes abertas",
         "- /done <id> -> marca acao como concluida",
+        "- /snooze <id> <dias> -> adia item por N dias",
+        "- /edit <id> <campo> <valor> -> edita campo do item",
+        "  campos: titulo, prioridade, prazo, proximo, responsavel",
+        "- /busca <termo> -> busca nos seus items",
         "- /owner <id> Nome -> define dono/responsavel do card",
         "- /weekly -> gera resumo semanal agora"
       ].join("\n")
@@ -914,9 +964,82 @@ async function handleTextCommand(chatId: number, text: string): Promise<boolean>
     const updated = await updateInboxItemStatus(chatId, doneId, "done");
     if (updated) {
       await writeActionBoard(await listOpenActionItems(undefined, 40));
-      await sendText(chatId, `Item #${doneId} marcado como concluido.`);
+      // Melhoria 9: Reflection on /done
+      const reflection = await callClaude({
+        system: "Voce e um assistente pessoal. O usuario acabou de concluir uma tarefa. Gere uma mensagem curta (2-3 frases) de parabens e, se possivel, sugira um proximo passo relacionado. Responda em portugues brasileiro.",
+        userMessage: `Tarefa concluida: item #${doneId}`,
+        model: "fast",
+        maxTokens: 200
+      });
+      const msg = reflection
+        ? `Item #${doneId} marcado como concluido.\n\n${reflection}`
+        : `Item #${doneId} marcado como concluido.`;
+      await sendText(chatId, msg);
     } else {
       await sendText(chatId, `Nao encontrei item aberto com id #${doneId} neste chat.`);
+    }
+    return true;
+  }
+
+  // /snooze <id> <dias>
+  const snoozeCmd = parseSnoozeCommand(normalized);
+  if (snoozeCmd) {
+    const untilDate = addDaysLocal(snoozeCmd.days);
+    const updated = await snoozeInboxItem(chatId, snoozeCmd.itemId, untilDate);
+    if (updated) {
+      await sendText(chatId, `Item #${snoozeCmd.itemId} adiado ate ${untilDate}.`);
+    } else {
+      await sendText(chatId, `Nao encontrei item aberto #${snoozeCmd.itemId} neste chat.`);
+    }
+    return true;
+  }
+
+  // /edit <id> <campo> <valor>
+  const editCmd = parseEditCommand(normalized);
+  if (editCmd) {
+    const fieldMap: Record<string, string> = {
+      titulo: "actionTitle",
+      prioridade: "priority",
+      prazo: "dueAt",
+      proximo: "nextStep",
+      responsavel: "followUpWith"
+    };
+    const dbField = fieldMap[editCmd.field];
+    let value: string | null = editCmd.value;
+
+    if (editCmd.field === "prioridade") {
+      const upper = value.toUpperCase();
+      if (!["ALTA", "MEDIA", "BAIXA"].includes(upper)) {
+        await sendText(chatId, "Prioridade invalida. Use: ALTA, MEDIA ou BAIXA.");
+        return true;
+      }
+      value = upper;
+    }
+
+    const fields: Record<string, unknown> = { [dbField]: value };
+    const updated = await updateInboxItemFields(editCmd.itemId, fields);
+    if (updated) {
+      await writeActionBoard(await listOpenActionItems(undefined, 40));
+      await sendText(chatId, `Item #${editCmd.itemId}: ${editCmd.field} atualizado para "${value}".`);
+    } else {
+      await sendText(chatId, `Nao encontrei item #${editCmd.itemId} para atualizar.`);
+    }
+    return true;
+  }
+
+  // /busca <termo>
+  const buscaQuery = parseBuscaCommand(normalized);
+  if (buscaQuery) {
+    const results = await textSearchItemsForChat(chatId, buscaQuery, 8);
+    if (results.length === 0) {
+      await sendText(chatId, `Nenhum resultado para "${buscaQuery}".`);
+    } else {
+      const lines = results.map((item) => {
+        const priority = item.priority === "ALTA" ? "🔴" : item.priority === "MEDIA" ? "🟡" : "🟢";
+        const title = item.actionTitle || item.summaryPtBr.slice(0, 60);
+        return `${priority} #${item.id} — ${title}`;
+      });
+      await sendText(chatId, `Resultados para "${buscaQuery}":\n\n${lines.join("\n")}`);
     }
     return true;
   }
@@ -929,7 +1052,42 @@ async function handleTextCommand(chatId: number, text: string): Promise<boolean>
     return true;
   }
 
+  // Natural language command parsing — detect implicit commands
+  const nlCommand = parseNaturalLanguageCommand(normalized);
+  if (nlCommand) {
+    return handleTextCommand(chatId, nlCommand);
+  }
+
   return false;
+}
+
+function parseNaturalLanguageCommand(text: string): string | null {
+  const lower = text.toLowerCase().trim();
+
+  // "concluir 123", "feito 123", "terminei 123"
+  const doneMatch = lower.match(/^(?:concluir|feito|terminei|finalizar|completar)\s+#?(\d+)$/);
+  if (doneMatch) {
+    return `/done ${doneMatch[1]}`;
+  }
+
+  // "adiar 123 por 3 dias", "snooze 123 5"
+  const snoozeMatch = lower.match(/^(?:adiar|postergar|snooze)\s+#?(\d+)\s+(?:por\s+)?(\d+)(?:\s+dias?)?$/);
+  if (snoozeMatch) {
+    return `/snooze ${snoozeMatch[1]} ${snoozeMatch[2]}`;
+  }
+
+  // "buscar X", "procurar X", "pesquisar X"
+  const searchMatch = lower.match(/^(?:buscar|procurar|pesquisar|encontrar)\s+(.+)$/);
+  if (searchMatch) {
+    return `/busca ${searchMatch[1]}`;
+  }
+
+  // "minhas prioridades", "o que tenho pra fazer", "acoes abertas"
+  if (/^(?:prioridades|minhas prioridades|o que tenho|acoes abertas|tarefas abertas|pendencias)$/.test(lower)) {
+    return "/prioridades";
+  }
+
+  return null;
 }
 
 async function tryResolvePendingRelation(chatId: number, message: TelegramMessage): Promise<boolean> {
@@ -970,9 +1128,40 @@ async function tryResolvePendingRelation(chatId: number, message: TelegramMessag
   return true;
 }
 
+// ── In-flight tracking for graceful shutdown ─────────────────────────
+
+let inflightCount = 0;
+let inflightResolve: (() => void) | null = null;
+
+export function getInflightCount(): number {
+  return inflightCount;
+}
+
+export function waitForInflight(timeoutMs = 30_000): Promise<void> {
+  if (inflightCount <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    inflightResolve = resolve;
+    setTimeout(() => {
+      inflightResolve = null;
+      resolve();
+    }, timeoutMs);
+  });
+}
+
+function inflightDone(): void {
+  inflightCount -= 1;
+  if (inflightCount <= 0 && inflightResolve) {
+    inflightResolve();
+    inflightResolve = null;
+  }
+}
+
 export async function processTelegramMessage(message: TelegramMessage): Promise<void> {
   const chatId = message.chat.id;
   const messageId = message.message_id;
+  inflightCount += 1;
 
   try {
     await processTelegramMessageInner(chatId, messageId, message);
@@ -991,6 +1180,8 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
     } catch (sendError) {
       log.error("Failed to send error notification to user", { chatId, sendError });
     }
+  } finally {
+    inflightDone();
   }
 }
 
@@ -1000,6 +1191,12 @@ async function processTelegramMessageInner(
   message: TelegramMessage
 ): Promise<void> {
   await upsertChatSubscription(chatId);
+
+  // Dedup check — skip already-processed messages (e.g. webhook retry)
+  if (messageId > 0 && (await isDuplicateMessage(chatId, messageId))) {
+    log.info("Duplicate message skipped", { chatId, messageId });
+    return;
+  }
 
   if (message.text && (await tryResolvePendingRelation(chatId, message))) {
     return;
@@ -1135,12 +1332,13 @@ async function processTelegramMessageInner(
 
   if (contextCandidates.length === 0 || (decisionMode === "new" && !hasRelevantCandidates)) {
     // Force new card — no ambiguity when nothing similar exists
+    const originalConfidence = plan.decision.confidence ?? 0;
     plan.decision.mode = "new";
-    plan.decision.confidence = Math.max(plan.decision.confidence ?? 0, 0.90);
+    plan.decision.confidence = Math.max(originalConfidence, 0.90);
     log.info("Auto-registering as new card (no relevant candidates found)", {
       candidateCount: contextCandidates.length,
       hasRelevantCandidates,
-      originalConfidence: plan.decision.confidence
+      originalConfidence
     });
   }
 

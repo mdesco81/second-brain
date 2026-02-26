@@ -1,7 +1,9 @@
 import cron from "node-cron";
 import { env } from "../config/env.js";
 import {
+  escalateOverdueItems,
   insertProactiveRun,
+  listArchiveSuggestions,
   listOpenActionItems,
   listOverdueItems,
   listProactiveChats,
@@ -15,6 +17,16 @@ import { sendText } from "./telegram.js";
 import { log } from "../utils/logger.js";
 
 async function deliverDailyRun(chatIds: number[]): Promise<void> {
+  // Auto-escalate items overdue by 3+ days before building the report
+  try {
+    const escalated = await escalateOverdueItems(3);
+    if (escalated.length > 0) {
+      log.info("Auto-escalated overdue items to ALTA", { ids: escalated });
+    }
+  } catch (error) {
+    log.error("Auto-escalation failed", { error });
+  }
+
   const snapshot = await loadLast24hSnapshot();
   for (const chatId of chatIds) {
     try {
@@ -47,7 +59,7 @@ async function deliverAfternoonRun(chatIds: number[]): Promise<void> {
 
       const message = buildAfternoonMessage(overdueItems, staleItems);
       await sendText(chatId, message);
-      await insertProactiveRun(chatId, message, "daily");
+      await insertProactiveRun(chatId, message, "afternoon");
     } catch (error) {
       log.error("Afternoon delivery failed for chat", { chatId, error });
     }
@@ -58,14 +70,24 @@ async function deliverAfternoonRun(chatIds: number[]): Promise<void> {
 async function deliverEveningRun(chatIds: number[]): Promise<void> {
   for (const chatId of chatIds) {
     try {
-      const [doneToday, highPriority] = await Promise.all([
+      const [doneToday, highPriority, archiveCandidates] = await Promise.all([
         loadDoneToday(chatId),
-        listOpenActionItems(chatId, 3)
+        listOpenActionItems(chatId, 3),
+        listArchiveSuggestions(chatId, 30, 3)
       ]);
 
-      const message = buildEveningMessage(doneToday, highPriority);
+      let message = buildEveningMessage(doneToday, highPriority);
+
+      // Append archive suggestions if any stale items found
+      if (archiveCandidates.length > 0) {
+        const archiveLines = archiveCandidates.map(
+          (item) => `  #${item.id} — ${item.actionTitle || item.summaryPtBr.slice(0, 50)}`
+        );
+        message += `\n\n📦 Items parados 30+ dias (considere arquivar):\n${archiveLines.join("\n")}`;
+      }
+
       await sendText(chatId, message);
-      await insertProactiveRun(chatId, message, "daily");
+      await insertProactiveRun(chatId, message, "evening");
     } catch (error) {
       log.error("Evening delivery failed for chat", { chatId, error });
     }

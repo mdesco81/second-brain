@@ -9,19 +9,49 @@ import { deleteWebhook, setWebhook } from "./services/telegram.js";
 import { hasAI } from "./services/openai.js";
 import { log } from "./utils/logger.js";
 import { registerGhostwriter } from "./agents/ghostwriter/index.js";
+import { getInflightCount, waitForInflight } from "./services/intake.js";
 
-async function configureWebhookWithRetry(): Promise<NodeJS.Timeout> {
-  const attempt = async () => {
+async function configureWebhookWithRetry(): Promise<NodeJS.Timeout | null> {
+  let retryCount = 0;
+  const MAX_RETRIES = 10;
+  let timerId: NodeJS.Timeout | null = null;
+
+  const attempt = async (): Promise<boolean> => {
     try {
       await setWebhook();
       log.info("Telegram webhook configured", { baseUrl: env.APP_BASE_URL });
+      if (timerId) {
+        clearInterval(timerId);
+        timerId = null;
+      }
+      return true;
     } catch (error) {
-      log.warn("Webhook configuration failed; will retry", { error });
+      retryCount += 1;
+      const backoffSec = Math.min(60 * Math.pow(2, retryCount - 1), 15 * 60);
+      log.warn("Webhook configuration failed; will retry", {
+        error,
+        retryCount,
+        maxRetries: MAX_RETRIES,
+        nextRetrySec: backoffSec
+      });
+      if (retryCount >= MAX_RETRIES) {
+        log.error("Webhook configuration abandoned after max retries", { retryCount });
+        if (timerId) {
+          clearInterval(timerId);
+          timerId = null;
+        }
+      }
+      return false;
     }
   };
 
-  await attempt();
-  return setInterval(() => void attempt(), 60_000);
+  const success = await attempt();
+  if (success) {
+    return null;
+  }
+
+  timerId = setInterval(() => void attempt(), 60_000);
+  return timerId;
 }
 
 async function bootstrap(): Promise<void> {
@@ -61,6 +91,14 @@ async function bootstrap(): Promise<void> {
       clearInterval(webhookRetryTimer);
     }
     stopPollingLoop();
+
+    // Wait for in-flight message processing to finish (max 30s)
+    const inflight = getInflightCount();
+    if (inflight > 0) {
+      log.info("Waiting for in-flight messages to finish", { inflight });
+      await waitForInflight(30_000);
+    }
+
     server.close(async () => {
       await closePool();
       process.exit(0);

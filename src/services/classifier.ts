@@ -2,6 +2,7 @@ import { ActionPriority, ClassificationResult } from "../types/domain.js";
 import { listCategories } from "../db/schema.js";
 import { classifyWithAI } from "./openai.js";
 import { log } from "../utils/logger.js";
+import { todayLocal, addDaysLocal, nextFridayLocal } from "../utils/dates.js";
 
 const KEYWORD_RULES: Array<{
   keywords: string[];
@@ -101,36 +102,28 @@ function normalizeDueDate(value?: string | null): string | undefined {
 
 function inferDueDateFromText(text: string): string | undefined {
   const normalized = text.toLowerCase();
-  const now = new Date();
 
   if (/\b(hoje)\b/.test(normalized)) {
-    return now.toISOString().slice(0, 10);
+    return todayLocal();
   }
-  if (/\b(amanha)\b/.test(normalized)) {
-    const tomorrow = new Date(now);
-    tomorrow.setDate(now.getDate() + 1);
-    return tomorrow.toISOString().slice(0, 10);
+  if (/\b(amanha|amanhã)\b/.test(normalized)) {
+    return addDaysLocal(1);
   }
-  if (/\b(esta semana|essa semana|ate sexta)\b/.test(normalized)) {
-    const weekEnd = new Date(now);
-    weekEnd.setDate(now.getDate() + 5);
-    return weekEnd.toISOString().slice(0, 10);
+  if (/\b(esta semana|essa semana|ate sexta|até sexta)\b/.test(normalized)) {
+    return nextFridayLocal();
   }
 
   return undefined;
 }
 
 function inferDueDateFromPriority(priority: ActionPriority): string {
-  const now = new Date();
-  const due = new Date(now);
   if (priority === "ALTA") {
-    due.setDate(now.getDate() + 1);
-  } else if (priority === "MEDIA") {
-    due.setDate(now.getDate() + 3);
-  } else {
-    due.setDate(now.getDate() + 7);
+    return addDaysLocal(1);
   }
-  return due.toISOString().slice(0, 10);
+  if (priority === "MEDIA") {
+    return addDaysLocal(3);
+  }
+  return addDaysLocal(7);
 }
 
 function inferFallbackPriority(text: string): ActionPriority {
