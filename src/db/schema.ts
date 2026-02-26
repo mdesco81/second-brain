@@ -122,7 +122,21 @@ export async function ensureSchema(): Promise<void> {
       ADD COLUMN IF NOT EXISTS snoozed_until DATE;
   `);
 
-  // Deduplication: prevent processing same Telegram message twice
+  // Deduplication: prevent processing same Telegram message twice.
+  // First, clean up any pre-existing duplicates (keep the row with the highest id).
+  await pool.query(`
+    DELETE FROM inbox_items
+    WHERE id IN (
+      SELECT id FROM (
+        SELECT id,
+               ROW_NUMBER() OVER (PARTITION BY chat_id, telegram_message_id ORDER BY id DESC) AS rn
+        FROM inbox_items
+        WHERE telegram_message_id > 0
+      ) sub
+      WHERE sub.rn > 1
+    );
+  `);
+
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_inbox_items_chat_message
       ON inbox_items(chat_id, telegram_message_id)
