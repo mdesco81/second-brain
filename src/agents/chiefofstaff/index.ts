@@ -8,11 +8,15 @@ import {
   completeCosConversation,
   CosConversation,
   createCosConversation,
+  findTodayEventByPerson,
   getActiveCosConversation,
   getLatestCosOutput,
   insertCosOutput,
+  insertDecision,
   insertInboxItem,
+  insertReminder,
   listCategories,
+  listDecisionsByPerson,
   listItemsByPerson,
   listOpenActionItems,
   listOverdueItems,
@@ -25,6 +29,7 @@ import {
   loadWeeklySummary,
   logCosEvent,
   markMemoryUsed,
+  markNotesCaptured,
   Person,
   touchCosConversation,
   updateCosConversation,
@@ -32,6 +37,7 @@ import {
   upsertCosMemory,
   upsertPerson
 } from "../../db/schema.js";
+import { env } from "../../config/env.js";
 import { classifyMartaIntent, MartaIntent, resolvePersonFuzzy } from "./intents.js";
 import {
   buildBriefingPrompt,
@@ -40,6 +46,7 @@ import {
   buildHelpMessage,
   buildNotesProcessingPrompt,
   buildReflectionPrompt,
+  buildReminderParsingPrompt,
   buildStatusPrompt
 } from "./prompts.js";
 
@@ -352,6 +359,8 @@ async function executeIntent(
       return await handleEquipe(chatId, messageId, rawRequest, intent);
     case "reflexao":
       return await handleReflexao(chatId, messageId, rawRequest);
+    case "reminder":
+      return await handleReminder(chatId, messageId, rawRequest, intent);
     case "ajuda":
       await sendText(chatId, buildHelpMessage());
       return { success: true, agentId: "chiefofstaff", summary: "Ajuda enviada." };
@@ -405,11 +414,12 @@ async function handleBriefing(
     return { success: false, agentId: "chiefofstaff", summary: "Pessoa nao encontrada.", error: "person_not_found" };
   }
 
-  const [openItems, overdueItems, memories, latestNotes] = await Promise.all([
+  const [openItems, overdueItems, memories, latestNotes, pendingDecisions] = await Promise.all([
     listItemsByPerson(person.name, ["open"]),
     listOverdueItems(chatId, 10),
     loadMemoriesForPerson(person.id),
-    getLatestCosOutput(person.id, "one_on_one_notes")
+    getLatestCosOutput(person.id, "one_on_one_notes"),
+    listDecisionsByPerson([person.id])
   ]);
 
   // Mark memories as used (concurrent)
@@ -425,7 +435,8 @@ async function handleBriefing(
     overdueItems: personOverdue,
     memories,
     previousNotes: latestNotes?.content ?? null,
-    tema: intent.tema
+    tema: intent.tema,
+    pendingDecisions
   });
 
   const response = await callClaude({ system, userMessage: user, maxTokens: 2048 });
@@ -535,6 +546,7 @@ async function handleNotas(
   let parsed: {
     summary?: string;
     action_items?: Array<{ title: string; owner: string; due: string | null; priority: string }>;
+    decisions?: Array<{ summary: string; rationale?: string; participants?: string[]; review_date?: string }>;
     person_insights?: string[];
     telegram_message?: string;
   };
@@ -595,8 +607,59 @@ async function handleNotas(
     }
   }
 
+  // Save decisions to decision journal
+  let createdDecisions = 0;
+  if (parsed.decisions && Array.isArray(parsed.decisions)) {
+    for (const decision of parsed.decisions) {
+      if (!decision.summary) continue;
+      try {
+        // Resolve participant names to person IDs
+        const personIds = [person.id]; // Always include the main person
+        if (decision.participants && Array.isArray(decision.participants)) {
+          const people = await getPeopleList(chatId);
+          for (const name of decision.participants) {
+            const resolved = await resolvePersonFuzzy(name, people);
+            if (resolved && !personIds.includes(resolved.id)) {
+              personIds.push(resolved.id);
+            } else if (!resolved) {
+              log.info("marta:decision_participant_not_found", { name, decisionSummary: decision.summary });
+            }
+          }
+        }
+
+        const reviewDate = decision.review_date
+          ? new Date(decision.review_date)
+          : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days default
+
+        await insertDecision({
+          chatId,
+          personIds,
+          summary: decision.summary,
+          rationale: decision.rationale ?? undefined,
+          context: `1:1 com ${person.name}`,
+          decidedAt: new Date(),
+          reviewAt: reviewDate
+        });
+        createdDecisions++;
+      } catch (error) {
+        log.warn("marta:decision_creation_failed", { decision, error });
+      }
+    }
+  }
+
   // Update last 1:1 timestamp
   await updateLastOneOnOne(person.id);
+
+  // Auto-link notes with calendar event (if there's a meeting today with this person)
+  try {
+    const calEvent = await findTodayEventByPerson(person.id, chatId, env.TIMEZONE);
+    if (calEvent) {
+      await markNotesCaptured(calEvent.id);
+      log.info("marta:notes_linked_to_calendar", { eventId: calEvent.id, personId: person.id });
+    }
+  } catch (error) {
+    log.warn("marta:calendar_link_failed", { error });
+  }
 
   // Save output
   const outputId = await insertCosOutput({
@@ -605,7 +668,7 @@ async function handleNotas(
     personId: person.id,
     title: `Notas 1:1 ${person.name} — ${new Date().toISOString().slice(0, 10)}`,
     content: response,
-    metadata: { actionItemsCreated: createdItems }
+    metadata: { actionItemsCreated: createdItems, decisionsCreated: createdDecisions }
   });
 
   await logCosEvent({
@@ -613,18 +676,25 @@ async function handleNotas(
     eventType: "notes_processed",
     personId: person.id,
     outputId,
-    details: { actionItemsCreated: createdItems }
+    details: { actionItemsCreated: createdItems, decisionsCreated: createdDecisions }
   });
 
   // Send Telegram message
   const telegramMsg = parsed.telegram_message ?? parsed.summary ?? "Notas processadas.";
-  const footer = createdItems > 0
-    ? `\n\n✅ ${createdItems} action item${createdItems > 1 ? "s" : ""} criado${createdItems > 1 ? "s" : ""}. Algum ajuste ou algo que eu perdi?`
-    : "\n\nNenhum action item identificado. Quer que eu revise algo?";
+  const footerParts: string[] = [];
+  if (createdItems > 0) {
+    footerParts.push(`✅ ${createdItems} action item${createdItems > 1 ? "s" : ""} criado${createdItems > 1 ? "s" : ""}`);
+  }
+  if (createdDecisions > 0) {
+    footerParts.push(`📋 ${createdDecisions} ${createdDecisions > 1 ? "decisoes registradas" : "decisao registrada"} no journal`);
+  }
+  const footer = footerParts.length > 0
+    ? `\n\n${footerParts.join("\n")}. Algum ajuste ou algo que eu perdi?`
+    : "\n\nNenhum action item ou decisao identificados. Quer que eu revise algo?";
 
   await sendText(chatId, telegramMsg + footer);
 
-  return { success: true, agentId: "chiefofstaff", summary: `Notas processadas: ${createdItems} action items criados.` };
+  return { success: true, agentId: "chiefofstaff", summary: `Notas processadas: ${createdItems} action items, ${createdDecisions} decisoes.` };
 }
 
 // ── Intent: Status Cross-Team ─────────────────────────────────────────
@@ -833,6 +903,88 @@ async function handleEquipe(
   await sendText(chatId, msg);
 
   return { success: true, agentId: "chiefofstaff", summary: `Pessoa registrada: ${intent.person}` };
+}
+
+// ── Intent: Reminder ─────────────────────────────────────────────────
+
+async function handleReminder(
+  chatId: number,
+  _messageId: number,
+  rawRequest: string,
+  intent: MartaIntent
+): Promise<AgentResult> {
+  await sendTypingIndicator(chatId);
+
+  // Use Claude to parse natural language date/time
+  const now = new Date();
+  const currentDate = now.toISOString().slice(0, 10);
+
+  const { system, user } = buildReminderParsingPrompt({
+    text: rawRequest,
+    currentDate,
+    timezone: env.TIMEZONE
+  });
+
+  const response = await callClaude({ system, userMessage: user, model: "fast", maxTokens: 256 });
+  if (!response) {
+    await sendText(chatId, "Nao consegui entender o lembrete. Pode reformular? Ex: \"me lembra de X amanha as 10h\"");
+    return { success: false, agentId: "chiefofstaff", summary: "Reminder parse failed", error: "null response" };
+  }
+
+  let parsed: { text?: string; date?: string; time?: string; recurrence?: string | null; confidence?: number };
+  try {
+    const jsonMatch = response.match(/\{[\s\S]*\}/);
+    parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : {};
+  } catch {
+    parsed = {};
+  }
+
+  if (!parsed.text || !parsed.date || !parsed.time) {
+    // Ask for clarification
+    const convId = await createCosConversation({
+      chatId,
+      intent: "reminder",
+      context: { originalRequest: rawRequest, intent }
+    });
+    await appendConversationMessage(convId, "user", rawRequest);
+    const question = "Entendi que voce quer um lembrete, mas nao consegui extrair quando. Pode me dizer a data e hora? Ex: \"amanha as 10h\"";
+    await appendConversationMessage(convId, "assistant", question);
+    await updateCosConversation(convId, { state: "clarifying" });
+    await sendText(chatId, question);
+    return { success: true, agentId: "chiefofstaff", summary: "Aguardando data do lembrete." };
+  }
+
+  // Build trigger datetime
+  const triggerAt = new Date(`${parsed.date}T${parsed.time}:00`);
+  if (isNaN(triggerAt.getTime())) {
+    await sendText(chatId, "Nao consegui interpretar a data/hora. Pode tentar de novo?");
+    return { success: false, agentId: "chiefofstaff", summary: "Invalid date", error: "invalid_date" };
+  }
+
+  // Resolve person if mentioned
+  let personId: number | undefined;
+  if (intent.personId) {
+    personId = intent.personId;
+  }
+
+  const reminderId = await insertReminder({
+    chatId,
+    text: parsed.text,
+    triggerAt: triggerAt.toISOString(),
+    recurrence: parsed.recurrence ?? undefined,
+    personId
+  });
+
+  await logCosEvent({ chatId, eventType: "reminder_created", details: { reminderId, text: parsed.text, triggerAt: triggerAt.toISOString(), recurrence: parsed.recurrence } });
+
+  // Format confirmation
+  const dateStr = triggerAt.toLocaleDateString("pt-BR", { weekday: "long", day: "numeric", month: "long", timeZone: env.TIMEZONE });
+  const timeStr = triggerAt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: env.TIMEZONE });
+  const recurrenceLabel = parsed.recurrence ? ` (recorrente: ${parsed.recurrence})` : "";
+
+  await sendText(chatId, `🔔 Lembrete agendado!\n\n📝 ${parsed.text}\n📅 ${dateStr} às ${timeStr}${recurrenceLabel}\n\nVou te avisar na hora.`);
+
+  return { success: true, agentId: "chiefofstaff", summary: `Lembrete criado: ${parsed.text}` };
 }
 
 // ── Intent: Reflexao Estrategica ──────────────────────────────────────

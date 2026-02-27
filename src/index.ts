@@ -1,12 +1,13 @@
 import "dotenv/config";
 import { createApp } from "./app.js";
 import { env } from "./config/env.js";
-import { closePool, ensureSchema } from "./db/schema.js";
+import { closePool, ensureSchema, listProactiveChats } from "./db/schema.js";
 import { startPollingLoop, stopPollingLoop } from "./services/polling.js";
 import { startProactiveScheduler } from "./services/proactive.js";
 import { ensureKnowledgeTree } from "./services/storage.js";
 import { deleteWebhook, setWebhook } from "./services/telegram.js";
 import { hasAI } from "./services/openai.js";
+import { isCalendarEnabled, syncCalendarEvents } from "./services/calendar.js";
 import { log } from "./utils/logger.js";
 import { registerGhostwriter } from "./agents/ghostwriter/index.js";
 import { registerChiefOfStaff } from "./agents/chiefofstaff/index.js";
@@ -70,6 +71,20 @@ async function bootstrap(): Promise<void> {
   startProactiveScheduler();
   registerGhostwriter();
   registerChiefOfStaff();
+
+  // Initial Google Calendar sync on startup (non-blocking)
+  if (isCalendarEnabled()) {
+    listProactiveChats()
+      .then(async (chatIds) => {
+        for (const chatId of chatIds) {
+          await syncCalendarEvents(chatId).catch((err) =>
+            log.warn("Initial calendar sync failed", { chatId, err })
+          );
+        }
+        log.info("Google Calendar initial sync completed", { chats: chatIds.length });
+      })
+      .catch((err) => log.warn("Calendar init skipped", { err }));
+  }
 
   if (!hasAI()) {
     log.warn("⚠ Claude AI is NOT available — check ANTHROPIC_API_KEY. Cards will use keyword-only fallback.");

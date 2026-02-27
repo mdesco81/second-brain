@@ -1,4 +1,4 @@
-import { CosMemory, OpenActionItem, Person } from "../../db/schema.js";
+import { CosMemory, Decision, OpenActionItem, Person } from "../../db/schema.js";
 
 const MARTA_PERSONA = `Voce e Marta, Chief of Staff virtual com experiencia equivalente a 4+ anos em consultoria estrategica de primeiro tier (McKinsey, Bain, BCG).
 
@@ -22,6 +22,7 @@ export function buildBriefingPrompt(params: {
   memories: CosMemory[];
   previousNotes: string | null;
   tema?: string | null;
+  pendingDecisions?: Decision[];
 }): { system: string; user: string } {
   const memoryBlock = params.memories.length > 0
     ? `\n\nMEMORIAS SOBRE ${params.person.name.toUpperCase()}:\n${params.memories.map((m) => `- [${m.memoryType}] ${m.content} (confianca: ${(m.confidence * 100).toFixed(0)}%)`).join("\n")}`
@@ -68,6 +69,13 @@ FORMATO DO OUTPUT:
 
   const temaBlock = params.tema ? `\n\nO lider quer focar especialmente em: ${params.tema}` : "";
 
+  const decisionsBlock = params.pendingDecisions && params.pendingDecisions.length > 0
+    ? `\n\nDECISOES PENDENTES envolvendo ${params.person.name}:\n${params.pendingDecisions.map((d) => {
+        const dateStr = d.decidedAt ? String(d.decidedAt).slice(0, 10) : "data desconhecida";
+        return `- ${d.summary} (decidido em ${dateStr}) — status: ${d.status}`;
+      }).join("\n")}`
+    : "";
+
   const user = `Pessoa: ${params.person.name} (${params.person.role ?? "liderado"})
 Cadencia de 1:1: ${params.person.oneOnOneCadence}
 Ultimo 1:1: ${params.person.lastOneOnOne ?? "sem registro"}
@@ -75,7 +83,7 @@ ${params.person.notes ? `Notas gerais: ${params.person.notes}` : ""}
 
 Items pendentes com ${params.person.name}:
 ${itemsList}
-${overdueList ? `\nItems ATRASADOS:\n${overdueList}` : ""}${previousNotesBlock}${temaBlock}`;
+${overdueList ? `\nItems ATRASADOS:\n${overdueList}` : ""}${previousNotesBlock}${decisionsBlock}${temaBlock}`;
 
   return { system, user };
 }
@@ -94,7 +102,7 @@ export function buildNotesProcessingPrompt(params: {
 TAREFA: Processar notas/transcript de 1:1 com ${params.person.name}.
 
 Extraia e estruture:
-1. *Decisoes tomadas* — o que foi decidido na reuniao
+1. *Decisoes tomadas* — o que foi decidido na reuniao. Sinais: "decidimos", "ficou definido", "combinamos", "vamos", "a direcao e", "optamos por", "fechamos que"
 2. *Action items* — quem faz o que, com prazo se mencionado. Retorne como JSON array no campo "action_items"
 3. *Temas pendentes* — que ficaram sem resolucao
 4. *Sinais de risco/preocupacao* — sentimentos, hesitacoes, flags vermelhas
@@ -103,12 +111,15 @@ Extraia e estruture:
 
 Para cada action item, retorne:
 { "title": "titulo imperativo", "owner": "quem", "due": "prazo ou null", "priority": "ALTA|MEDIA|BAIXA" }
+
+Para cada decisao, retorne como OBJETO (nao string):
+{ "summary": "resumo da decisao", "rationale": "por que foi decidido (se mencionado, senao null)", "participants": ["nome1", ...], "review_date": "YYYY-MM-DD sugerido para revisao (30 dias por padrao)" }
 ${memoryBlock}
 
 Responda com JSON:
 {
   "summary": "resumo executivo em 2-3 frases",
-  "decisions": ["decisao 1", ...],
+  "decisions": [{"summary": "...", "rationale": "...", "participants": ["..."], "review_date": "..."}],
   "action_items": [{"title": "...", "owner": "...", "due": "...", "priority": "..."}],
   "pending_topics": ["topico 1", ...],
   "risk_signals": ["sinal 1", ...],
@@ -273,11 +284,44 @@ Posso te ajudar com:
 📊 *Status da equipe* — "Marta, como ta a galera?"
 ✉️ *Draft de email* — "Marta, manda email pro Pedro sobre o atraso do projeto"
 👥 *Registrar pessoa* — "Marta, adiciona o Carlos, ele e tech lead"
+🔔 *Lembretes* — "Marta, me lembra de cobrar o Pedro amanha as 10h"
 🔮 *Reflexao estrategica* — "Marta, o que tenho negligenciado?"
 
 Pode falar naturalmente comigo — entendo linguagem informal, audios e textos longos. Se precisar de mais contexto, vou te perguntar (no maximo 2x).
 
 Quanto mais voce usar, mais aprendo sobre sua equipe e preferencias.`;
+}
+
+export function buildReminderParsingPrompt(params: {
+  text: string;
+  currentDate: string;
+  timezone: string;
+}): { system: string; user: string } {
+  const system = `Voce e um parser de lembretes em linguagem natural em PT-BR.
+Extraia a data, hora e recorrencia de um pedido de lembrete.
+
+DATA DE REFERENCIA: ${params.currentDate} (timezone: ${params.timezone})
+
+Regras:
+- "amanha" = dia seguinte a data de referencia
+- "segunda", "terca", etc = proximo dia da semana a partir de hoje
+- "toda segunda" = recorrencia semanal
+- "todo dia" = recorrencia diaria
+- Se nao mencionar hora, use 09:00 como padrao
+- Se nao mencionar data, assuma HOJE
+- Para recorrencia: "toda segunda" → weekly, "todo dia" → daily, "a cada 2 semanas" → biweekly, "todo mes" → monthly
+- "text" deve conter APENAS o que lembrar (sem a parte de quando/recorrencia)
+
+Responda APENAS com JSON valido:
+{
+  "text": "texto do lembrete (o que lembrar, sem quando)",
+  "date": "YYYY-MM-DD",
+  "time": "HH:MM",
+  "recurrence": null | "daily" | "weekly" | "biweekly" | "monthly",
+  "confidence": 0.0-1.0
+}`;
+
+  return { system, user: params.text };
 }
 
 export function buildConversationalPrompt(params: {

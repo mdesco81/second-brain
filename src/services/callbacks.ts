@@ -8,7 +8,9 @@ import {
 import {
   updateInboxItemStatusById,
   snoozeInboxItem,
-  updateInboxItemMetadata
+  updateInboxItemMetadata,
+  updateDecisionStatus,
+  snoozeDecisionReview
 } from "../db/schema.js";
 import { log } from "../utils/logger.js";
 
@@ -26,11 +28,14 @@ function daysFromNow(days: number): string {
  *
  * Data format: "action:payload"
  * Actions:
- *   - done:<itemId>              → Mark item as done
- *   - snooze:<itemId>            → Snooze item by 3 days
- *   - jarbas_approve:<itemId>    → Approve Jarbas draft
- *   - jarbas_reject:<itemId>     → Reject Jarbas draft
- *   - jarbas_edit:<itemId>       → Mark draft for editing
+ *   - done:<itemId>                    → Mark item as done
+ *   - snooze:<itemId>                  → Snooze item by 3 days
+ *   - jarbas_approve:<itemId>          → Approve Jarbas draft
+ *   - jarbas_reject:<itemId>           → Reject Jarbas draft
+ *   - jarbas_edit:<itemId>             → Mark draft for editing
+ *   - decision_implemented:<decisionId> → Mark decision as implemented
+ *   - decision_snooze:<decisionId>      → Snooze decision review by 30 days
+ *   - decision_superseded:<decisionId>  → Mark decision as superseded
  */
 export async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> {
   const chatId = query.message?.chat.id;
@@ -115,6 +120,45 @@ export async function handleCallbackQuery(query: TelegramCallbackQuery): Promise
         }
         await sendText(chatId, "Pode editar no dashboard e subir a versao final. Vou comparar com o original para aprender seu estilo.");
         log.info("callback:jarbas_edit", { chatId, itemId });
+        break;
+      }
+
+      case "decision_implemented": {
+        if (isNaN(itemId)) break;
+        await updateDecisionStatus(itemId, "implemented");
+        await answerCallbackQuery(query.id, "Decisao marcada como implementada!");
+        if (messageId) {
+          await editMessageButtons(chatId, messageId, [
+            [{ text: "✅ Implementada", callback_data: "noop:0" }]
+          ]);
+        }
+        log.info("callback:decision_implemented", { chatId, decisionId: itemId });
+        break;
+      }
+
+      case "decision_snooze": {
+        if (isNaN(itemId)) break;
+        await snoozeDecisionReview(itemId, 30);
+        await answerCallbackQuery(query.id, "Revisao adiada por 30 dias.");
+        if (messageId) {
+          await editMessageButtons(chatId, messageId, [
+            [{ text: "⏰ Adiada 30d", callback_data: "noop:0" }]
+          ]);
+        }
+        log.info("callback:decision_snooze", { chatId, decisionId: itemId });
+        break;
+      }
+
+      case "decision_superseded": {
+        if (isNaN(itemId)) break;
+        await updateDecisionStatus(itemId, "superseded");
+        await answerCallbackQuery(query.id, "Decisao marcada como supersedida.");
+        if (messageId) {
+          await editMessageButtons(chatId, messageId, [
+            [{ text: "❌ Supersedida", callback_data: "noop:0" }]
+          ]);
+        }
+        log.info("callback:decision_superseded", { chatId, decisionId: itemId });
         break;
       }
 

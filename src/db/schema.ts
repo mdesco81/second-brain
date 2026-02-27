@@ -280,6 +280,78 @@ export async function ensureSchema(): Promise<void> {
        OR processing_stage = 'capturado';
   `);
 
+  // ── Phase 1: Calendar, Reminders, Decisions ───────────────────────
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS calendar_events (
+      id SERIAL PRIMARY KEY,
+      chat_id BIGINT NOT NULL,
+      external_id TEXT NOT NULL,
+      calendar_id TEXT NOT NULL DEFAULT 'primary',
+      title TEXT NOT NULL,
+      description TEXT,
+      start_at TIMESTAMPTZ NOT NULL,
+      end_at TIMESTAMPTZ NOT NULL,
+      location TEXT,
+      attendees JSONB NOT NULL DEFAULT '[]',
+      person_id INTEGER REFERENCES people(id),
+      is_one_on_one BOOLEAN DEFAULT FALSE,
+      pre_brief_sent BOOLEAN DEFAULT FALSE,
+      post_prompt_sent BOOLEAN DEFAULT FALSE,
+      notes_captured BOOLEAN DEFAULT FALSE,
+      status TEXT NOT NULL DEFAULT 'confirmed',
+      raw_event JSONB,
+      synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(external_id, calendar_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(start_at);
+    CREATE INDEX IF NOT EXISTS idx_calendar_events_chat ON calendar_events(chat_id, start_at);
+    CREATE INDEX IF NOT EXISTS idx_calendar_events_person ON calendar_events(person_id);
+
+    CREATE TABLE IF NOT EXISTS reminders (
+      id SERIAL PRIMARY KEY,
+      chat_id BIGINT NOT NULL,
+      text TEXT NOT NULL,
+      trigger_at TIMESTAMPTZ NOT NULL,
+      recurrence TEXT,
+      recurrence_end_at TIMESTAMPTZ,
+      person_id INTEGER REFERENCES people(id),
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_reminders_pending ON reminders(trigger_at) WHERE status = 'pending';
+    CREATE INDEX IF NOT EXISTS idx_reminders_chat ON reminders(chat_id, status);
+
+    CREATE TABLE IF NOT EXISTS decisions (
+      id SERIAL PRIMARY KEY,
+      chat_id BIGINT NOT NULL,
+      person_ids INTEGER[] DEFAULT '{}',
+      summary TEXT NOT NULL,
+      rationale TEXT,
+      context TEXT,
+      decided_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      status TEXT NOT NULL DEFAULT 'pending',
+      review_at TIMESTAMPTZ,
+      source_output_id INTEGER REFERENCES cos_outputs(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_decisions_chat ON decisions(chat_id, status);
+    CREATE INDEX IF NOT EXISTS idx_decisions_person ON decisions USING GIN(person_ids);
+    CREATE INDEX IF NOT EXISTS idx_decisions_review ON decisions(review_at) WHERE status = 'pending';
+  `);
+
+  // Calendar sync token storage in chat_subscriptions
+  await pool.query(`
+    ALTER TABLE chat_subscriptions
+      ADD COLUMN IF NOT EXISTS calendar_sync_token TEXT,
+      ADD COLUMN IF NOT EXISTS calendar_last_sync TIMESTAMPTZ;
+  `);
+
   for (const category of DEFAULT_CATEGORIES) {
     await pool.query(
       `INSERT INTO categories(name, description, source)
@@ -3085,6 +3157,480 @@ export async function listPeopleWithItems(): Promise<Array<Person & {
       }
     };
   });
+}
+
+// ── Calendar Events ──────────────────────────────────────────────────
+
+export interface CalendarEvent {
+  id: number;
+  chatId: number;
+  externalId: string;
+  calendarId: string;
+  title: string;
+  description: string | null;
+  startAt: string;
+  endAt: string;
+  location: string | null;
+  attendees: Array<{ email: string; name?: string; responseStatus?: string }>;
+  personId: number | null;
+  isOneOnOne: boolean;
+  preBriefSent: boolean;
+  postPromptSent: boolean;
+  notesCaptured: boolean;
+  status: string;
+  syncedAt: string;
+  createdAt: string;
+}
+
+export async function upsertCalendarEvent(params: {
+  chatId: number;
+  externalId: string;
+  calendarId?: string;
+  title: string;
+  description?: string;
+  startAt: string;
+  endAt: string;
+  location?: string;
+  attendees: Array<{ email: string; name?: string; responseStatus?: string }>;
+  personId?: number;
+  isOneOnOne?: boolean;
+  status?: string;
+  rawEvent?: Record<string, unknown>;
+}): Promise<number> {
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO calendar_events (
+      chat_id, external_id, calendar_id, title, description,
+      start_at, end_at, location, attendees, person_id,
+      is_one_on_one, status, raw_event, synced_at, updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
+    ON CONFLICT (external_id, calendar_id)
+    DO UPDATE SET
+      title = EXCLUDED.title,
+      description = EXCLUDED.description,
+      start_at = EXCLUDED.start_at,
+      end_at = EXCLUDED.end_at,
+      location = EXCLUDED.location,
+      attendees = EXCLUDED.attendees,
+      person_id = COALESCE(EXCLUDED.person_id, calendar_events.person_id),
+      is_one_on_one = EXCLUDED.is_one_on_one,
+      status = EXCLUDED.status,
+      raw_event = EXCLUDED.raw_event,
+      synced_at = NOW(),
+      updated_at = NOW()
+    RETURNING id`,
+    [
+      params.chatId,
+      params.externalId,
+      params.calendarId ?? "primary",
+      params.title,
+      params.description ?? null,
+      params.startAt,
+      params.endAt,
+      params.location ?? null,
+      JSON.stringify(params.attendees),
+      params.personId ?? null,
+      params.isOneOnOne ?? false,
+      params.status ?? "confirmed",
+      params.rawEvent ? JSON.stringify(params.rawEvent) : null
+    ]
+  );
+  return result.rows[0].id;
+}
+
+function mapCalendarEvent(row: Record<string, unknown>): CalendarEvent {
+  return {
+    id: row.id as number,
+    chatId: Number(row.chat_id),
+    externalId: row.external_id as string,
+    calendarId: row.calendar_id as string,
+    title: row.title as string,
+    description: row.description as string | null,
+    startAt: String(row.start_at),
+    endAt: String(row.end_at),
+    location: row.location as string | null,
+    attendees: (row.attendees as CalendarEvent["attendees"]) ?? [],
+    personId: row.person_id as number | null,
+    isOneOnOne: row.is_one_on_one as boolean,
+    preBriefSent: row.pre_brief_sent as boolean,
+    postPromptSent: row.post_prompt_sent as boolean,
+    notesCaptured: row.notes_captured as boolean,
+    status: row.status as string,
+    syncedAt: String(row.synced_at),
+    createdAt: String(row.created_at)
+  };
+}
+
+export async function getUpcomingEvents(chatId: number, withinMinutes: number): Promise<CalendarEvent[]> {
+  const result = await pool.query(
+    `SELECT * FROM calendar_events
+     WHERE chat_id = $1
+       AND start_at > NOW()
+       AND start_at <= NOW() + INTERVAL '1 minute' * $2
+       AND status != 'cancelled'
+     ORDER BY start_at`,
+    [chatId, withinMinutes]
+  );
+  return result.rows.map(mapCalendarEvent);
+}
+
+export async function getRecentlyEndedEvents(chatId: number, withinMinutes: number): Promise<CalendarEvent[]> {
+  const result = await pool.query(
+    `SELECT * FROM calendar_events
+     WHERE chat_id = $1
+       AND end_at >= NOW() - INTERVAL '1 minute' * $2
+       AND end_at <= NOW()
+       AND status != 'cancelled'
+     ORDER BY end_at DESC`,
+    [chatId, withinMinutes]
+  );
+  return result.rows.map(mapCalendarEvent);
+}
+
+export async function getTodayEvents(chatId: number, timezone = "America/Sao_Paulo"): Promise<CalendarEvent[]> {
+  const result = await pool.query(
+    `SELECT * FROM calendar_events
+     WHERE chat_id = $1
+       AND start_at >= (NOW() AT TIME ZONE $2)::DATE AT TIME ZONE $2
+       AND start_at < ((NOW() AT TIME ZONE $2)::DATE + INTERVAL '1 day') AT TIME ZONE $2
+       AND status != 'cancelled'
+     ORDER BY start_at`,
+    [chatId, timezone]
+  );
+  return result.rows.map(mapCalendarEvent);
+}
+
+export async function markPreBriefSent(eventId: number): Promise<void> {
+  await pool.query(
+    `UPDATE calendar_events SET pre_brief_sent = TRUE, updated_at = NOW() WHERE id = $1`,
+    [eventId]
+  );
+}
+
+export async function markPostPromptSent(eventId: number): Promise<void> {
+  await pool.query(
+    `UPDATE calendar_events SET post_prompt_sent = TRUE, updated_at = NOW() WHERE id = $1`,
+    [eventId]
+  );
+}
+
+export async function markNotesCaptured(eventId: number): Promise<void> {
+  await pool.query(
+    `UPDATE calendar_events SET notes_captured = TRUE, updated_at = NOW() WHERE id = $1`,
+    [eventId]
+  );
+}
+
+export async function deleteCalendarEvent(externalId: string, calendarId = "primary"): Promise<void> {
+  await pool.query(
+    `DELETE FROM calendar_events WHERE external_id = $1 AND calendar_id = $2`,
+    [externalId, calendarId]
+  );
+}
+
+export async function updateCalendarSyncToken(chatId: number, syncToken: string): Promise<void> {
+  await pool.query(
+    `UPDATE chat_subscriptions SET calendar_sync_token = $1, calendar_last_sync = NOW() WHERE chat_id = $2`,
+    [syncToken, chatId]
+  );
+}
+
+export async function getCalendarSyncToken(chatId: number): Promise<string | null> {
+  const result = await pool.query<{ calendar_sync_token: string | null }>(
+    `SELECT calendar_sync_token FROM chat_subscriptions WHERE chat_id = $1`,
+    [chatId]
+  );
+  return result.rows[0]?.calendar_sync_token ?? null;
+}
+
+export async function findTodayEventByPerson(personId: number, chatId: number, timezone = "America/Sao_Paulo"): Promise<CalendarEvent | null> {
+  const result = await pool.query(
+    `SELECT * FROM calendar_events
+     WHERE chat_id = $1
+       AND person_id = $2
+       AND start_at >= (NOW() AT TIME ZONE $3)::DATE AT TIME ZONE $3
+       AND start_at < ((NOW() AT TIME ZONE $3)::DATE + INTERVAL '1 day') AT TIME ZONE $3
+       AND notes_captured = FALSE
+       AND status != 'cancelled'
+     ORDER BY start_at DESC
+     LIMIT 1`,
+    [chatId, personId, timezone]
+  );
+  return result.rows.length > 0 ? mapCalendarEvent(result.rows[0]) : null;
+}
+
+// ── Reminders ────────────────────────────────────────────────────────
+
+export interface Reminder {
+  id: number;
+  chatId: number;
+  text: string;
+  triggerAt: string;
+  recurrence: string | null;
+  recurrenceEndAt: string | null;
+  personId: number | null;
+  status: string;
+  createdAt: string;
+}
+
+export async function insertReminder(params: {
+  chatId: number;
+  text: string;
+  triggerAt: string;
+  recurrence?: string;
+  recurrenceEndAt?: string;
+  personId?: number;
+}): Promise<number> {
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO reminders (chat_id, text, trigger_at, recurrence, recurrence_end_at, person_id)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING id`,
+    [
+      params.chatId,
+      params.text,
+      params.triggerAt,
+      params.recurrence ?? null,
+      params.recurrenceEndAt ?? null,
+      params.personId ?? null
+    ]
+  );
+  return result.rows[0].id;
+}
+
+function mapReminder(row: Record<string, unknown>): Reminder {
+  return {
+    id: row.id as number,
+    chatId: Number(row.chat_id),
+    text: row.text as string,
+    triggerAt: String(row.trigger_at),
+    recurrence: row.recurrence as string | null,
+    recurrenceEndAt: row.recurrence_end_at ? String(row.recurrence_end_at) : null,
+    personId: row.person_id as number | null,
+    status: row.status as string,
+    createdAt: String(row.created_at)
+  };
+}
+
+export async function getDueReminders(): Promise<Reminder[]> {
+  const result = await pool.query(
+    `SELECT * FROM reminders WHERE trigger_at <= NOW() AND status = 'pending' ORDER BY trigger_at`
+  );
+  return result.rows.map(mapReminder);
+}
+
+export async function markReminderSent(id: number): Promise<void> {
+  await pool.query(
+    `UPDATE reminders SET status = 'sent' WHERE id = $1`,
+    [id]
+  );
+}
+
+export async function cancelReminder(id: number): Promise<void> {
+  await pool.query(
+    `UPDATE reminders SET status = 'cancelled' WHERE id = $1`,
+    [id]
+  );
+}
+
+export async function listPendingReminders(chatId: number): Promise<Reminder[]> {
+  const result = await pool.query(
+    `SELECT * FROM reminders WHERE chat_id = $1 AND status = 'pending' ORDER BY trigger_at`,
+    [chatId]
+  );
+  return result.rows.map(mapReminder);
+}
+
+export async function scheduleNextRecurrence(id: number): Promise<number | null> {
+  const result = await pool.query<Record<string, unknown>>(
+    `SELECT * FROM reminders WHERE id = $1`,
+    [id]
+  );
+  if (result.rows.length === 0) return null;
+  const reminder = mapReminder(result.rows[0]);
+  if (!reminder.recurrence) return null;
+
+  const currentTrigger = new Date(reminder.triggerAt);
+  let nextTrigger: Date;
+
+  switch (reminder.recurrence) {
+    case "daily":
+      nextTrigger = new Date(currentTrigger.getTime() + 24 * 60 * 60 * 1000);
+      break;
+    case "weekly":
+      nextTrigger = new Date(currentTrigger.getTime() + 7 * 24 * 60 * 60 * 1000);
+      break;
+    case "biweekly":
+      nextTrigger = new Date(currentTrigger.getTime() + 14 * 24 * 60 * 60 * 1000);
+      break;
+    case "monthly": {
+      // Safe month increment: clamp to last day of next month
+      // e.g., Jan 31 → Feb 28 (not Mar 3)
+      const originalDay = currentTrigger.getDate();
+      nextTrigger = new Date(currentTrigger);
+      nextTrigger.setMonth(nextTrigger.getMonth() + 1);
+      // If the day rolled over to the next month (e.g., 31 → 3), clamp back
+      if (nextTrigger.getDate() !== originalDay) {
+        nextTrigger.setDate(0); // Go to last day of the intended month
+      }
+      break;
+    }
+    default:
+      return null; // Unknown recurrence type
+  }
+
+  // Check if next occurrence is past the end date
+  if (reminder.recurrenceEndAt && nextTrigger > new Date(reminder.recurrenceEndAt)) {
+    return null;
+  }
+
+  return await insertReminder({
+    chatId: reminder.chatId,
+    text: reminder.text,
+    triggerAt: nextTrigger.toISOString(),
+    recurrence: reminder.recurrence,
+    recurrenceEndAt: reminder.recurrenceEndAt ?? undefined,
+    personId: reminder.personId ?? undefined
+  });
+}
+
+// ── Decisions ────────────────────────────────────────────────────────
+
+export interface Decision {
+  id: number;
+  chatId: number;
+  personIds: number[];
+  summary: string;
+  rationale: string | null;
+  context: string | null;
+  decidedAt: string;
+  status: string;
+  reviewAt: string | null;
+  sourceOutputId: number | null;
+  createdAt: string;
+}
+
+export async function insertDecision(params: {
+  chatId: number;
+  personIds?: number[];
+  summary: string;
+  rationale?: string;
+  context?: string;
+  decidedAt?: Date;
+  status?: string;
+  reviewAt?: Date;
+  sourceOutputId?: number;
+}): Promise<number> {
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO decisions (chat_id, person_ids, summary, rationale, context, decided_at, status, review_at, source_output_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     RETURNING id`,
+    [
+      params.chatId,
+      params.personIds ?? [],
+      params.summary,
+      params.rationale ?? null,
+      params.context ?? null,
+      params.decidedAt ?? new Date(),
+      params.status ?? "pending",
+      params.reviewAt ?? null,
+      params.sourceOutputId ?? null
+    ]
+  );
+  return result.rows[0].id;
+}
+
+function mapDecision(row: Record<string, unknown>): Decision {
+  return {
+    id: row.id as number,
+    chatId: Number(row.chat_id),
+    personIds: (row.person_ids as number[]) ?? [],
+    summary: row.summary as string,
+    rationale: row.rationale as string | null,
+    context: row.context as string | null,
+    decidedAt: String(row.decided_at),
+    status: row.status as string,
+    reviewAt: row.review_at ? String(row.review_at) : null,
+    sourceOutputId: row.source_output_id as number | null,
+    createdAt: String(row.created_at)
+  };
+}
+
+export async function listPendingDecisions(chatId: number, limit = 20): Promise<Decision[]> {
+  const result = await pool.query(
+    `SELECT * FROM decisions WHERE chat_id = $1 AND status = 'pending' ORDER BY decided_at DESC LIMIT $2`,
+    [chatId, limit]
+  );
+  return result.rows.map(mapDecision);
+}
+
+export async function listDecisionsByPerson(personIds: number[], limit = 10): Promise<Decision[]> {
+  if (personIds.length === 0) return [];
+  const result = await pool.query(
+    `SELECT * FROM decisions WHERE person_ids && $1 AND status = 'pending' ORDER BY decided_at DESC LIMIT $2`,
+    [personIds, limit]
+  );
+  return result.rows.map(mapDecision);
+}
+
+export async function updateDecisionStatus(id: number, status: string): Promise<void> {
+  await pool.query(
+    `UPDATE decisions SET status = $1, updated_at = NOW() WHERE id = $2`,
+    [status, id]
+  );
+}
+
+export async function snoozeDecisionReview(id: number, days = 30): Promise<void> {
+  await pool.query(
+    `UPDATE decisions SET review_at = NOW() + INTERVAL '1 day' * $1, updated_at = NOW() WHERE id = $2`,
+    [days, id]
+  );
+}
+
+export async function listDecisionsForReview(chatId: number): Promise<Decision[]> {
+  const result = await pool.query(
+    `SELECT * FROM decisions WHERE chat_id = $1 AND review_at <= NOW() AND status = 'pending' ORDER BY review_at`,
+    [chatId]
+  );
+  return result.rows.map(mapDecision);
+}
+
+// ── Pending Drafts (Ghostwriter) ──────────────────────────────────────
+
+export interface PendingDraft {
+  id: number;
+  topic: string;
+  contentType: string | null;
+  createdAt: string;
+}
+
+export async function listPendingDrafts(chatId?: number): Promise<PendingDraft[]> {
+  const params: unknown[] = [];
+  let chatFilter = "";
+  if (chatId) {
+    params.push(chatId);
+    chatFilter = `AND i.chat_id = $${params.length}`;
+  }
+
+  const result = await pool.query<{
+    id: number;
+    metadata: Record<string, unknown>;
+    created_at: string;
+  }>(
+    `SELECT i.id, i.metadata, i.created_at::TEXT
+     FROM inbox_items i
+     WHERE i.metadata->>'isAgentOutput' = 'true'
+       AND i.metadata->>'agentId' = 'ghostwriter'
+       AND i.status = 'open'
+       ${chatFilter}
+     ORDER BY i.created_at DESC
+     LIMIT 5`,
+    params
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    topic: (row.metadata?.agentTopic as string) ?? "sem titulo",
+    contentType: (row.metadata?.agentContentType as string) ?? null,
+    createdAt: row.created_at
+  }));
 }
 
 export async function closePool(): Promise<void> {

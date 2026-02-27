@@ -1,24 +1,48 @@
 import cron from "node-cron";
 import { env } from "../config/env.js";
 import {
+  CalendarEvent,
   decayUnusedMemories,
   escalateOverdueItems,
   expireStaleConversations,
+  getDueReminders,
+  getRecentlyEndedEvents,
+  getTodayEvents,
+  getUpcomingEvents,
   insertProactiveRun,
   listArchiveSuggestions,
+  listDecisionsByPerson,
+  listDecisionsForReview,
   listItemsByPerson,
   listOpenActionItems,
   listOverdueItems,
+  listPendingDrafts,
   listPeople,
   listProactiveChats,
   listStaleItems,
   loadDoneToday,
   loadLast24hSnapshot,
+  loadMemoriesForPerson,
   loadWeeklySummary,
-  Person
+  markPostPromptSent,
+  markPreBriefSent,
+  markReminderSent,
+  Person,
+  scheduleNextRecurrence
 } from "../db/schema.js";
-import { buildAfternoonMessage, buildDailyMessage, buildEveningMessage, buildMartaCrossTeamInsight, buildMartaPreOneOnOneAlert, buildWeeklyMessage } from "./reports.js";
-import { sendText } from "./telegram.js";
+import { syncCalendarEvents, isCalendarEnabled } from "./calendar.js";
+import {
+  buildAfternoonMessage,
+  buildDailyMessage,
+  buildEveningMessage,
+  buildMartaCrossTeamInsight,
+  buildMartaPreOneOnOneAlert,
+  buildPostMeetingPrompt,
+  buildPreMeetingBrief,
+  buildWeeklyMessage,
+  TeamStat
+} from "./reports.js";
+import { sendText, sendTextWithButtons } from "./telegram.js";
 import { log } from "../utils/logger.js";
 
 async function deliverDailyRun(chatIds: number[]): Promise<void> {
@@ -35,12 +59,29 @@ async function deliverDailyRun(chatIds: number[]): Promise<void> {
   const snapshot = await loadLast24hSnapshot();
   for (const chatId of chatIds) {
     try {
-      const [focusItems, overdueItems, staleItems] = await Promise.all([
+      // Load core data + enriched data in parallel
+      const calendarEnabled = isCalendarEnabled();
+      const [focusItems, overdueItems, staleItems, calendarEvents, people, pendingDrafts] = await Promise.all([
         listOpenActionItems(chatId, 8),
         listOverdueItems(chatId, 5),
-        listStaleItems(chatId, 3, 5)
+        listStaleItems(chatId, 3, 5),
+        calendarEnabled ? getTodayEvents(chatId) : Promise.resolve([] as CalendarEvent[]),
+        listPeople(true),
+        listPendingDrafts(chatId)
       ]);
-      const message = buildDailyMessage(snapshot, focusItems, overdueItems, staleItems);
+
+      // Build team stats for direct reports
+      const teamStats = await buildTeamStats(people, chatId, calendarEvents);
+
+      const message = buildDailyMessage(
+        snapshot,
+        focusItems,
+        overdueItems,
+        staleItems,
+        calendarEvents.length > 0 ? calendarEvents : undefined,
+        teamStats.length > 0 ? teamStats : undefined,
+        pendingDrafts.length > 0 ? pendingDrafts : undefined
+      );
       await sendText(chatId, message);
       await insertProactiveRun(chatId, message, "daily");
     } catch (error) {
@@ -48,6 +89,45 @@ async function deliverDailyRun(chatIds: number[]): Promise<void> {
     }
   }
   log.info("Daily proactive run delivered", { recipients: chatIds.length, snapshot });
+}
+
+async function buildTeamStats(
+  people: Person[],
+  _chatId: number,
+  todayEvents: CalendarEvent[]
+): Promise<TeamStat[]> {
+  const directReports = people.filter((p) => p.relationship === "direct_report");
+  if (directReports.length === 0) return [];
+
+  // Set of person IDs that have a 1:1 today
+  const oneOnOneTodayPersonIds = new Set(
+    todayEvents
+      .filter((e) => e.isOneOnOne && e.personId)
+      .map((e) => e.personId!)
+  );
+
+  const stats = await Promise.all(
+    directReports.map(async (person) => {
+      const openItems = await listItemsByPerson(person.name, ["open"]);
+      const overdueCount = openItems.filter(
+        (it) => it.dueAt && new Date(it.dueAt) < new Date()
+      ).length;
+
+      const daysSince = person.lastOneOnOne
+        ? Math.floor((Date.now() - new Date(person.lastOneOnOne).getTime()) / (1000 * 60 * 60 * 24))
+        : null;
+
+      return {
+        person,
+        openCount: openItems.length,
+        overdueCount,
+        daysSinceOneOnOne: daysSince,
+        hasOneOnOneToday: oneOnOneTodayPersonIds.has(person.id)
+      };
+    })
+  );
+
+  return stats;
 }
 
 async function deliverAfternoonRun(chatIds: number[]): Promise<void> {
@@ -246,6 +326,54 @@ export function startProactiveScheduler(): void {
     { timezone: env.TIMEZONE }
   );
 
+  // ── Calendar sync + pre/post meeting + reminders ────────────────────
+  // Runs every N minutes (configurable via CALENDAR_SYNC_INTERVAL_MIN, default: 5)
+  let _calendarCycleRunning = false;
+  const calendarInterval = env.CALENDAR_SYNC_INTERVAL_MIN;
+  cron.schedule(
+    `*/${calendarInterval} * * * *`,
+    async () => {
+      // Prevent overlapping cycles
+      if (_calendarCycleRunning) {
+        log.warn("calendar:cycle_skipped_overlap", { reason: "previous cycle still running" });
+        return;
+      }
+      _calendarCycleRunning = true;
+      try {
+        const chatIds = await listProactiveChats();
+        if (chatIds.length === 0) return;
+
+        // Calendar sync + pre/post meeting briefs
+        if (isCalendarEnabled()) {
+          for (const chatId of chatIds) {
+            try {
+              await syncCalendarEvents(chatId);
+              await deliverPreMeetingBriefs(chatId);
+              await deliverPostMeetingPrompts(chatId);
+            } catch (error) {
+              log.error("Calendar cycle failed for chat", { chatId, error });
+            }
+          }
+        }
+
+        // Reminder delivery
+        await deliverScheduledReminders();
+
+        // Decision review alerts (check once per cycle)
+        for (const chatId of chatIds) {
+          await deliverDecisionReviewAlerts(chatId).catch((error) => {
+            log.error("Decision review alert failed", { chatId, error });
+          });
+        }
+      } catch (error) {
+        log.error("Calendar/reminder cycle failed", { error });
+      } finally {
+        _calendarCycleRunning = false;
+      }
+    },
+    { timezone: env.TIMEZONE }
+  );
+
   log.info("Proactive scheduler started", {
     timezone: env.TIMEZONE,
     morning: { hour: env.PROACTIVE_HOUR, minute: env.PROACTIVE_MINUTE },
@@ -253,7 +381,8 @@ export function startProactiveScheduler(): void {
     evening: { hour: eveningHour, minute: 0 },
     weekly: { day: env.WEEKLY_REPORT_DAY, hour: env.WEEKLY_REPORT_HOUR, minute: env.WEEKLY_REPORT_MINUTE },
     martaPreOneOnOne: { days: "Mon/Wed/Fri", hour: preOneOnOneHour, minute: preOneOnOneMinute },
-    martaInsights: { day: env.WEEKLY_REPORT_DAY, hour: insightHour }
+    martaInsights: { day: env.WEEKLY_REPORT_DAY, hour: insightHour },
+    calendarSync: { intervalMinutes: calendarInterval, enabled: isCalendarEnabled() }
   });
 }
 
@@ -359,4 +488,135 @@ async function deliverMartaCrossTeamInsight(chatIds: number[]): Promise<void> {
     }
   }
   log.info("Marta cross-team insight delivered", { recipients: chatIds.length, insightsCount: insights.length });
+}
+
+// ── Calendar-driven proactive delivery ───────────────────────────────
+
+async function deliverPreMeetingBriefs(chatId: number): Promise<void> {
+  const preMeetingMinutes = env.PRE_MEETING_MINUTES;
+  const events = await getUpcomingEvents(chatId, preMeetingMinutes);
+  const unsentEvents = events.filter((e) => !e.preBriefSent);
+
+  if (unsentEvents.length === 0) return;
+
+  const people = await listPeople(true);
+
+  for (const event of unsentEvents) {
+    try {
+      const person = event.personId ? people.find((p) => p.id === event.personId) : undefined;
+      const minutesUntil = Math.max(0, Math.round((new Date(event.startAt).getTime() - Date.now()) / 60000));
+
+      // For 1:1s with known person, build a rich brief
+      if (person) {
+        const [openItems, memories, pendingDecisions] = await Promise.all([
+          listItemsByPerson(person.name, ["open"]),
+          loadMemoriesForPerson(person.id, 5),
+          listDecisionsByPerson([person.id], 5)
+        ]);
+
+        const message = buildPreMeetingBrief({
+          event,
+          person,
+          openItems,
+          memories,
+          pendingDecisions,
+          minutesUntil
+        });
+        await sendText(chatId, message);
+      } else {
+        // Generic meeting reminder
+        const attendeeNames = event.attendees.map((a) => a.name || a.email).filter(Boolean).join(", ");
+        const msg = `📅 Em ~${minutesUntil}min: ${event.title}${attendeeNames ? `\nParticipantes: ${attendeeNames}` : ""}`;
+        await sendText(chatId, msg);
+      }
+
+      await markPreBriefSent(event.id);
+      await insertProactiveRun(chatId, `pre-brief: ${event.title}`, "daily");
+      log.info("calendar:pre_brief_sent", { chatId, eventId: event.id, title: event.title });
+    } catch (error) {
+      log.error("calendar:pre_brief_failed", { chatId, eventId: event.id, error });
+    }
+  }
+}
+
+async function deliverPostMeetingPrompts(chatId: number): Promise<void> {
+  const postMeetingMinutes = env.POST_MEETING_MINUTES;
+  const events = await getRecentlyEndedEvents(chatId, postMeetingMinutes);
+  const unsentEvents = events.filter((e) => !e.postPromptSent && !e.notesCaptured);
+
+  if (unsentEvents.length === 0) return;
+
+  const people = await listPeople(true);
+
+  for (const event of unsentEvents) {
+    try {
+      const person = event.personId ? people.find((p) => p.id === event.personId) : undefined;
+      const message = buildPostMeetingPrompt({ event, person });
+      await sendText(chatId, message);
+      await markPostPromptSent(event.id);
+      await insertProactiveRun(chatId, `post-meeting: ${event.title}`, "daily");
+      log.info("calendar:post_prompt_sent", { chatId, eventId: event.id, title: event.title });
+    } catch (error) {
+      log.error("calendar:post_prompt_failed", { chatId, eventId: event.id, error });
+    }
+  }
+}
+
+// ── Reminder delivery ────────────────────────────────────────────────
+
+async function deliverScheduledReminders(): Promise<void> {
+  const dueReminders = await getDueReminders();
+  if (dueReminders.length === 0) return;
+
+  for (const reminder of dueReminders) {
+    try {
+      await sendText(reminder.chatId, `🔔 Lembrete: ${reminder.text}`);
+      await markReminderSent(reminder.id);
+
+      // Schedule next occurrence if recurring
+      if (reminder.recurrence) {
+        const nextId = await scheduleNextRecurrence(reminder.id);
+        if (nextId) {
+          log.info("reminder:next_scheduled", { currentId: reminder.id, nextId, recurrence: reminder.recurrence });
+        }
+      }
+
+      log.info("reminder:delivered", { id: reminder.id, chatId: reminder.chatId, text: reminder.text });
+    } catch (error) {
+      log.error("reminder:delivery_failed", { id: reminder.id, error });
+    }
+  }
+}
+
+// ── Decision review alerts ───────────────────────────────────────────
+
+async function deliverDecisionReviewAlerts(chatId: number): Promise<void> {
+  const decisions = await listDecisionsForReview(chatId);
+  if (decisions.length === 0) return;
+
+  const people = await listPeople(true);
+
+  for (const decision of decisions) {
+    try {
+      const personNames = decision.personIds
+        .map((pid) => people.find((p) => p.id === pid)?.name)
+        .filter(Boolean)
+        .join(", ");
+
+      const age = Math.floor((Date.now() - new Date(decision.decidedAt).getTime()) / (1000 * 60 * 60 * 24));
+      const msg = `📋 Decisao para revisao:\n\n"${decision.summary}"\n\nTomada ha ${age} dias${personNames ? ` com ${personNames}` : ""}.\nJa foi implementada?`;
+
+      await sendTextWithButtons(chatId, msg, [
+        [
+          { text: "✅ Implementada", callback_data: `decision_implemented:${decision.id}` },
+          { text: "⏰ Adiar 30d", callback_data: `decision_snooze:${decision.id}` },
+          { text: "❌ Supersedida", callback_data: `decision_superseded:${decision.id}` }
+        ]
+      ]);
+
+      log.info("decision:review_alert_sent", { chatId, decisionId: decision.id });
+    } catch (error) {
+      log.error("decision:review_alert_failed", { chatId, decisionId: decision.id, error });
+    }
+  }
 }

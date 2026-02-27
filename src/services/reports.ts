@@ -1,4 +1,4 @@
-import { OpenActionItem, Person } from "../db/schema.js";
+import { CalendarEvent, CosMemory, Decision, OpenActionItem, PendingDraft, Person } from "../db/schema.js";
 
 function actionLabel(item: OpenActionItem): string {
   const title = item.actionTitle || item.summaryPtBr;
@@ -8,7 +8,9 @@ function actionLabel(item: OpenActionItem): string {
 }
 
 function daysAgo(dateStr: string): number {
-  const diff = Date.now() - new Date(dateStr).getTime();
+  const time = new Date(dateStr).getTime();
+  if (isNaN(time)) return 0;
+  const diff = Date.now() - time;
   return Math.floor(diff / (1000 * 60 * 60 * 24));
 }
 
@@ -29,18 +31,59 @@ export function buildOpenActionsMessage(items: OpenActionItem[]): string {
   ].join("\n");
 }
 
+export interface TeamStat {
+  person: Person;
+  openCount: number;
+  overdueCount: number;
+  daysSinceOneOnOne: number | null;
+  hasOneOnOneToday: boolean;
+}
+
 export function buildDailyMessage(
   snapshot: { items: number; projects: number; categoriesUsed: number },
   focusItems: OpenActionItem[],
   overdueItems?: OpenActionItem[],
-  staleItems?: OpenActionItem[]
+  staleItems?: OpenActionItem[],
+  calendarEvents?: CalendarEvent[],
+  teamStats?: TeamStat[],
+  pendingDrafts?: PendingDraft[]
 ): string {
+  // Header with day of week
+  const dayNames = ["domingo", "segunda", "terca", "quarta", "quinta", "sexta", "sabado"];
+  const now = new Date();
+  const dayName = dayNames[now.getDay()];
+  const dateStr = `${now.getDate().toString().padStart(2, "0")}/${(now.getMonth() + 1).toString().padStart(2, "0")}`;
+
   const lines: string[] = [
-    "Bom dia! Seu Second Brain organizou o dia:"
+    `Bom dia! Aqui seu briefing de hoje (${dayName}, ${dateStr}):`
   ];
 
   if (snapshot.items > 0) {
     lines.push(`(${snapshot.items} novos itens capturados ontem)`);
+  }
+
+  // --- AGENDA (calendar events) ---
+  if (calendarEvents && calendarEvents.length > 0) {
+    lines.push("");
+    lines.push("📅 AGENDA");
+    for (const event of calendarEvents) {
+      const startTime = new Date(event.startAt).toLocaleTimeString("pt-BR", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+      });
+      const attendeeCount = event.attendees.length;
+      let eventLine = `${startTime} — ${event.title}`;
+
+      if (event.isOneOnOne && event.personId) {
+        // Will show person name in the event title if available
+        const briefTag = event.preBriefSent ? " [Brief preparado ✓]" : "";
+        eventLine += briefTag;
+      } else if (attendeeCount > 0) {
+        eventLine += ` [${attendeeCount} participante${attendeeCount > 1 ? "s" : ""}]`;
+      }
+      lines.push(`- ${eventLine}`);
+    }
   }
 
   // --- URGENTE & IMPORTANTE: overdue + high priority due today ---
@@ -51,7 +94,7 @@ export function buildDailyMessage(
 
   if (urgentImportant.length > 0) {
     lines.push("");
-    lines.push("URGENTE & IMPORTANTE:");
+    lines.push("⚡ URGENTE & IMPORTANTE:");
     for (const item of urgentImportant.slice(0, 5)) {
       const overdueDays = item.dueAt ? daysAgo(item.dueAt) : 0;
       const overdueTag = overdueDays > 0 ? ` (${overdueDays}d atrasado!)` : "";
@@ -71,7 +114,7 @@ export function buildDailyMessage(
 
   if (important.length > 0) {
     lines.push("");
-    lines.push("IMPORTANTE (pra essa semana):");
+    lines.push("📋 IMPORTANTE (pra essa semana):");
     for (const item of important.slice(0, 4)) {
       lines.push(`- #${item.id} ${item.actionTitle || item.summaryPtBr}`);
       if (item.nextStep) {
@@ -84,21 +127,60 @@ export function buildDailyMessage(
   const waiting = focusItems.filter((i) => isFollowUp(i) && !urgentIds.has(i.id));
   if (waiting.length > 0) {
     lines.push("");
-    lines.push("AGUARDANDO RESPOSTA:");
+    lines.push("⏳ AGUARDANDO RESPOSTA:");
     for (const item of waiting.slice(0, 3)) {
       const who = item.followUpWith || "pendente";
       lines.push(`- #${item.id} ${item.actionTitle || item.summaryPtBr} (cobrar: ${who})`);
     }
   }
 
+  // --- EQUIPE (team stats) ---
+  if (teamStats && teamStats.length > 0) {
+    lines.push("");
+    lines.push("👥 EQUIPE");
+    for (const stat of teamStats) {
+      const parts: string[] = [];
+      parts.push(`${stat.openCount} aberto${stat.openCount !== 1 ? "s" : ""}`);
+      if (stat.overdueCount > 0) {
+        parts.push(`${stat.overdueCount} atrasado${stat.overdueCount !== 1 ? "s" : ""}`);
+      } else {
+        parts.push("0 atrasados");
+      }
+
+      let oneOnOneInfo: string;
+      if (stat.hasOneOnOneToday) {
+        oneOnOneInfo = "1:1 hoje";
+      } else if (stat.daysSinceOneOnOne === null) {
+        oneOnOneInfo = "sem 1:1 registrado";
+      } else if (stat.daysSinceOneOnOne > 14) {
+        oneOnOneInfo = `ultimo 1:1: ${stat.daysSinceOneOnOne}d ⚠️`;
+      } else {
+        oneOnOneInfo = `ultimo 1:1: ${stat.daysSinceOneOnOne}d`;
+      }
+
+      const roleSuffix = stat.person.role ? ` (${stat.person.role})` : "";
+      lines.push(`- ${stat.person.name}${roleSuffix}: ${parts.join(", ")} | ${oneOnOneInfo}`);
+    }
+  }
+
   // --- PARADOS: stale items ---
   if (staleItems && staleItems.length > 0) {
     lines.push("");
-    lines.push("PARADOS (preciso de um update seu):");
+    lines.push("🔴 PARADOS (preciso de um update seu):");
     for (const item of staleItems.slice(0, 3)) {
       const days = daysAgo(item.createdAt);
       lines.push(`- #${item.id} ${item.actionTitle || item.summaryPtBr} (${days}d parado)`);
       lines.push(`  Ja resolveu? /done ${item.id}`);
+    }
+  }
+
+  // --- CONTENT (pending drafts from Ghostwriter) ---
+  if (pendingDrafts && pendingDrafts.length > 0) {
+    lines.push("");
+    lines.push("📝 CONTENT (Jarbas)");
+    for (const draft of pendingDrafts) {
+      const typeLabel = draft.contentType === "article" ? "Artigo" : "Post";
+      lines.push(`- ${typeLabel} pronto: "${draft.topic}" — revisar?`);
     }
   }
 
@@ -255,4 +337,80 @@ export function buildMartaCrossTeamInsight(
 
 export function buildMartaStrategicNudge(nudge: string): string {
   return `Marta aqui — reflexao quinzenal:\n\n${nudge}\n\nPara uma analise mais profunda: "Marta reflexao"`;
+}
+
+// ── Calendar-driven proactive messages ───────────────────────────────
+
+export function buildPreMeetingBrief(params: {
+  event: CalendarEvent;
+  person?: Person;
+  openItems: OpenActionItem[];
+  memories: CosMemory[];
+  pendingDecisions: Decision[];
+  lastNotes?: string | null;
+  minutesUntil: number;
+}): string {
+  const lines: string[] = [];
+  const timeLabel = params.minutesUntil <= 5 ? "Em poucos minutos" : `Em ~${params.minutesUntil}min`;
+
+  if (params.person) {
+    lines.push(`📅 ${timeLabel}: 1:1 com ${params.person.name}${params.person.role ? ` (${params.person.role})` : ""}`);
+  } else {
+    const attendeeNames = params.event.attendees.map((a) => a.name || a.email).join(", ");
+    lines.push(`📅 ${timeLabel}: ${params.event.title}${attendeeNames ? ` [${attendeeNames}]` : ""}`);
+  }
+
+  // Suggested agenda from open items
+  if (params.openItems.length > 0) {
+    lines.push("");
+    lines.push("📋 Pauta sugerida:");
+    for (const item of params.openItems.slice(0, 5)) {
+      const overdueTag = item.dueAt && new Date(item.dueAt) < new Date()
+        ? ` — ${daysAgo(item.dueAt)}d atrasado`
+        : item.dueAt ? ` — prazo: ${item.dueAt}` : "";
+      lines.push(`• #${item.id} ${item.actionTitle || item.summaryPtBr}${overdueTag}`);
+    }
+  }
+
+  // Pending decisions
+  if (params.pendingDecisions.length > 0) {
+    lines.push("");
+    lines.push("📋 Decisoes pendentes:");
+    for (const d of params.pendingDecisions.slice(0, 3)) {
+      const age = daysAgo(d.decidedAt);
+      lines.push(`• ${d.summary} (ha ${age} dias)`);
+    }
+  }
+
+  // Person context from memories
+  if (params.memories.length > 0 && params.person) {
+    lines.push("");
+    lines.push("💡 Contexto:");
+    for (const mem of params.memories.slice(0, 3)) {
+      lines.push(`• ${mem.content}`);
+    }
+  }
+
+  // Last 1:1 info
+  if (params.person?.lastOneOnOne) {
+    const days = daysAgo(params.person.lastOneOnOne);
+    lines.push(`\nUltimo 1:1: ${days} dia${days !== 1 ? "s" : ""} atras`);
+  }
+
+  lines.push("");
+  if (params.person) {
+    lines.push(`Briefing completo? \"Marta briefing ${params.person.name}\"`);
+  }
+
+  return lines.join("\n");
+}
+
+export function buildPostMeetingPrompt(params: {
+  event: CalendarEvent;
+  person?: Person;
+}): string {
+  if (params.person) {
+    return `Acabou a reuniao com ${params.person.name}${params.person.role ? ` (${params.person.role})` : ""}. Quer me passar as notas?\n\nPode mandar texto, audio ou PDF que eu processo e extraio os action items.`;
+  }
+  return `Acabou: ${params.event.title}. Alguma nota ou decisao para registrar?\n\nPode mandar texto, audio ou PDF.`;
 }

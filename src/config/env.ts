@@ -22,7 +22,15 @@ const envSchema = z.object({
   WEEKLY_REPORT_DAY: z.coerce.number().int().min(0).max(6).default(1),
   WEEKLY_REPORT_HOUR: z.coerce.number().int().min(0).max(23).default(8),
   WEEKLY_REPORT_MINUTE: z.coerce.number().int().min(0).max(59).default(30),
-  STORAGE_ROOT: z.string().default("./storage/SecondBrain")
+  STORAGE_ROOT: z.string().default("./storage/SecondBrain"),
+
+  // Google Calendar integration
+  GOOGLE_CLIENT_ID: z.string().min(1).optional(),
+  GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
+  GOOGLE_REFRESH_TOKEN: z.string().min(1).optional(),
+  CALENDAR_SYNC_INTERVAL_MIN: z.coerce.number().int().min(1).max(60).default(5),
+  PRE_MEETING_MINUTES: z.coerce.number().int().min(5).max(60).default(15),
+  POST_MEETING_MINUTES: z.coerce.number().int().min(5).max(30).default(10)
 });
 
 const parsed = envSchema.safeParse(process.env);
