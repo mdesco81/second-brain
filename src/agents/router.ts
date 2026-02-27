@@ -1,6 +1,6 @@
 import path from "node:path";
 import { callClaude, describeImage } from "../services/openai.js";
-import { getFileBuffer, sendText } from "../services/telegram.js";
+import { getFileBuffer, sendText, sendTypingIndicator } from "../services/telegram.js";
 import { log } from "../utils/logger.js";
 import { getAgent, listAgents } from "./registry.js";
 import { AgentIntent, AgentRequest } from "./types.js";
@@ -113,6 +113,7 @@ export async function routeToAgent(
     return;
   }
 
+  await sendTypingIndicator(chatId);
   await sendText(chatId, "Entendido! Analisando seu pedido...");
 
   const intent = await classifyAgentIntent(strippedText);

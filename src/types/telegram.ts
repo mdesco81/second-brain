@@ -40,7 +40,15 @@ export interface TelegramMessage {
   photo?: TelegramPhotoSize[];
 }
 
+export interface TelegramCallbackQuery {
+  id: string;
+  from: { id: number; is_bot?: boolean; username?: string };
+  message?: TelegramMessage;
+  data?: string;
+}
+
 export interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
 }

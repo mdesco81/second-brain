@@ -1,7 +1,7 @@
 import { registerAgent } from "../registry.js";
 import { AgentRequest, AgentResult } from "../types.js";
 import { saveAgentOutput, saveResearchContext, trackAgentOutput } from "../base.js";
-import { sendText } from "../../services/telegram.js";
+import { sendText, sendTextWithButtons, sendTypingIndicator } from "../../services/telegram.js";
 import { callClaude } from "../../services/openai.js";
 import { log } from "../../utils/logger.js";
 import {
@@ -47,6 +47,7 @@ async function handleGhostwriter(
     ]);
 
   // 2. Research phase
+  await sendTypingIndicator(chatId);
   await sendText(
     chatId,
     `Pesquisando sobre "${topic}"...`
@@ -117,6 +118,7 @@ async function handleGhostwriter(
     .join("\n\n") || undefined;
 
   // 3. Writing phase
+  await sendTypingIndicator(chatId);
   await sendText(
     chatId,
     `Escrevendo ${contentType === "article" ? "artigo" : "post"}...`
@@ -332,16 +334,30 @@ async function handleGhostwriter(
     ? `\n\nFontes consultadas: ${research.citations.length}`
     : "";
 
+  // 8. Send draft + feedback buttons to user
+  const summaryMsg = [
+    `${typeLabel} sobre "${topic}" pronto!`,
+    `Salvo no dashboard para revisao.${sourcesNote}`
+  ].join("\n");
+
+  if (itemId) {
+    await sendTextWithButtons(chatId, summaryMsg, [
+      [
+        { text: "✅ Aprovar", callback_data: `jarbas_approve:${itemId}` },
+        { text: "✏️ Editar", callback_data: `jarbas_edit:${itemId}` },
+        { text: "❌ Rejeitar", callback_data: `jarbas_reject:${itemId}` }
+      ]
+    ]);
+  } else {
+    await sendText(chatId, summaryMsg);
+  }
+
   return {
     success: true,
     agentId: "ghostwriter",
     outputPath,
     itemId,
-    summary: [
-      `${typeLabel} sobre "${topic}" pronto!`,
-      `Salvo no dashboard para revisao.`,
-      `Voce pode baixar o arquivo, editar e subir a versao final para que eu aprenda seu estilo.${sourcesNote}`
-    ].join("\n")
+    summary: summaryMsg
   };
 }
 

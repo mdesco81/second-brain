@@ -1,5 +1,6 @@
 import { getUpdates } from "./telegram.js";
 import { processTelegramMessage } from "./intake.js";
+import { handleCallbackQuery } from "./callbacks.js";
 import { log } from "../utils/logger.js";
 
 let running = false;
@@ -18,7 +19,9 @@ export async function startPollingLoop(): Promise<void> {
       const updates = await getUpdates(offset);
       for (const update of updates) {
         offset = update.update_id + 1;
-        if (update.message) {
+        if (update.callback_query) {
+          await handleCallbackQuery(update.callback_query);
+        } else if (update.message) {
           await processTelegramMessage(update.message);
         }
       }

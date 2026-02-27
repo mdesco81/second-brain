@@ -14,7 +14,7 @@ import {
   callClaude
 } from "./openai.js";
 import { addDaysLocal } from "../utils/dates.js";
-import { getFileBuffer, sendText } from "./telegram.js";
+import { getFileBuffer, sendText, sendTextWithButtons, sendTypingIndicator } from "./telegram.js";
 import { TelegramMessage } from "../types/telegram.js";
 import {
   ContinuationContextItem,
@@ -999,7 +999,18 @@ async function handleTextCommand(chatId: number, text: string): Promise<boolean>
 
   if (normalized === "/prioridades") {
     const items = await listOpenActionItems(chatId, 12);
-    await sendText(chatId, buildOpenActionsMessage(items));
+    const msg = buildOpenActionsMessage(items);
+    // Add quick-action buttons for top 3 items
+    const topItems = items.filter((i) => i.action !== "NONE").slice(0, 3);
+    if (topItems.length > 0) {
+      const buttons = topItems.map((item) => [
+        { text: `✅ #${item.id}`, callback_data: `done:${item.id}` },
+        { text: `⏰ #${item.id}`, callback_data: `snooze:${item.id}` }
+      ]);
+      await sendTextWithButtons(chatId, msg, buttons);
+    } else {
+      await sendText(chatId, msg);
+    }
     return true;
   }
 
@@ -1427,6 +1438,9 @@ async function processTelegramMessageInner(
   const audioDuration = typeof extracted.metadata.audioDurationSeconds === "number"
     ? extracted.metadata.audioDurationSeconds
     : undefined;
+
+  // Show typing indicator before the long AI classification call
+  await sendTypingIndicator(chatId);
 
   // For PDFs, send the full extracted text to the AI for classification
   const textForAI = extracted.pdfExtractedText

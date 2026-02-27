@@ -1,7 +1,7 @@
 import { registerAgent } from "../registry.js";
 import { AgentRequest, AgentResult } from "../types.js";
 import { callClaude } from "../../services/openai.js";
-import { sendText } from "../../services/telegram.js";
+import { sendText, sendTextWithButtons, sendTypingIndicator } from "../../services/telegram.js";
 import { log } from "../../utils/logger.js";
 import {
   appendConversationMessage,
@@ -395,6 +395,7 @@ async function handleBriefing(
     }
   }
 
+  await sendTypingIndicator(chatId);
   await sendText(chatId, `Preparando briefing do 1:1 com ${intent.person}...`);
 
   const people = await getPeopleList(chatId);
@@ -502,6 +503,7 @@ async function handleNotas(
     }
   }
 
+  await sendTypingIndicator(chatId);
   await sendText(chatId, `Processando notas do 1:1 com ${intent.person}...`);
 
   const people = await getPeopleList(chatId);
@@ -632,6 +634,7 @@ async function handleStatus(
   _messageId: number,
   _rawRequest: string
 ): Promise<AgentResult> {
+  await sendTypingIndicator(chatId);
   await sendText(chatId, "Levantando o panorama da equipe...");
 
   const peopleWithItems = await listPeopleWithItems();
@@ -728,6 +731,7 @@ async function handleEmail(
     return { success: true, agentId: "chiefofstaff", summary: "Aguardando tema do email." };
   }
 
+  await sendTypingIndicator(chatId);
   await sendText(chatId, `Preparando draft de email para ${intent.person}...`);
 
   const people = await getPeopleList(chatId);
@@ -838,6 +842,7 @@ async function handleReflexao(
   _messageId: number,
   _rawRequest: string
 ): Promise<AgentResult> {
+  await sendTypingIndicator(chatId);
   await sendText(chatId, "Fazendo uma analise estrategica das ultimas semanas...");
 
   const [people, allItems, memories, summary] = await Promise.all([
@@ -913,6 +918,7 @@ async function handleConversaGeral(
   _messageId: number,
   rawRequest: string
 ): Promise<AgentResult> {
+  await sendTypingIndicator(chatId);
   const memories = await loadAllRelevantMemories({ limit: 10 });
 
   const { system, user } = buildConversationalPrompt({
