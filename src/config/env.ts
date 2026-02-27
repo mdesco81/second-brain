@@ -24,10 +24,10 @@ const envSchema = z.object({
   WEEKLY_REPORT_MINUTE: z.coerce.number().int().min(0).max(59).default(30),
   STORAGE_ROOT: z.string().default("./storage/SecondBrain"),
 
-  // Google Calendar integration
-  GOOGLE_CLIENT_ID: z.string().min(1).optional(),
-  GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
-  GOOGLE_REFRESH_TOKEN: z.string().min(1).optional(),
+  // Google Calendar integration (empty string → undefined so calendar is simply disabled)
+  GOOGLE_CLIENT_ID: z.preprocess((v) => v === "" ? undefined : v, z.string().min(1).optional()),
+  GOOGLE_CLIENT_SECRET: z.preprocess((v) => v === "" ? undefined : v, z.string().min(1).optional()),
+  GOOGLE_REFRESH_TOKEN: z.preprocess((v) => v === "" ? undefined : v, z.string().min(1).optional()),
   CALENDAR_SYNC_INTERVAL_MIN: z.coerce.number().int().min(1).max(60).default(5),
   PRE_MEETING_MINUTES: z.coerce.number().int().min(5).max(60).default(15),
   POST_MEETING_MINUTES: z.coerce.number().int().min(5).max(30).default(10)
