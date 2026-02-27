@@ -9,7 +9,7 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
 COPY tsconfig.json ./
 COPY src ./src
-RUN npm run build
+RUN NODE_OPTIONS=--max-old-space-size=512 npm run build
 
 FROM node:22-alpine AS runtime
 WORKDIR /app

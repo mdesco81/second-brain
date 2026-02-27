@@ -1,4 +1,4 @@
-import { google, calendar_v3 } from "googleapis";
+import { calendar, calendar_v3 } from "@googleapis/calendar";
 import { OAuth2Client } from "google-auth-library";
 import { env } from "../config/env.js";
 import {
@@ -34,7 +34,7 @@ function getOAuth2Client(): OAuth2Client {
     throw new Error("Google Calendar credentials not configured");
   }
 
-  _oauth2Client = new google.auth.OAuth2(
+  _oauth2Client = new OAuth2Client(
     env.GOOGLE_CLIENT_ID,
     env.GOOGLE_CLIENT_SECRET
   );
@@ -51,7 +51,7 @@ function getOAuth2Client(): OAuth2Client {
  */
 function getCalendarClient(): calendar_v3.Calendar {
   if (_calendarClient) return _calendarClient;
-  _calendarClient = google.calendar({ version: "v3", auth: getOAuth2Client() });
+  _calendarClient = calendar({ version: "v3", auth: getOAuth2Client() });
   return _calendarClient;
 }
 
@@ -77,7 +77,7 @@ export async function syncCalendarEvents(chatId: number, _isRetry = false): Prom
     return { created: 0, updated: 0, deleted: 0 };
   }
 
-  const calendar = getCalendarClient();
+  const calClient = getCalendarClient();
   const syncToken = await getCalendarSyncToken(chatId);
   const people = await listPeople(true);
 
@@ -116,7 +116,7 @@ export async function syncCalendarEvents(chatId: number, _isRetry = false): Prom
         params.pageToken = pageToken;
       }
 
-      const response = await calendar.events.list(params);
+      const response = await calClient.events.list(params);
       const items = response.data.items ?? [];
 
       for (const event of items) {

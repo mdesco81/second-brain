@@ -11,10 +11,11 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
+    "@googleapis/calendar": "^14.2.0",
     "dotenv": "^17.2.2",
     "express": "^4.21.2",
     "file-type": "^21.3.0",
-    "googleapis": "^171.4.0",
+    "google-auth-library": "^10.6.1",
     "node-cron": "^4.2.1",
     "openai": "^4.104.0",
     "pdf-parse": "^1.1.1",
