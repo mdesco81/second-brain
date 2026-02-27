@@ -12,6 +12,7 @@ export interface AgentRequest {
   rawRequest: string;
   intent: AgentIntent;
   timestamp: Date;
+  mediaContent?: string;  // Extracted content from PDF/image attachments
 }
 
 export interface AgentResult {

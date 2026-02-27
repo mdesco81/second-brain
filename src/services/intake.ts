@@ -40,7 +40,9 @@ import {
   upsertItemEmbedding,
   upsertCategory,
   upsertChatSubscription,
-  insertItemAttachment
+  insertItemAttachment,
+  getActiveCosConversation,
+  completeCosConversation
 } from "../db/schema.js";
 import { buildOpenActionsMessage, buildWeeklyMessage } from "./reports.js";
 import { appendProjectStatus, storeIncomingMedia, writeActionBoard, writeKnowledgeNote } from "./storage.js";
@@ -64,6 +66,38 @@ interface ExtractedContent {
 const AUDIO_EXTENSIONS = new Set([".mp3", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".aac", ".flac", ".webm"]);
 
 const URL_REGEX = /https?:\/\/[^\s<>"')\]]+/gi;
+
+// ── In-memory dedup cache ─────────────────────────────────────────────
+// Covers ALL routes (Marta, Jarbas, Second Brain) — unlike the DB-based
+// isDuplicateMessage which only checks inbox_items.
+// Key: "chatId:messageId", auto-expires after 10 minutes.
+const processedMessages = new Map<string, number>();
+const DEDUP_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+function markMessageProcessed(chatId: number, messageId: number): void {
+  if (messageId <= 0) return;
+  const key = `${chatId}:${messageId}`;
+  processedMessages.set(key, Date.now());
+  // Lazy cleanup: prune expired entries when cache grows large
+  if (processedMessages.size > 500) {
+    const now = Date.now();
+    for (const [k, ts] of processedMessages) {
+      if (now - ts > DEDUP_TTL_MS) processedMessages.delete(k);
+    }
+  }
+}
+
+function isMessageAlreadyProcessed(chatId: number, messageId: number): boolean {
+  if (messageId <= 0) return false;
+  const key = `${chatId}:${messageId}`;
+  const ts = processedMessages.get(key);
+  if (ts === undefined) return false;
+  if (Date.now() - ts > DEDUP_TTL_MS) {
+    processedMessages.delete(key);
+    return false;
+  }
+  return true;
+}
 
 function extractUrls(text: string): string[] {
   return text.match(URL_REGEX) || [];
@@ -920,6 +954,27 @@ function parseBuscaCommand(text: string): string | null {
 async function handleTextCommand(chatId: number, text: string): Promise<boolean> {
   const normalized = text.trim();
 
+  // Cancel active Marta conversation
+  if (normalized === "/cancelar") {
+    const activeConv = await getActiveCosConversation(chatId);
+    const pendingDecision = await getPendingDecision(chatId, "relation");
+    if (activeConv) {
+      await completeCosConversation(activeConv.id);
+    }
+    if (pendingDecision) {
+      await resolvePendingDecision(pendingDecision.id);
+    }
+    if (activeConv || pendingDecision) {
+      const parts: string[] = [];
+      if (activeConv) parts.push("conversa ativa");
+      if (pendingDecision) parts.push("decisao pendente");
+      await sendText(chatId, `Cancelado: ${parts.join(" e ")}. Pode enviar normalmente.`);
+    } else {
+      await sendText(chatId, "Nenhuma conversa ativa ou decisao pendente para cancelar.");
+    }
+    return true;
+  }
+
   if (normalized === "/start" || normalized === "/help") {
     await sendText(
       chatId,
@@ -935,7 +990,8 @@ async function handleTextCommand(chatId: number, text: string): Promise<boolean>
         "  campos: titulo, prioridade, prazo, proximo, responsavel",
         "- /busca <termo> -> busca nos seus items",
         "- /owner <id> Nome -> define dono/responsavel do card",
-        "- /weekly -> gera resumo semanal agora"
+        "- /weekly -> gera resumo semanal agora",
+        "- /cancelar -> cancela conversa ativa com Marta"
       ].join("\n")
     );
     return true;
@@ -1101,13 +1157,30 @@ async function tryResolvePendingRelation(chatId: number, message: TelegramMessag
     return false;
   }
 
+  // If there's an active agent conversation (Marta/Jarbas), ALWAYS yield to it.
+  // The pending decision will still be there when the conversation finishes.
+  // This prevents answers like "1" or "João" from being misinterpreted as
+  // relation decision answers when they are intended for the active conversation.
+  const activeConv = await getActiveCosConversation(chatId);
+  if (activeConv) {
+    log.info("pending_relation:yielding_to_active_conversation", { chatId, convId: activeConv.id, intent: activeConv.intent });
+    return false;
+  }
+
   const answer = parseRelationDecisionAnswer(text);
   if (!answer) {
-    await sendText(
-      chatId,
-      "Ainda estou aguardando sua confirmacao de relacao.\nResponda: `complemento` (ou `complemento #id`) ou `novo`."
-    );
-    return true;
+    // If the message is short (likely meant for the pending decision), remind the user.
+    // If it's a longer message (likely a new topic), let it fall through to normal processing.
+    const wordCount = text.split(/\s+/).length;
+    if (wordCount <= 5) {
+      await sendText(
+        chatId,
+        "Ainda estou aguardando sua confirmacao de relacao.\nResponda: `complemento` (ou `complemento #id`) ou `novo`.\nOu use /cancelar para cancelar."
+      );
+      return true;
+    }
+    // Longer message — let it fall through to normal processing pipeline
+    return false;
   }
 
   const payload = pending.payload as unknown as Partial<PendingRelationPayload>;
@@ -1128,10 +1201,29 @@ async function tryResolvePendingRelation(chatId: number, message: TelegramMessag
   return true;
 }
 
+// ── Per-chat message serialization ───────────────────────────────────
+// Ensures only one message is processed at a time per chat, preventing
+// race conditions with conversation state (e.g. two messages both trying
+// to handle a Marta follow-up simultaneously).
+const chatLocks = new Map<number, Promise<void>>();
+
+function withChatLock(chatId: number, fn: () => Promise<void>): Promise<void> {
+  const previous = chatLocks.get(chatId) ?? Promise.resolve();
+  const current = previous.then(fn, fn); // Run after previous completes (even on error)
+  chatLocks.set(chatId, current);
+  // Cleanup: remove the lock entry once done so the map doesn't grow unbounded
+  current.finally(() => {
+    if (chatLocks.get(chatId) === current) {
+      chatLocks.delete(chatId);
+    }
+  });
+  return current;
+}
+
 // ── In-flight tracking for graceful shutdown ─────────────────────────
 
 let inflightCount = 0;
-let inflightResolve: (() => void) | null = null;
+const inflightResolvers: Array<() => void> = [];
 
 export function getInflightCount(): number {
   return inflightCount;
@@ -1142,9 +1234,10 @@ export function waitForInflight(timeoutMs = 30_000): Promise<void> {
     return Promise.resolve();
   }
   return new Promise<void>((resolve) => {
-    inflightResolve = resolve;
+    inflightResolvers.push(resolve);
     setTimeout(() => {
-      inflightResolve = null;
+      const idx = inflightResolvers.indexOf(resolve);
+      if (idx >= 0) inflightResolvers.splice(idx, 1);
       resolve();
     }, timeoutMs);
   });
@@ -1152,9 +1245,10 @@ export function waitForInflight(timeoutMs = 30_000): Promise<void> {
 
 function inflightDone(): void {
   inflightCount -= 1;
-  if (inflightCount <= 0 && inflightResolve) {
-    inflightResolve();
-    inflightResolve = null;
+  if (inflightCount <= 0) {
+    for (const resolve of inflightResolvers.splice(0)) {
+      resolve();
+    }
   }
 }
 
@@ -1163,26 +1257,28 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
   const messageId = message.message_id;
   inflightCount += 1;
 
-  try {
-    await processTelegramMessageInner(chatId, messageId, message);
-  } catch (error) {
-    log.error("processTelegramMessage crashed — notifying user", {
-      chatId,
-      messageId,
-      inputType: inferInputType(message),
-      error
-    });
+  await withChatLock(chatId, async () => {
     try {
-      await sendText(
+      await processTelegramMessageInner(chatId, messageId, message);
+    } catch (error) {
+      log.error("processTelegramMessage crashed — notifying user", {
         chatId,
-        "Ocorreu um erro ao processar sua mensagem. Tente novamente ou envie em texto."
-      );
-    } catch (sendError) {
-      log.error("Failed to send error notification to user", { chatId, sendError });
+        messageId,
+        inputType: inferInputType(message),
+        error
+      });
+      try {
+        await sendText(
+          chatId,
+          "Ocorreu um erro ao processar sua mensagem. Tente novamente ou envie em texto."
+        );
+      } catch (sendError) {
+        log.error("Failed to send error notification to user", { chatId, sendError });
+      }
+    } finally {
+      inflightDone();
     }
-  } finally {
-    inflightDone();
-  }
+  });
 }
 
 async function processTelegramMessageInner(
@@ -1193,39 +1289,72 @@ async function processTelegramMessageInner(
   await upsertChatSubscription(chatId);
 
   // Dedup check — skip already-processed messages (e.g. webhook retry)
-  if (messageId > 0 && (await isDuplicateMessage(chatId, messageId))) {
-    log.info("Duplicate message skipped", { chatId, messageId });
-    return;
+  // In-memory cache covers ALL routes (Marta, Jarbas, Second Brain).
+  // DB check covers inbox_items that survived a process restart.
+  if (messageId > 0) {
+    if (isMessageAlreadyProcessed(chatId, messageId)) {
+      log.info("Duplicate message skipped (memory)", { chatId, messageId });
+      return;
+    }
+    if (await isDuplicateMessage(chatId, messageId)) {
+      log.info("Duplicate message skipped (db)", { chatId, messageId });
+      markMessageProcessed(chatId, messageId);
+      return;
+    }
+    markMessageProcessed(chatId, messageId);
   }
 
-  // ★ Checkpoint: Active Marta conversation → route follow-up without keyword
+  // ── Routing logic ────────────────────────────────────────────────────
+  // Priority order:
+  //   1. Pending intake decisions (merge/new) — exact-match responses
+  //   2. Text commands (/done, /snooze, etc.)
+  //   3. Explicit agent keywords (Jarbas, Marta) — ALWAYS override active conversations
+  //   4. Active Marta conversation follow-up (no keyword needed)
+  //   5. Media extraction → audio keyword check → AI classification pipeline
+
   const rawText = message.text || message.caption || "";
-  if (rawText && (await handleMartaFollowUpFromIntake(chatId, messageId, rawText))) {
-    log.info("Marta follow-up handled", { chatId, messageId });
-    return;
-  }
 
+  // Step 1 — Pending relation decisions (exact responses like "complemento" / "novo")
   if (message.text && (await tryResolvePendingRelation(chatId, message))) {
     return;
   }
 
+  // Step 2 — Text commands (/done, /snooze, /busca, etc.)
   if (message.text && (await handleTextCommand(chatId, message.text))) {
     return;
   }
 
-  // Checkpoint A: text/caption contains "Jarbas" → route to agent
+  // Step 3 — Explicit keyword routing (Jarbas/Marta in text/caption)
+  // Keywords ALWAYS take priority over active conversations — lets users escape.
   const textContent = message.text || message.caption || "";
   if (containsJarbasKeyword(textContent)) {
     await routeToAgent(chatId, messageId, stripJarbasKeyword(textContent), message);
     return;
   }
 
-  // ★ Checkpoint: text/caption contains "Marta" → route to Chief of Staff
   if (containsMartaKeyword(textContent)) {
     await routeToMarta(chatId, messageId, stripMartaKeyword(textContent), message);
     return;
   }
 
+  // Step 4 — Active Marta conversation follow-up (no keyword required)
+  // Handles text, PDFs, images as follow-up responses.
+  // Audio is EXCLUDED here — it needs transcription first (handled in Step 6).
+  // Audio sent as document (e.g. MP3 attachment) must also be treated as audio
+  const isAudioDocument = Boolean(
+    message.document?.mime_type?.startsWith("audio/") ||
+    (message.document?.file_name && AUDIO_EXTENSIONS.has(path.extname(message.document.file_name).toLowerCase()))
+  );
+  const hasNonAudioAttachment = Boolean(
+    (message.document && !isAudioDocument) || (message.photo && message.photo.length > 0)
+  );
+  const isAudioMessage = Boolean(message.voice || message.audio || isAudioDocument);
+  if (!isAudioMessage && (rawText || hasNonAudioAttachment) && (await handleMartaFollowUpFromIntake(chatId, messageId, rawText, message))) {
+    log.info("Marta follow-up handled", { chatId, messageId });
+    return;
+  }
+
+  // Step 5 — Content extraction (audio transcription, PDF text, image description)
   const extracted = await extractFromMessage(message);
   if (!extracted.normalizedText) {
     const categoryId = await upsertCategory("Inbox Geral", "Itens sem extração automatica completa", "agent");
@@ -1261,8 +1390,7 @@ async function processTelegramMessageInner(
 
   log.info("pipeline:extract_done", { inputType: extracted.inputType, textLen: extracted.normalizedText.length });
 
-  // Checkpoint B: audio transcription contains "Jarbas" → route to agent
-  // Check raw transcription FIRST (before cleanup which may strip "Jarbas" as vocative)
+  // Step 6 — Audio transcription keyword check (Jarbas/Marta in spoken words)
   if (extracted.inputType === "audio") {
     const rawCheck = extracted.rawTranscription || "";
     const normCheck = extracted.normalizedText;
@@ -1274,12 +1402,18 @@ async function processTelegramMessageInner(
       return;
     }
 
-    // ★ Checkpoint: audio transcription contains "Marta" → route to Chief of Staff
     if (containsMartaKeyword(rawCheck) || containsMartaKeyword(normCheck)) {
       const martaInput = containsMartaKeyword(normCheck)
         ? stripMartaKeyword(normCheck)
         : stripMartaKeyword(rawCheck);
       await routeToMarta(chatId, messageId, martaInput, message);
+      return;
+    }
+
+    // Audio without keyword but active Marta conversation → treat as follow-up
+    // (audio transcription was not available before step 5, so check again now)
+    if (await handleMartaFollowUpFromIntake(chatId, messageId, normCheck, message)) {
+      log.info("Marta follow-up handled (audio)", { chatId, messageId });
       return;
     }
   }
@@ -1367,12 +1501,18 @@ async function processTelegramMessageInner(
   const hasLowConfidence = decisionMode !== "split" && (plan.decision.confidence ?? 0) < AUTO_DECISION_THRESHOLD;
 
   if (hasLowConfidence && hasRelevantCandidates) {
+    // Truncate large fields (e.g. pdfExtractedText) to prevent oversized JSONB payloads
+    const truncatedExtracted = { ...extracted };
+    if (truncatedExtracted.pdfExtractedText && truncatedExtracted.pdfExtractedText.length > 2000) {
+      truncatedExtracted.pdfExtractedText = truncatedExtracted.pdfExtractedText.slice(0, 2000) + "...[truncado]";
+    }
+
     await createPendingDecision({
       chatId,
       decisionType: "relation",
       payload: {
         sourceMessageId: messageId,
-        extracted,
+        extracted: truncatedExtracted,
         plan,
         contextCandidates
       }

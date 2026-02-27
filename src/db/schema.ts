@@ -2873,6 +2873,17 @@ export async function updateCosConversation(
   );
 }
 
+/**
+ * Touch the conversation's updated_at timestamp to prevent auto-expiry
+ * during long-running operations (e.g. Claude API calls that take > 30s).
+ */
+export async function touchCosConversation(convId: number): Promise<void> {
+  await pool.query(
+    `UPDATE cos_conversations SET updated_at = NOW() WHERE id = $1 AND state IN ('active', 'clarifying')`,
+    [convId]
+  );
+}
+
 export async function completeCosConversation(convId: number, outputId?: number): Promise<void> {
   await pool.query(
     `UPDATE cos_conversations

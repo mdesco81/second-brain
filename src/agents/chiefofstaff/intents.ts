@@ -16,9 +16,9 @@ const INTENT_SYSTEM_PROMPT = `Voce e o classificador de intencoes da Marta, Chie
 Recebe uma mensagem em linguagem natural (ja sem a keyword "marta") e extrai:
 
 1. intent: briefing | notas | status | email | equipe | reflexao | ajuda | conversa_geral
-2. pessoa: nome da pessoa mencionada (ou null)
+2. pessoa: nome PROPRIO da pessoa mencionada (ou null). Extraia APENAS o nome, sem papel/cargo.
 3. tema: topico/assunto mencionado (ou null)
-4. detalhes_extras: instrucoes adicionais
+4. detalhes_extras: papel/cargo da pessoa OU instrucoes adicionais. Para intent "equipe", SEMPRE coloque o cargo/papel aqui.
 5. needs_clarification: true/false — se falta info critica para executar
 6. clarification_question: pergunta a fazer ao usuario (se needs_clarification=true)
 
@@ -27,12 +27,31 @@ Regras de classificacao:
 - "notas": processar notas/transcript de reuniao, "anota", "vou te passar as notas", "acabei de sair da reuniao"
 - "status": panorama da equipe, "como ta a galera", "status", "panorama", "como estao as coisas"
 - "email": draft de email, "manda email", "escreve email", "draft", "cobranca", "mensagem pro"
-- "equipe": registrar pessoa, "adiciona", "novo liderado", "e tech lead", "registra"
+- "equipe": registrar/adicionar pessoa na equipe. DETECTE qualquer variacao:
+  "adiciona", "registra", "inclui", "novo liderado", "nova pessoa", "coloca na equipe",
+  "bota na equipe", "cadastra", "eh tech lead", "e tech lead", "ele e", "ela e",
+  "entrou no time", "comecou agora", "novo membro", "meu novo report".
+  IMPORTANTE: Se menciona adicionar/registrar uma pessoa com cargo/papel, intent DEVE ser "equipe".
+  Exemplos que DEVEM ser "equipe":
+    - "adiciona o Carlos ele e tech lead" → intent=equipe, pessoa=Carlos, detalhes_extras=tech lead
+    - "registra a Maria, product manager" → intent=equipe, pessoa=Maria, detalhes_extras=product manager
+    - "inclui o Pedro como engenheiro senior" → intent=equipe, pessoa=Pedro, detalhes_extras=engenheiro senior
+    - "o Joao entrou no time como data analyst" → intent=equipe, pessoa=Joao, detalhes_extras=data analyst
+    - "coloca a Ana na equipe" → intent=equipe, pessoa=Ana, detalhes_extras=null
+    - "novo liderado Lucas, ele e frontend" → intent=equipe, pessoa=Lucas, detalhes_extras=frontend
 - "reflexao": analise estrategica, "o que tenho negligenciado", "reflexao", "analise", "como posso melhorar"
 - "ajuda": "o que voce faz", "como funciona", "help", "ajuda"
 - "conversa_geral": qualquer outra coisa que nao se encaixe acima
 
-Para needs_clarification:
+REGRAS CRITICAS de extracao para "equipe":
+- "pessoa" deve conter SOMENTE o nome proprio (ex: "Carlos", "Maria Silva"), SEM o cargo
+- "detalhes_extras" deve conter o cargo/papel mencionado (ex: "tech lead", "product manager", "engenheiro senior")
+- Se a frase tem "ele e X" ou "ela e X" ou "como X" ou ", X", o X e o cargo → coloque em detalhes_extras
+- Se nao menciona cargo, detalhes_extras = null
+- needs_clarification = false se tem pelo menos o nome da pessoa
+- needs_clarification = true SOMENTE se NAO tem nome nenhum (ex: "adiciona um novo liderado")
+
+Para needs_clarification (outros intents):
 - Se o intent e "briefing" e nao tem pessoa → needs_clarification=true, perguntar "Com quem e o 1:1?"
 - Se o intent e "email" e nao tem tema → needs_clarification=true, perguntar "Sobre qual assunto?"
 - Se o intent e "notas" e a mensagem e curta (parece so aviso, sem conteudo) → needs_clarification=true, perguntar "Pode me mandar as notas/transcript?"
@@ -43,7 +62,7 @@ Responda APENAS com JSON valido:
   "intent": "briefing" | "notas" | "status" | "email" | "equipe" | "reflexao" | "ajuda" | "conversa_geral",
   "pessoa": "nome" | null,
   "tema": "topico" | null,
-  "detalhes_extras": "instrucoes" | null,
+  "detalhes_extras": "instrucoes ou cargo/papel" | null,
   "needs_clarification": true | false,
   "clarification_question": "pergunta" | null
 }`;
@@ -138,20 +157,25 @@ export async function resolvePersonFuzzy(
   );
   if (variantMatch) return variantMatch;
 
-  // Partial match (starts with or contains)
-  const partialMatches = people.filter(
-    (p) =>
-      p.name.toLowerCase().includes(lower) ||
-      lower.includes(p.name.toLowerCase().split(" ")[0]) ||
-      p.nameVariants.some((v) => v.toLowerCase().includes(lower))
-  );
+  // Partial match — tighter constraints to avoid false positives:
+  // - Require minimum 3 characters to prevent matching "Jo" → "Joao", "Jose", etc.
+  // - Use first-name starts-with instead of broad substring contains
+  if (lower.length >= 3) {
+    const partialMatches = people.filter((p) => {
+      const pLower = p.name.toLowerCase();
+      const firstName = pLower.split(" ")[0];
+      // Input starts with the person's first name, or first name starts with input
+      return firstName.startsWith(lower) || lower.startsWith(firstName) ||
+        p.nameVariants.some((v) => v.toLowerCase().startsWith(lower) || lower.startsWith(v.toLowerCase()));
+    });
 
-  if (partialMatches.length === 1) return partialMatches[0];
+    if (partialMatches.length === 1) return partialMatches[0];
 
-  // Fall back to DB fuzzy search
-  if (partialMatches.length === 0) {
-    const dbResults = await findPersonByName(nameInput);
-    if (dbResults.length === 1) return dbResults[0];
+    // Fall back to DB fuzzy search only when no partial matches found
+    if (partialMatches.length === 0) {
+      const dbResults = await findPersonByName(nameInput);
+      if (dbResults.length === 1) return dbResults[0];
+    }
   }
 
   // Ambiguous or not found
