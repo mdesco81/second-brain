@@ -1,4 +1,4 @@
-import { CalendarEvent, CosMemory, Decision, OpenActionItem, PendingDraft, Person } from "../db/schema.js";
+import { CalendarEvent, Commitment, CosMemory, Decision, OpenActionItem, PendingDraft, Person } from "../db/schema.js";
 
 function actionLabel(item: OpenActionItem): string {
   const title = item.actionTitle || item.summaryPtBr;
@@ -46,7 +46,8 @@ export function buildDailyMessage(
   staleItems?: OpenActionItem[],
   calendarEvents?: CalendarEvent[],
   teamStats?: TeamStat[],
-  pendingDrafts?: PendingDraft[]
+  pendingDrafts?: PendingDraft[],
+  overdueCommitments?: Commitment[]
 ): string {
   // Header with day of week
   const dayNames = ["domingo", "segunda", "terca", "quarta", "quinta", "sexta", "sabado"];
@@ -160,6 +161,17 @@ export function buildDailyMessage(
 
       const roleSuffix = stat.person.role ? ` (${stat.person.role})` : "";
       lines.push(`- ${stat.person.name}${roleSuffix}: ${parts.join(", ")} | ${oneOnOneInfo}`);
+    }
+  }
+
+  // --- COMPROMISSOS VENCIDOS ---
+  if (overdueCommitments && overdueCommitments.length > 0) {
+    lines.push("");
+    lines.push("🤝 COMPROMISSOS VENCIDOS:");
+    for (const c of overdueCommitments.slice(0, 5)) {
+      const label = c.direction === "mine" ? "Meu" : "De terceiro";
+      const days = c.deadline ? daysAgo(c.deadline) : 0;
+      lines.push(`- [${label}] ${c.summary} (${days}d atrasado)`);
     }
   }
 
@@ -347,6 +359,7 @@ export function buildPreMeetingBrief(params: {
   openItems: OpenActionItem[];
   memories: CosMemory[];
   pendingDecisions: Decision[];
+  commitments?: Commitment[];
   lastNotes?: string | null;
   minutesUntil: number;
 }): string {
@@ -369,6 +382,26 @@ export function buildPreMeetingBrief(params: {
         ? ` — ${daysAgo(item.dueAt)}d atrasado`
         : item.dueAt ? ` — prazo: ${item.dueAt}` : "";
       lines.push(`• #${item.id} ${item.actionTitle || item.summaryPtBr}${overdueTag}`);
+    }
+  }
+
+  // Open commitments
+  if (params.commitments && params.commitments.length > 0) {
+    const mine = params.commitments.filter(c => c.direction === "mine");
+    const theirs = params.commitments.filter(c => c.direction === "theirs");
+    lines.push("");
+    lines.push("🤝 Compromissos abertos:");
+    if (mine.length > 0) {
+      for (const c of mine.slice(0, 3)) {
+        const dl = c.deadline ? ` (ate ${c.deadline})` : "";
+        lines.push(`• Eu: ${c.summary}${dl}`);
+      }
+    }
+    if (theirs.length > 0) {
+      for (const c of theirs.slice(0, 3)) {
+        const dl = c.deadline ? ` (ate ${c.deadline})` : "";
+        lines.push(`• ${params.person?.name ?? "Outro"}: ${c.summary}${dl}`);
+      }
     }
   }
 

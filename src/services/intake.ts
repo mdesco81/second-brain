@@ -48,7 +48,7 @@ import { buildOpenActionsMessage, buildWeeklyMessage } from "./reports.js";
 import { appendProjectStatus, storeIncomingMedia, writeActionBoard, writeKnowledgeNote } from "./storage.js";
 import { InputType, ProcessingStage } from "../types/domain.js";
 import { log } from "../utils/logger.js";
-import { containsJarbasKeyword, stripJarbasKeyword, routeToAgent, containsMartaKeyword, stripMartaKeyword, routeToMarta, handleMartaFollowUpFromIntake } from "../agents/router.js";
+import { containsJarbasKeyword, stripJarbasKeyword, routeToAgent, containsMartaKeyword, stripMartaKeyword, routeToMarta, handleMartaFollowUpFromIntake, smartRouteMessage } from "../agents/router.js";
 import { cosineSimilarity } from "../utils/math.js";
 
 interface ExtractedContent {
@@ -1157,6 +1157,27 @@ function parseNaturalLanguageCommand(text: string): string | null {
   return null;
 }
 
+function isForwardedMessage(msg: TelegramMessage): boolean {
+  return Boolean(msg.forward_from || msg.forward_from_chat || msg.forward_date || msg.forward_origin);
+}
+
+function getForwardSource(msg: TelegramMessage): string {
+  if (msg.forward_origin?.sender_user) {
+    const u = msg.forward_origin.sender_user;
+    return u.username ? `@${u.username}` : `${u.first_name}${u.last_name ? ' ' + u.last_name : ''}`;
+  }
+  if (msg.forward_origin?.sender_chat) {
+    return msg.forward_origin.sender_chat.title || msg.forward_origin.sender_chat.username || "canal";
+  }
+  if (msg.forward_from) {
+    return msg.forward_from.username ? `@${msg.forward_from.username}` : `${msg.forward_from.first_name}${msg.forward_from.last_name ? ' ' + msg.forward_from.last_name : ''}`;
+  }
+  if (msg.forward_from_chat) {
+    return msg.forward_from_chat.title || msg.forward_from_chat.username || "chat";
+  }
+  return "desconhecido";
+}
+
 async function tryResolvePendingRelation(chatId: number, message: TelegramMessage): Promise<boolean> {
   const text = message.text?.trim();
   if (!text) {
@@ -1319,9 +1340,10 @@ async function processTelegramMessageInner(
   // Priority order:
   //   1. Pending intake decisions (merge/new) — exact-match responses
   //   2. Text commands (/done, /snooze, etc.)
-  //   3. Explicit agent keywords (Jarbas, Marta) — ALWAYS override active conversations
-  //   4. Active Marta conversation follow-up (no keyword needed)
-  //   5. Media extraction → audio keyword check → AI classification pipeline
+  //   3. Forwarded messages → auto-save as card (skip agent routing)
+  //   4. Explicit agent keywords (Jarbas, Marta) — ALWAYS override active conversations
+  //   5. Active Marta conversation follow-up (no keyword needed)
+  //   6. Media extraction → audio keyword check → AI classification pipeline
 
   const rawText = message.text || message.caption || "";
 
@@ -1335,7 +1357,84 @@ async function processTelegramMessageInner(
     return;
   }
 
-  // Step 3 — Explicit keyword routing (Jarbas/Marta in text/caption)
+  // Step 3 — Forwarded message → auto-save as card
+  // Forwarded messages are captured directly — they should NOT be routed to agents
+  // even if the forwarded text contains "Marta" or "Jarbas".
+  if (isForwardedMessage(message)) {
+    const source = getForwardSource(message);
+    const forwardDate = message.forward_date
+      ? new Date(message.forward_date * 1000).toISOString()
+      : undefined;
+
+    // Extract content through the standard pipeline (handles audio, images, PDFs, etc.)
+    const extracted = await extractFromMessage(message);
+    if (!extracted.normalizedText) {
+      await sendText(chatId, `📩 Mensagem encaminhada de ${source} recebida, mas nao consegui extrair conteudo. Pode enviar um resumo em texto?`);
+      return;
+    }
+
+    log.info("pipeline:forwarded_message", { chatId, messageId, source, inputType: extracted.inputType });
+
+    await sendTypingIndicator(chatId);
+
+    const knownCategories = await listCategories();
+    const contextCandidates = await rankContextCandidates(chatId, extracted);
+
+    const audioDuration = typeof extracted.metadata.audioDurationSeconds === "number"
+      ? extracted.metadata.audioDurationSeconds
+      : undefined;
+
+    const textForAI = extracted.pdfExtractedText
+      ? [extracted.rawText, extracted.pdfExtractedText].filter(Boolean).join("\n").trim()
+      : extracted.normalizedText;
+
+    let plan: AIIntakePlannerOutput | null = await planIntakeWithContext({
+      text: textForAI,
+      inputType: extracted.inputType,
+      audioDurationSeconds: audioDuration,
+      knownCategories: knownCategories.map((category) => ({
+        name: category.name,
+        description: category.description
+      })),
+      openContext: contextCandidates
+    });
+
+    if (!plan) {
+      const fallback = await classifyContent(textForAI);
+      plan = {
+        decision: {
+          mode: "new",
+          confidence: 0.90,
+          reasonPtBr: "Mensagem encaminhada — registro automatico."
+        },
+        cards: [fallback as AIClassificationOutput]
+      };
+    }
+
+    // Force new card mode for forwarded messages (they are independent captures)
+    plan.decision.mode = "new";
+    plan.decision.confidence = Math.max(plan.decision.confidence ?? 0, 0.90);
+
+    // Inject forwarded metadata into each card's metadata
+    const forwardMetadata = {
+      ...extracted.metadata,
+      forwarded: true,
+      forwardFrom: source,
+      forwardDate
+    };
+
+    await executePlan({
+      chatId,
+      messageId,
+      extracted: { ...extracted, metadata: forwardMetadata },
+      plan
+    });
+
+    await sendText(chatId, `📩 Mensagem encaminhada de ${source} capturada!`);
+    return;
+  }
+
+  // Step 4 — Explicit keyword routing (Jarbas/Marta in text/caption)
   // Keywords ALWAYS take priority over active conversations — lets users escape.
   const textContent = message.text || message.caption || "";
   if (containsJarbasKeyword(textContent)) {
@@ -1348,7 +1447,7 @@ async function processTelegramMessageInner(
     return;
   }
 
-  // Step 4 — Active Marta conversation follow-up (no keyword required)
+  // Step 5 — Active Marta/Jarbas conversation follow-up (no keyword required)
   // Handles text, PDFs, images as follow-up responses.
   // Audio is EXCLUDED here — it needs transcription first (handled in Step 6).
   // Audio sent as document (e.g. MP3 attachment) must also be treated as audio
@@ -1365,7 +1464,38 @@ async function processTelegramMessageInner(
     return;
   }
 
-  // Step 5 — Content extraction (audio transcription, PDF text, image description)
+  // Step 5b — Jarbas active conversation follow-up (no keyword needed)
+  // Check if there's an active Jarbas conversation that this message might continue.
+  // This covers cases where handleMartaFollowUpFromIntake didn't match (e.g. audio-only).
+  if (!isAudioMessage && rawText) {
+    const activeConv = await getActiveCosConversation(chatId);
+    if (activeConv && activeConv.intent.includes("jarbas") && !containsMartaKeyword(textContent)) {
+      const handled = await handleMartaFollowUpFromIntake(chatId, messageId, textContent, message);
+      if (handled) {
+        log.info("Jarbas follow-up handled", { chatId, messageId });
+        return;
+      }
+    }
+  }
+
+  // Step 5c — Smart routing (no keyword, no active conversation)
+  // AI classifier determines if message should go to an agent even without explicit keyword.
+  // Only runs for text messages with enough content to classify.
+  if (!isAudioMessage && rawText && rawText.length >= 5) {
+    const routeResult = await smartRouteMessage(rawText, chatId);
+    if (routeResult.agent === "marta" && routeResult.confidence >= 0.75) {
+      log.info("smart_route:marta", { chatId, messageId, confidence: routeResult.confidence });
+      await routeToMarta(chatId, messageId, rawText, message);
+      return;
+    }
+    if (routeResult.agent === "jarbas" && routeResult.confidence >= 0.75) {
+      log.info("smart_route:jarbas", { chatId, messageId, confidence: routeResult.confidence });
+      await routeToAgent(chatId, messageId, rawText, message);
+      return;
+    }
+  }
+
+  // Step 6 — Content extraction (audio transcription, PDF text, image description)
   const extracted = await extractFromMessage(message);
   if (!extracted.normalizedText) {
     const categoryId = await upsertCategory("Inbox Geral", "Itens sem extração automatica completa", "agent");
@@ -1401,7 +1531,7 @@ async function processTelegramMessageInner(
 
   log.info("pipeline:extract_done", { inputType: extracted.inputType, textLen: extracted.normalizedText.length });
 
-  // Step 6 — Audio transcription keyword check (Jarbas/Marta in spoken words)
+  // Step 7 — Audio transcription keyword check (Jarbas/Marta in spoken words)
   if (extracted.inputType === "audio") {
     const rawCheck = extracted.rawTranscription || "";
     const normCheck = extracted.normalizedText;
@@ -1426,6 +1556,21 @@ async function processTelegramMessageInner(
     if (await handleMartaFollowUpFromIntake(chatId, messageId, normCheck, message)) {
       log.info("Marta follow-up handled (audio)", { chatId, messageId });
       return;
+    }
+
+    // Step 7b — Smart routing for audio (no keyword, no active conversation)
+    if (normCheck.length >= 5) {
+      const routeResult = await smartRouteMessage(normCheck, chatId);
+      if (routeResult.agent === "marta" && routeResult.confidence >= 0.75) {
+        log.info("smart_route:marta_audio", { chatId, messageId, confidence: routeResult.confidence });
+        await routeToMarta(chatId, messageId, normCheck, message);
+        return;
+      }
+      if (routeResult.agent === "jarbas" && routeResult.confidence >= 0.75) {
+        log.info("smart_route:jarbas_audio", { chatId, messageId, confidence: routeResult.confidence });
+        await routeToAgent(chatId, messageId, normCheck, message);
+        return;
+      }
     }
   }
 

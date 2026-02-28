@@ -329,14 +329,23 @@ async function loadJarbasOutputs() {
 // ============================================================================
 async function loadMartaData() {
   try {
-    const [cosRes, remRes] = await Promise.all([
-      fetch("/api/cos"),
-      fetch("/api/reminders")
-    ]);
+    const cosRes = await fetch("/api/cos");
     if (!cosRes.ok) throw new Error("Failed to load CoS data");
     state.martaData = await cosRes.json();
-    state.remindersData = remRes.ok ? (await remRes.json()).reminders || [] : [];
+
+    // Fetch non-critical data without blocking each other
+    const [remRes, healthRes, commitRes] = await Promise.allSettled([
+      fetch("/api/reminders").then((r) => r.ok ? r.json() : null),
+      fetch("/api/relationship-health").then((r) => r.ok ? r.json() : null),
+      fetch("/api/commitments").then((r) => r.ok ? r.json() : null)
+    ]);
+    state.remindersData = remRes.status === "fulfilled" && remRes.value ? remRes.value.reminders || [] : [];
+    state.healthData = healthRes.status === "fulfilled" && healthRes.value ? healthRes.value.health || [] : [];
+    state.commitmentsData = commitRes.status === "fulfilled" && commitRes.value ? commitRes.value.commitments || [] : [];
+    populateUploadPersonSelect();
     renderReminders();
+    renderHealthHeatmap();
+    renderCommitments();
     renderMartaView();
   } catch (err) {
     console.error("loadMartaData error:", err);
@@ -382,6 +391,210 @@ function renderReminders() {
       <button class="btn-cancel-reminder" data-reminder-id="${r.id}" title="Cancelar lembrete">&times;</button>
     </div>`;
   }).join("");
+}
+
+// ── Upload Notes ─────────────────────────────────────────────────────
+function populateUploadPersonSelect() {
+  const select = document.getElementById("upload-person");
+  if (!select || !state.martaData?.people) return;
+  select.innerHTML = '<option value="">Selecione a pessoa...</option>' +
+    state.martaData.people.map((p) =>
+      `<option value="${p.id}">${escapeHtml(p.name)}${p.role ? ` (${escapeHtml(p.role)})` : ""}</option>`
+    ).join("");
+}
+
+{
+  const dropzone = document.getElementById("upload-dropzone");
+  const fileInput = document.getElementById("upload-file");
+  const uploadBtn = document.getElementById("upload-btn");
+  const personSelect = document.getElementById("upload-person");
+  let selectedFile = null;
+
+  function updateUploadBtn() {
+    uploadBtn.disabled = !(selectedFile && personSelect?.value);
+  }
+
+  if (dropzone) {
+    dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("drag-over"); });
+    dropzone.addEventListener("dragleave", () => dropzone.classList.remove("drag-over"));
+    dropzone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropzone.classList.remove("drag-over");
+      const file = e.dataTransfer?.files?.[0];
+      if (file) { setSelectedFile(file); }
+    });
+  }
+
+  if (fileInput) {
+    fileInput.addEventListener("change", () => {
+      if (fileInput.files?.[0]) setSelectedFile(fileInput.files[0]);
+    });
+  }
+
+  if (personSelect) personSelect.addEventListener("change", updateUploadBtn);
+
+  function setSelectedFile(file) {
+    selectedFile = file;
+    if (dropzone) {
+      dropzone.classList.add("has-file");
+      dropzone.querySelector(".upload-text").textContent = file.name;
+      dropzone.querySelector(".upload-hint").textContent =
+        `${(file.size / 1024).toFixed(0)} KB — Clique para trocar`;
+    }
+    updateUploadBtn();
+  }
+
+  if (uploadBtn) {
+    uploadBtn.addEventListener("click", async () => {
+      if (!selectedFile || !personSelect?.value) return;
+      // Pre-check file size (5MB limit)
+      if (selectedFile.size > 5 * 1024 * 1024) {
+        showToast("Arquivo muito grande (max 5MB)", "error");
+        return;
+      }
+      uploadBtn.disabled = true;
+      uploadBtn.textContent = "Processando...";
+
+      const resultDiv = document.getElementById("upload-result");
+      resultDiv.style.display = "block";
+      resultDiv.innerHTML = '<div class="upload-spinner">&#9203; Processando notas com IA... pode levar alguns segundos.</div>';
+
+      try {
+        const formData = new FormData();
+        formData.append("file", selectedFile);
+        formData.append("personId", personSelect.value);
+
+        const res = await fetch("/api/cos/upload-notes", { method: "POST", body: formData });
+        const data = await res.json();
+
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || "Upload failed");
+        }
+
+        const r = data.result;
+        const bulletsList = (r.executiveBullets || [])
+          .map((b) => `<li>${escapeHtml(b)}</li>`).join("");
+
+        resultDiv.innerHTML = `
+          <h3>&#9989; Notas processadas!</h3>
+          <div class="upload-result-stats">
+            <span class="upload-stat">&#128203; ${r.actionItems} acao${r.actionItems !== 1 ? "s" : ""}</span>
+            <span class="upload-stat">&#9878; ${r.decisions} decisao${r.decisions !== 1 ? "es" : ""}</span>
+            <span class="upload-stat">&#129309; ${r.commitments} compromisso${r.commitments !== 1 ? "s" : ""}</span>
+            ${r.teamMood ? `<span class="upload-stat">&#128172; ${escapeHtml(r.teamMood)}</span>` : ""}
+          </div>
+          <div class="upload-result-summary">${escapeHtml(r.summary)}</div>
+          ${bulletsList ? `<ul class="upload-result-bullets">${bulletsList}</ul>` : ""}
+        `;
+
+        showToast("Notas processadas com sucesso!", "success");
+        // Reset
+        selectedFile = null;
+        if (fileInput) fileInput.value = "";
+        if (dropzone) {
+          dropzone.classList.remove("has-file");
+          dropzone.querySelector(".upload-text").textContent = "Arraste um arquivo aqui ou clique para selecionar";
+          dropzone.querySelector(".upload-hint").textContent = "PDF, Markdown ou Texto (max 5MB)";
+        }
+        // Refresh Marta data
+        state.martaData = null;
+        loadMartaData();
+      } catch (err) {
+        resultDiv.innerHTML = `<h3 style="color:var(--danger)">&#10060; Erro ao processar</h3><p style="font-size:0.85rem;color:var(--muted)">${escapeHtml(err.message)}</p>`;
+        showToast("Erro ao processar notas", "error");
+      }
+
+      uploadBtn.textContent = "Processar Notas";
+      updateUploadBtn();
+    });
+  }
+}
+
+// ── Relationship Health Heatmap ──────────────────────────────────────
+function renderHealthHeatmap() {
+  const container = document.getElementById("health-heatmap");
+  const section = document.getElementById("marta-health-section");
+  const health = state.healthData || [];
+  if (!container || !section) return;
+
+  if (health.length === 0) { section.style.display = "none"; return; }
+  section.style.display = "block";
+
+  container.innerHTML = health.map((h) => {
+    const levelClass = `health-${h.level}`;
+    const factors = h.factors || {};
+    const alertsHtml = (h.alerts || [])
+      .map((a) => `<div class="health-alert-item">&#9888; ${escapeHtml(a)}</div>`).join("");
+
+    return `<div class="health-card ${levelClass}">
+      <div class="health-card-header">
+        <span class="health-card-name">${escapeHtml(h.personName)}</span>
+        <span class="health-card-score">${h.score}</span>
+      </div>
+      <div class="health-card-factors">
+        ${renderHealthFactor("1:1", factors.oneOnOneAdherence ?? 0)}
+        ${renderHealthFactor("Itens", factors.openItemsHealth ?? 0)}
+        ${renderHealthFactor("Compromissos", factors.commitmentFulfillment ?? 0)}
+        ${renderHealthFactor("Contato", factors.contactRecency ?? 0)}
+      </div>
+      ${alertsHtml ? `<div class="health-card-alerts">${alertsHtml}</div>` : ""}
+    </div>`;
+  }).join("");
+}
+
+function renderHealthFactor(label, score) {
+  const pct = Math.round((score / 25) * 100);
+  return `<div class="health-factor">
+    <span>${label}</span>
+    <div class="health-factor-bar"><div class="health-factor-fill" style="width:${pct}%"></div></div>
+    <span>${score}/25</span>
+  </div>`;
+}
+
+// ── Commitments Render ───────────────────────────────────────────────
+function renderCommitments() {
+  const container = document.getElementById("commitments-grid");
+  const section = document.getElementById("marta-commitments-section");
+  const commitments = state.commitmentsData || [];
+  if (!container || !section) return;
+
+  if (commitments.length === 0) { section.style.display = "none"; return; }
+  section.style.display = "block";
+
+  const mine = commitments.filter((c) => c.direction === "mine");
+  const theirs = commitments.filter((c) => c.direction === "theirs");
+
+  container.innerHTML = `
+    <div>
+      <div class="commitments-col-title">Meus compromissos (${mine.length})</div>
+      ${mine.length ? mine.map(renderCommitmentCard).join("") : '<div class="marta-empty-col">Nenhum compromisso</div>'}
+    </div>
+    <div>
+      <div class="commitments-col-title">Compromissos deles (${theirs.length})</div>
+      ${theirs.length ? theirs.map(renderCommitmentCard).join("") : '<div class="marta-empty-col">Nenhum compromisso</div>'}
+    </div>
+  `;
+}
+
+function renderCommitmentCard(c) {
+  const isOverdue = c.deadline && new Date(c.deadline) < new Date();
+  const deadlineStr = c.deadline
+    ? new Date(c.deadline).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })
+    : "";
+
+  return `<div class="commitment-card">
+    <div class="commitment-card-header">
+      <span class="commitment-summary">${escapeHtml(c.summary)}</span>
+      <span class="commitment-person">${escapeHtml(c.personName || "")}</span>
+    </div>
+    <div class="commitment-meta">
+      ${deadlineStr ? `<span class="commitment-deadline${isOverdue ? " overdue" : ""}">&#128197; ${deadlineStr}${isOverdue ? " (atrasado)" : ""}</span>` : ""}
+      <div class="commitment-actions">
+        <button class="btn-fulfill" data-commitment-id="${c.id}" title="Cumprido">&#10003;</button>
+        <button class="btn-cancel-commitment" data-commitment-id="${c.id}" title="Cancelar">&#10005;</button>
+      </div>
+    </div>
+  </div>`;
 }
 
 function renderMartaView() {
@@ -667,6 +880,50 @@ document.addEventListener("click", async (e) => {
     } catch { showToast("Erro ao atualizar status", "error"); }
     return;
   }
+
+  // Commitment fulfill
+  const fulfillBtn = e.target.closest(".btn-fulfill");
+  if (fulfillBtn) {
+    if (!confirm("Marcar compromisso como cumprido?")) return;
+    const id = Number(fulfillBtn.dataset.commitmentId);
+    try {
+      const r = await fetch(`/api/commitments/${id}/status`, {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "fulfilled" })
+      });
+      if (!r.ok) throw new Error();
+      showToast("Compromisso cumprido!", "success");
+      const freshRes = await fetch("/api/commitments");
+      if (freshRes.ok) {
+        const freshData = await freshRes.json();
+        state.commitmentsData = freshData.commitments || [];
+      }
+      renderCommitments();
+    } catch { showToast("Erro ao atualizar compromisso", "error"); }
+    return;
+  }
+
+  // Commitment cancel
+  const cancelCommitBtn = e.target.closest(".btn-cancel-commitment");
+  if (cancelCommitBtn) {
+    if (!confirm("Cancelar este compromisso?")) return;
+    const id = Number(cancelCommitBtn.dataset.commitmentId);
+    try {
+      const r = await fetch(`/api/commitments/${id}/status`, {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "cancelled" })
+      });
+      if (!r.ok) throw new Error();
+      showToast("Compromisso cancelado.", "success");
+      const freshRes = await fetch("/api/commitments");
+      if (freshRes.ok) {
+        const freshData = await freshRes.json();
+        state.commitmentsData = freshData.commitments || [];
+      }
+      renderCommitments();
+    } catch { showToast("Erro ao cancelar compromisso", "error"); }
+    return;
+  }
 });
 
 // ============================================================================
@@ -942,9 +1199,15 @@ function renderCard(item) {
     <button class="btn danger" data-inbox-process="${item.id}" data-inbox-mode="trash">Lixo</button>
   </div>` : "";
 
+  // Forwarded badge
+  const forwardedBadge = item.metadata?.forwarded
+    ? `<span class="tag forwarded-tag" title="Encaminhada de ${esc(item.metadata.forwardFrom || 'desconhecido')}">&#8618; Encaminhada</span>`
+    : "";
+
   // Collapsed meta
   const collapsedMeta = `<div class="card-meta-collapsed">
     <span class="tag category">${esc(item.categoryName)}</span>
+    ${forwardedBadge}
     ${urgentDueTag}
   </div>`;
 
@@ -977,6 +1240,7 @@ function renderCard(item) {
     <span class="tag priority-${item.priority}">${priorityLabel(item.priority)}</span>
     <span class="tag category">${esc(item.categoryName)}</span>
     <span class="tag type-tag">${inputTypeLabel(item.inputType)}</span>
+    ${forwardedBadge}
     ${fileIndicator}
     ${dueTag}
   </div>`;

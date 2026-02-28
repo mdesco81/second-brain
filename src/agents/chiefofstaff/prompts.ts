@@ -1,4 +1,4 @@
-import { CosMemory, Decision, OpenActionItem, Person } from "../../db/schema.js";
+import { Commitment, CosMemory, Decision, OpenActionItem, Person, RelationshipHealth } from "../../db/schema.js";
 
 const MARTA_PERSONA = `Voce e Marta, Chief of Staff virtual com experiencia equivalente a 4+ anos em consultoria estrategica de primeiro tier (McKinsey, Bain, BCG).
 
@@ -23,6 +23,7 @@ export function buildBriefingPrompt(params: {
   previousNotes: string | null;
   tema?: string | null;
   pendingDecisions?: Decision[];
+  openCommitments?: Commitment[];
 }): { system: string; user: string } {
   const memoryBlock = params.memories.length > 0
     ? `\n\nMEMORIAS SOBRE ${params.person.name.toUpperCase()}:\n${params.memories.map((m) => `- [${m.memoryType}] ${m.content} (confianca: ${(m.confidence * 100).toFixed(0)}%)`).join("\n")}`
@@ -76,6 +77,27 @@ FORMATO DO OUTPUT:
       }).join("\n")}`
     : "";
 
+  const commitmentsBlock = params.openCommitments && params.openCommitments.length > 0
+    ? (() => {
+        const mine = params.openCommitments!.filter(c => c.direction === "mine");
+        const theirs = params.openCommitments!.filter(c => c.direction === "theirs");
+        let block = `\n\nCOMPROMISSOS ABERTOS com ${params.person.name}:`;
+        if (mine.length > 0) {
+          block += `\nMeus compromissos (eu prometi):`;
+          for (const c of mine) {
+            block += `\n- ${c.summary}${c.deadline ? ` (prazo: ${c.deadline})` : ""}`;
+          }
+        }
+        if (theirs.length > 0) {
+          block += `\nCompromissos de ${params.person.name} (prometeu pra mim):`;
+          for (const c of theirs) {
+            block += `\n- ${c.summary}${c.deadline ? ` (prazo: ${c.deadline})` : ""}`;
+          }
+        }
+        return block;
+      })()
+    : "";
+
   const user = `Pessoa: ${params.person.name} (${params.person.role ?? "liderado"})
 Cadencia de 1:1: ${params.person.oneOnOneCadence}
 Ultimo 1:1: ${params.person.lastOneOnOne ?? "sem registro"}
@@ -83,7 +105,7 @@ ${params.person.notes ? `Notas gerais: ${params.person.notes}` : ""}
 
 Items pendentes com ${params.person.name}:
 ${itemsList}
-${overdueList ? `\nItems ATRASADOS:\n${overdueList}` : ""}${previousNotesBlock}${decisionsBlock}${temaBlock}`;
+${overdueList ? `\nItems ATRASADOS:\n${overdueList}` : ""}${previousNotesBlock}${decisionsBlock}${commitmentsBlock}${temaBlock}`;
 
   return { system, user };
 }
@@ -92,39 +114,53 @@ export function buildNotesProcessingPrompt(params: {
   person: Person;
   notesText: string;
   memories: CosMemory[];
+  currentDate?: string;
 }): { system: string; user: string } {
   const memoryBlock = params.memories.length > 0
     ? `\n\nMEMORIAS SOBRE ${params.person.name.toUpperCase()}:\n${params.memories.map((m) => `- [${m.memoryType}] ${m.content}`).join("\n")}`
     : "";
 
+  const dateRef = params.currentDate ?? new Date().toISOString().slice(0, 10);
+
   const system = `${MARTA_PERSONA}
 
 TAREFA: Processar notas/transcript de 1:1 com ${params.person.name}.
+Data de referencia: ${dateRef}
 
 Extraia e estruture:
 1. *Decisoes tomadas* — o que foi decidido na reuniao. Sinais: "decidimos", "ficou definido", "combinamos", "vamos", "a direcao e", "optamos por", "fechamos que"
 2. *Action items* — quem faz o que, com prazo se mencionado. Retorne como JSON array no campo "action_items"
-3. *Temas pendentes* — que ficaram sem resolucao
-4. *Sinais de risco/preocupacao* — sentimentos, hesitacoes, flags vermelhas
-5. *Follow-ups necessarios* — o que precisa ser acompanhado
-6. *Insights sobre a pessoa* — observacoes para eu aprender sobre o estilo e preferencias dela
+3. *Compromissos* — promessas feitas por mim ou pela outra pessoa. Sinais: "vou", "prometo", "fico de", "me comprometo", "vai entregar", "garanto que", "ate [data] eu", "combinado que [pessoa] faz". Classifique a direcao: "mine" (eu prometi) ou "theirs" (a outra pessoa prometeu)
+4. *Temas pendentes* — que ficaram sem resolucao
+5. *Sinais de risco/preocupacao* — sentimentos, hesitacoes, flags vermelhas
+6. *Follow-ups necessarios* — o que precisa ser acompanhado
+7. *Insights sobre a pessoa* — observacoes para eu aprender sobre o estilo e preferencias dela
+8. *Humor/clima da reuniao* — como a pessoa parecia (motivada, preocupada, frustrada, neutra, etc.)
+9. *Bullets executivos* — 3-5 bullets de alto nivel que capturam o essencial da reuniao para referencia rapida
 
 Para cada action item, retorne:
 { "title": "titulo imperativo", "owner": "quem", "due": "prazo ou null", "priority": "ALTA|MEDIA|BAIXA" }
 
 Para cada decisao, retorne como OBJETO (nao string):
 { "summary": "resumo da decisao", "rationale": "por que foi decidido (se mencionado, senao null)", "participants": ["nome1", ...], "review_date": "YYYY-MM-DD sugerido para revisao (30 dias por padrao)" }
+
+Para cada compromisso, retorne:
+{ "summary": "descricao do compromisso", "direction": "mine|theirs", "deadline": "YYYY-MM-DD ou null (resolva prazos relativos como 'sexta' a partir da data de referencia)" }
 ${memoryBlock}
 
 Responda com JSON:
 {
   "summary": "resumo executivo em 2-3 frases",
+  "executive_bullets": ["bullet 1", "bullet 2", ...],
   "decisions": [{"summary": "...", "rationale": "...", "participants": ["..."], "review_date": "..."}],
   "action_items": [{"title": "...", "owner": "...", "due": "...", "priority": "..."}],
+  "commitments": [{"summary": "...", "direction": "mine|theirs", "deadline": "YYYY-MM-DD|null"}],
   "pending_topics": ["topico 1", ...],
   "risk_signals": ["sinal 1", ...],
   "follow_ups": ["follow-up 1", ...],
   "person_insights": ["insight 1", ...],
+  "team_mood": "motivado|preocupado|frustrado|neutro|empolgado|cansado",
+  "risks": [{"description": "descricao do risco", "severity": "high|medium|low"}],
   "telegram_message": "mensagem formatada para Telegram resumindo a reuniao"
 }`;
 
@@ -142,6 +178,7 @@ export function buildStatusPrompt(params: {
   }>;
   globalMetrics: { totalOverdue: number; totalStale: number; totalOpen: number };
   memories: CosMemory[];
+  healthScores?: RelationshipHealth[];
 }): { system: string; user: string } {
   const memoryBlock = params.memories.length > 0
     ? `\n\nPADROES OBSERVADOS:\n${params.memories.map((m) => `- ${m.content}`).join("\n")}`
@@ -178,10 +215,17 @@ FORMATO:
     return `${p.name} (${p.role ?? "liderado"}): ${p.stats.totalOpen} abertos, ${p.stats.totalDone} concluidos, ${p.stats.totalOverdue} atrasados. Ultimo 1:1: ${p.lastOneOnOne ?? "nunca"}${alerts.length > 0 ? ` ⚠️ ${alerts.join(", ")}` : ""}`;
   }).join("\n");
 
+  const healthBlock = params.healthScores && params.healthScores.length > 0
+    ? `\n\nSAUDE DOS RELACIONAMENTOS:\n${params.healthScores.map((h) => {
+        const emoji = h.level === "hot" ? "🟢" : h.level === "warm" ? "🟡" : "🔴";
+        return `${emoji} ${h.personName}: ${h.score}/100 (${h.level})${h.alerts.length > 0 ? ` — ${h.alerts.join(", ")}` : ""}`;
+      }).join("\n")}`
+    : "";
+
   const user = `Equipe:
 ${peopleStatus}
 
-Metricas globais: ${params.globalMetrics.totalOpen} abertos, ${params.globalMetrics.totalOverdue} atrasados, ${params.globalMetrics.totalStale} parados`;
+Metricas globais: ${params.globalMetrics.totalOpen} abertos, ${params.globalMetrics.totalOverdue} atrasados, ${params.globalMetrics.totalStale} parados${healthBlock}`;
 
   return { system, user };
 }
@@ -280,6 +324,7 @@ export function buildHelpMessage(): string {
 Posso te ajudar com:
 
 📋 *Briefing pre-1:1* — "Marta, me prepara pro 1:1 com o Joao"
+⚡ *Brief express* — "vou entrar com [pessoa]" → brief instantaneo (sem espera!)
 📝 *Processar notas de reuniao* — "Marta, anota aqui do 1:1 com a Maria: [notas]"
 📊 *Status da equipe* — "Marta, como ta a galera?"
 ✉️ *Draft de email* — "Marta, manda email pro Pedro sobre o atraso do projeto"
@@ -313,12 +358,25 @@ Regras:
 - Para recorrencia: "toda segunda" → weekly, "todo dia" → daily, "a cada 2 semanas" → biweekly, "todo mes" → monthly
 - "text" deve conter APENAS o que lembrar (sem a parte de quando/recorrencia)
 
+Mapeamento PT-BR para recorrencia:
+- "todo dia" / "diariamente" → "daily"
+- "toda semana" / "semanalmente" → "weekly"
+- "a cada 2 semanas" / "quinzenalmente" → "biweekly"
+- "todo mes" / "mensalmente" → "monthly"
+- "dias uteis" / "segunda a sexta" → "weekdays"
+- "a cada 3 dias" → "every_3_days:3"
+- "a cada 5 dias" → "every_5_days:5"
+- "a cada N dias" → "every_N_days:N" (onde N e o numero de dias)
+- "toda segunda e quarta" → "specific_days:1,3" (0=domingo, 1=segunda, 2=terca, 3=quarta, 4=quinta, 5=sexta, 6=sabado)
+- "toda terca e quinta" → "specific_days:2,4"
+- "toda segunda, quarta e sexta" → "specific_days:1,3,5"
+
 Responda APENAS com JSON valido:
 {
   "text": "texto do lembrete (o que lembrar, sem quando)",
   "date": "YYYY-MM-DD",
   "time": "HH:MM",
-  "recurrence": null | "daily" | "weekly" | "biweekly" | "monthly",
+  "recurrence": null | "daily" | "weekly" | "biweekly" | "monthly" | "weekdays" | "every_N_days:N" | "specific_days:D,D,D",
   "confidence": 0.0-1.0
 }`;
 

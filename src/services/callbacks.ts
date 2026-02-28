@@ -10,9 +10,21 @@ import {
   snoozeInboxItem,
   updateInboxItemMetadata,
   updateDecisionStatus,
-  snoozeDecisionReview
+  snoozeDecisionReview,
+  getActiveCosConversationById,
+  cancelReminder,
+  fulfillCommitment,
+  updateCommitmentStatus,
+  getCosOutput,
+  insertSentEmail,
+  updateLastContact,
+  type CosConversation
 } from "../db/schema.js";
+import { sendEmail, isEmailEnabled } from "./email.js";
 import { log } from "../utils/logger.js";
+
+// Track in-flight email sends to prevent double-send on rapid clicks
+const emailSendsInFlight = new Set<number>();
 
 /**
  * Compute a date string N days from now (YYYY-MM-DD).
@@ -21,6 +33,20 @@ function daysFromNow(days: number): string {
   const d = new Date();
   d.setDate(d.getDate() + days);
   return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Parse callback data string into structured parts.
+ * Format: "action:itemId" or "action:itemId:convId"
+ * The convId is optional — when present, it links the callback to a conversation.
+ */
+function parseCallbackData(data: string): { action: string; itemId: number; convId?: number } {
+  const parts = data.split(":");
+  return {
+    action: parts[0],
+    itemId: parseInt(parts[1], 10),
+    convId: parts[2] ? parseInt(parts[2], 10) : undefined
+  };
 }
 
 /**
@@ -47,8 +73,13 @@ export async function handleCallbackQuery(query: TelegramCallbackQuery): Promise
     return;
   }
 
-  const [action, payload] = data.split(":");
-  const itemId = payload ? parseInt(payload, 10) : NaN;
+  const { action, itemId, convId } = parseCallbackData(data);
+
+  // Load conversation context if convId was included in the callback payload
+  const conv: CosConversation | null = convId ? await getActiveCosConversationById(convId) : null;
+  if (convId) {
+    log.info("callback:conv_context", { action, itemId, convId, convFound: !!conv });
+  }
 
   try {
     switch (action) {
@@ -159,6 +190,131 @@ export async function handleCallbackQuery(query: TelegramCallbackQuery): Promise
           ]);
         }
         log.info("callback:decision_superseded", { chatId, decisionId: itemId });
+        break;
+      }
+
+      case "reminder_cancel": {
+        if (isNaN(itemId)) break;
+        await cancelReminder(itemId);
+        await answerCallbackQuery(query.id, "Recorrencia cancelada!");
+        if (messageId) {
+          await editMessageButtons(chatId, messageId, [
+            [{ text: "Recorrencia cancelada", callback_data: "noop:0" }]
+          ]);
+        }
+        await sendText(chatId, "Lembrete recorrente cancelado.");
+        log.info("callback:reminder_cancel", { chatId, reminderId: itemId });
+        break;
+      }
+
+      case "email_send": {
+        if (isNaN(itemId)) break;
+        if (!isEmailEnabled()) {
+          await answerCallbackQuery(query.id, "Email nao configurado (SMTP).");
+          break;
+        }
+        const output = await getCosOutput(itemId);
+        if (!output) {
+          await answerCallbackQuery(query.id, "Draft nao encontrado.");
+          break;
+        }
+        // Idempotency: prevent double-send on rapid clicks
+        if (emailSendsInFlight.has(itemId)) {
+          await answerCallbackQuery(query.id, "Email sendo enviado...");
+          break;
+        }
+        emailSendsInFlight.add(itemId);
+        // Parse subject and body from draft format: **Assunto:** X\n\n body
+        const subjectMatch = output.content.match(/\*\*Assunto:\*\*\s*(.+)/);
+        const subject = subjectMatch ? subjectMatch[1].trim() : `Email para ${output.title}`;
+        // Body is everything after the subject line (skip the "**Assunto:**" line)
+        const bodyLines = output.content.split("\n");
+        const subjectLineIdx = bodyLines.findIndex(l => l.includes("**Assunto:**"));
+        const body = subjectLineIdx >= 0
+          ? bodyLines.slice(subjectLineIdx + 1).join("\n").replace(/^\s*\n/, "").trim()
+          : output.content;
+
+        // Find person email from the output metadata or cos_outputs
+        const personId = output.personId;
+        let recipientEmail: string | null = null;
+        if (personId) {
+          const { findPersonByName, listPeople } = await import("../db/schema.js");
+          const people = await listPeople(true);
+          const person = people.find(p => p.id === personId);
+          recipientEmail = person?.email ?? null;
+        }
+
+        if (!recipientEmail) {
+          await answerCallbackQuery(query.id, "Pessoa nao tem email cadastrado.");
+          break;
+        }
+
+        try {
+          await sendTypingIndicator(chatId);
+          const messageIdHeader = await sendEmail({ to: recipientEmail, subject, body });
+          await insertSentEmail({
+            chatId,
+            personId: personId ?? undefined,
+            outputId: itemId,
+            recipientEmail,
+            subject,
+            body,
+            messageIdHeader: messageIdHeader ?? undefined
+          });
+          if (personId) await updateLastContact(personId);
+          await answerCallbackQuery(query.id, "Email enviado!");
+          if (messageId) {
+            await editMessageButtons(chatId, messageId, [
+              [{ text: "📧 Enviado ✓", callback_data: "noop:0" }]
+            ]);
+          }
+          await sendText(chatId, `Email enviado para ${recipientEmail}!`);
+          log.info("callback:email_sent", { chatId, outputId: itemId, to: recipientEmail });
+        } catch (error) {
+          log.error("callback:email_send_failed", { chatId, outputId: itemId, error });
+          emailSendsInFlight.delete(itemId);
+          await answerCallbackQuery(query.id, "Erro ao enviar email.");
+          await sendText(chatId, "Nao consegui enviar o email. Verifique as configuracoes SMTP.");
+        }
+        break;
+      }
+
+      case "email_adjust": {
+        if (isNaN(itemId)) break;
+        await answerCallbackQuery(query.id, "Pode mandar o ajuste.");
+        if (messageId) {
+          await editMessageButtons(chatId, messageId, [
+            [{ text: "✏️ Ajustando...", callback_data: "noop:0" }]
+          ]);
+        }
+        await sendText(chatId, "Me diz o que quer ajustar no email (tom, adicionar info, etc.).");
+        log.info("callback:email_adjust", { chatId, outputId: itemId });
+        break;
+      }
+
+      case "commitment_done": {
+        if (isNaN(itemId)) break;
+        await fulfillCommitment(itemId);
+        await answerCallbackQuery(query.id, "Compromisso cumprido!");
+        if (messageId) {
+          await editMessageButtons(chatId, messageId, [
+            [{ text: "✅ Cumprido", callback_data: "noop:0" }]
+          ]);
+        }
+        log.info("callback:commitment_done", { chatId, commitmentId: itemId });
+        break;
+      }
+
+      case "commitment_cancel": {
+        if (isNaN(itemId)) break;
+        await updateCommitmentStatus(itemId, "cancelled");
+        await answerCallbackQuery(query.id, "Compromisso cancelado.");
+        if (messageId) {
+          await editMessageButtons(chatId, messageId, [
+            [{ text: "❌ Cancelado", callback_data: "noop:0" }]
+          ]);
+        }
+        log.info("callback:commitment_cancel", { chatId, commitmentId: itemId });
         break;
       }
 

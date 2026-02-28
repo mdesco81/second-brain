@@ -27,12 +27,16 @@ import {
   loadMemoriesByType,
   loadMemoriesForPerson,
   loadWeeklySummary,
+  computeRelationshipHealth,
+  insertCommitment,
+  listCommitmentsForMeeting,
   logCosEvent,
   markMemoryUsed,
   markNotesCaptured,
   Person,
   touchCosConversation,
   updateCosConversation,
+  updateLastContact,
   updateLastOneOnOne,
   upsertCosMemory,
   upsertPerson
@@ -51,6 +55,23 @@ import {
   buildStatusPrompt
 } from "./prompts.js";
 import { createCalendarEvent, isCalendarEnabled } from "../../services/calendar.js";
+
+// ── Safe JSON extraction utility ─────────────────────────────────────
+
+/**
+ * Safely extract and parse the first JSON object from a string.
+ * Handles cases where the LLM response contains text around the JSON.
+ * Returns the fallback value if parsing fails.
+ */
+function safeParseJson<T>(text: string, fallback: T): T {
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return fallback;
+    return JSON.parse(jsonMatch[0]) as T;
+  } catch {
+    return fallback;
+  }
+}
 
 // ── Multi-instruction detection ──────────────────────────────────────
 
@@ -88,13 +109,9 @@ async function splitMultipleInstructions(text: string): Promise<string[]> {
 
     if (!response) return [text];
 
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return [text];
-
-    const parsed = JSON.parse(jsonMatch[0]) as {
-      multiple?: boolean;
-      instructions?: string[];
-    };
+    const parsed = safeParseJson<{ multiple?: boolean; instructions?: string[] }>(
+      response, { multiple: false }
+    );
 
     if (parsed.multiple && Array.isArray(parsed.instructions) && parsed.instructions.length >= 2) {
       log.info("marta:multi_instruction_detected", {
@@ -198,6 +215,15 @@ async function processSingleInstruction(
   rawRequest: string,
   mediaContent: string | undefined
 ): Promise<AgentResult> {
+  // Quick brief shortcut — bypasses intent classification for speed
+  const quickBriefMatch = rawRequest.match(
+    /(?:vou entrar|entrando|indo pr[ao] (?:1[:\-]1|one.on.one|call|reuniao)|call agora|reuniao agora)\s+(?:com\s+(?:o\s+|a\s+)?)?(.+)/i
+  );
+  if (quickBriefMatch) {
+    const personName = quickBriefMatch[1].trim().replace(/[.,!?]+$/, "");
+    return await handleQuickBrief(chatId, messageId, personName);
+  }
+
   // For intent classification, include a hint about attached media so the NLU
   // can better classify (e.g. PDF with notes → intent "notas")
   const classificationText = mediaContent
@@ -374,6 +400,102 @@ async function executeIntent(
   }
 }
 
+// ── Quick Brief (template-based, no AI call) ─────────────────────────
+
+async function handleQuickBrief(
+  chatId: number,
+  _messageId: number,
+  personName: string
+): Promise<AgentResult> {
+  await sendTypingIndicator(chatId);
+
+  const resolved = await resolvePersonFuzzy(personName);
+  if (!resolved) {
+    await sendText(chatId, `Nao encontrei "${personName}" na equipe. Verifique o nome.`);
+    return { success: false, agentId: "chiefofstaff", summary: "Quick brief: person not found", error: "person_not_found" };
+  }
+
+  // Parallel data fetch for speed
+  const [openItems, memories, commitments] = await Promise.all([
+    listItemsByPerson(resolved.name, ["open"]),
+    loadMemoriesForPerson(resolved.id, 5),
+    listCommitmentsForMeeting([resolved.id])
+  ]);
+
+  const overdueItems = openItems.filter(i => i.dueAt && new Date(i.dueAt) < new Date());
+  const topItems = openItems.slice(0, 7);
+
+  // Build template
+  let msg = `⚡ *Quick Brief — ${resolved.name}*`;
+  if (resolved.role) msg += ` (${resolved.role})`;
+  msg += "\n\n";
+
+  if (topItems.length > 0) {
+    msg += `📌 *Pendencias* (${openItems.length} aberto${openItems.length !== 1 ? "s" : ""})\n`;
+    for (const item of topItems) {
+      const isOverdue = item.dueAt && new Date(item.dueAt) < new Date();
+      const flag = isOverdue ? "🔴 " : "• ";
+      const title = item.actionTitle || item.summaryPtBr || "Sem titulo";
+      const truncated = title.length > 50 ? title.slice(0, 50) + "..." : title;
+      msg += `${flag}#${item.id} ${truncated}\n`;
+    }
+    if (openItems.length > 7) {
+      msg += `  _... e mais ${openItems.length - 7}_\n`;
+    }
+    msg += "\n";
+  } else {
+    msg += "✅ Nenhuma pendencia aberta com esta pessoa.\n\n";
+  }
+
+  if (overdueItems.length > 0) {
+    msg += `⚠️ ${overdueItems.length} item${overdueItems.length > 1 ? "s" : ""} atrasado${overdueItems.length > 1 ? "s" : ""}!\n\n`;
+  }
+
+  // Show open commitments
+  if (commitments.length > 0) {
+    const mine = commitments.filter(c => c.direction === "mine");
+    const theirs = commitments.filter(c => c.direction === "theirs");
+    msg += "🤝 *Compromissos Abertos*\n";
+    if (mine.length > 0) {
+      msg += "_Meus:_\n";
+      for (const c of mine.slice(0, 3)) {
+        const dl = c.deadline ? ` (ate ${c.deadline})` : "";
+        msg += `• ${c.summary}${dl}\n`;
+      }
+    }
+    if (theirs.length > 0) {
+      msg += `_De ${resolved.name}:_\n`;
+      for (const c of theirs.slice(0, 3)) {
+        const dl = c.deadline ? ` (ate ${c.deadline})` : "";
+        msg += `• ${c.summary}${dl}\n`;
+      }
+    }
+    msg += "\n";
+  }
+
+  if (memories.length > 0) {
+    msg += "💡 *Lembrar*\n";
+    for (const m of memories) {
+      const content = m.content.length > 80 ? m.content.slice(0, 80) + "..." : m.content;
+      msg += `• ${content}\n`;
+    }
+    msg += "\n";
+  }
+
+  msg += "_Boa reuniao! Depois me manda as notas._ 📝";
+
+  await sendText(chatId, msg);
+
+  await logCosEvent({
+    chatId,
+    eventType: "quick_brief",
+    personId: resolved.id,
+    details: { personName: resolved.name, openItems: openItems.length, overdueItems: overdueItems.length }
+  });
+
+  return { success: true, agentId: "chiefofstaff", summary: `Quick brief: ${resolved.name} (${openItems.length} items, ${overdueItems.length} overdue)` };
+}
+
 // ── Intent: Briefing Pre-1:1 ──────────────────────────────────────────
 
 async function handleBriefing(
@@ -418,12 +540,13 @@ async function handleBriefing(
     return { success: false, agentId: "chiefofstaff", summary: "Pessoa nao encontrada.", error: "person_not_found" };
   }
 
-  const [openItems, overdueItems, memories, latestNotes, pendingDecisions] = await Promise.all([
+  const [openItems, overdueItems, memories, latestNotes, pendingDecisions, openCommitments] = await Promise.all([
     listItemsByPerson(person.name, ["open"]),
     listOverdueItems(chatId, 10),
     loadMemoriesForPerson(person.id),
     getLatestCosOutput(person.id, "one_on_one_notes"),
-    listDecisionsByPerson([person.id])
+    listDecisionsByPerson([person.id]),
+    listCommitmentsForMeeting([person.id])
   ]);
 
   // Mark memories as used (concurrent)
@@ -440,7 +563,8 @@ async function handleBriefing(
     memories,
     previousNotes: latestNotes?.content ?? null,
     tema: intent.tema,
-    pendingDecisions
+    pendingDecisions,
+    openCommitments
   });
 
   const response = await callClaude({ system, userMessage: user, maxTokens: 2048 });
@@ -538,7 +662,8 @@ async function handleNotas(
   const { system, user } = buildNotesProcessingPrompt({
     person,
     notesText,
-    memories
+    memories,
+    currentDate: new Date().toISOString().slice(0, 10)
   });
 
   const response = await callClaude({ system, userMessage: user, maxTokens: 4096 });
@@ -549,9 +674,13 @@ async function handleNotas(
 
   let parsed: {
     summary?: string;
+    executive_bullets?: string[];
     action_items?: Array<{ title: string; owner: string; due: string | null; priority: string }>;
     decisions?: Array<{ summary: string; rationale?: string; participants?: string[]; review_date?: string }>;
+    commitments?: Array<{ summary: string; direction: "mine" | "theirs"; deadline: string | null }>;
     person_insights?: string[];
+    team_mood?: string;
+    risks?: Array<{ description: string; severity: string }>;
     telegram_message?: string;
   };
 
@@ -651,8 +780,56 @@ async function handleNotas(
     }
   }
 
-  // Update last 1:1 timestamp
+  // Save commitments
+  let createdCommitments = 0;
+  if (parsed.commitments && Array.isArray(parsed.commitments)) {
+    for (const commitment of parsed.commitments) {
+      if (!commitment.summary) continue;
+      try {
+        await insertCommitment({
+          chatId,
+          personId: person.id,
+          direction: commitment.direction === "theirs" ? "theirs" : "mine",
+          summary: commitment.summary,
+          deadline: commitment.deadline || undefined
+        });
+        createdCommitments++;
+      } catch (error) {
+        log.warn("marta:commitment_creation_failed", { commitment, error });
+      }
+    }
+  }
+
+  // Save risks as memories
+  if (parsed.risks && Array.isArray(parsed.risks)) {
+    for (const risk of parsed.risks) {
+      if (!risk.description) continue;
+      const slug = risk.description.toLowerCase().replace(/[^a-z0-9à-ú]+/g, "_").slice(0, 40);
+      const key = `risk_${person.name.toLowerCase().replace(/\s+/g, "_")}_${slug}`;
+      await upsertCosMemory({
+        memoryType: "meeting_risk",
+        personId: person.id,
+        key,
+        content: `[${risk.severity ?? "medium"}] ${risk.description}`,
+        source: `1:1 notes ${new Date().toISOString().slice(0, 10)}`
+      });
+    }
+  }
+
+  // Save team mood as memory
+  if (parsed.team_mood) {
+    await upsertCosMemory({
+      memoryType: "person_mood",
+      personId: person.id,
+      key: `mood_${person.name.toLowerCase().replace(/\s+/g, "_")}`,
+      content: `${person.name} parecia ${parsed.team_mood} no 1:1 de ${new Date().toISOString().slice(0, 10)}`,
+      source: `1:1 notes ${new Date().toISOString().slice(0, 10)}`
+    });
+  }
+
+  // Update last 1:1 timestamp and last contact
   await updateLastOneOnOne(person.id);
+  await updateLastContact(person.id);
 
   // Auto-link notes with calendar event (if there's a meeting today with this person)
   try {
@@ -672,7 +849,13 @@ async function handleNotas(
     personId: person.id,
     title: `Notas 1:1 ${person.name} — ${new Date().toISOString().slice(0, 10)}`,
     content: response,
-    metadata: { actionItemsCreated: createdItems, decisionsCreated: createdDecisions }
+    metadata: {
+      actionItemsCreated: createdItems,
+      decisionsCreated: createdDecisions,
+      commitmentsCreated: createdCommitments,
+      executiveBullets: parsed.executive_bullets ?? [],
+      teamMood: parsed.team_mood ?? null
+    }
   });
 
   await logCosEvent({
@@ -680,7 +863,7 @@ async function handleNotas(
     eventType: "notes_processed",
     personId: person.id,
     outputId,
-    details: { actionItemsCreated: createdItems, decisionsCreated: createdDecisions }
+    details: { actionItemsCreated: createdItems, decisionsCreated: createdDecisions, commitmentsCreated: createdCommitments }
   });
 
   // Send Telegram message
@@ -692,13 +875,16 @@ async function handleNotas(
   if (createdDecisions > 0) {
     footerParts.push(`📋 ${createdDecisions} ${createdDecisions > 1 ? "decisoes registradas" : "decisao registrada"} no journal`);
   }
+  if (createdCommitments > 0) {
+    footerParts.push(`🤝 ${createdCommitments} compromisso${createdCommitments > 1 ? "s registrados" : " registrado"}`);
+  }
   const footer = footerParts.length > 0
     ? `\n\n${footerParts.join("\n")}. Algum ajuste ou algo que eu perdi?`
-    : "\n\nNenhum action item ou decisao identificados. Quer que eu revise algo?";
+    : "\n\nNenhum action item, decisao ou compromisso identificados. Quer que eu revise algo?";
 
   await sendText(chatId, telegramMsg + footer);
 
-  return { success: true, agentId: "chiefofstaff", summary: `Notas processadas: ${createdItems} action items, ${createdDecisions} decisoes.` };
+  return { success: true, agentId: "chiefofstaff", summary: `Notas processadas: ${createdItems} items, ${createdDecisions} decisoes, ${createdCommitments} compromissos.` };
 }
 
 // ── Intent: Status Cross-Team ─────────────────────────────────────────
@@ -717,10 +903,11 @@ async function handleStatus(
     return { success: true, agentId: "chiefofstaff", summary: "Nenhuma pessoa registrada." };
   }
 
-  const [overdueItems, staleItems, memories] = await Promise.all([
+  const [overdueItems, staleItems, memories, healthScores] = await Promise.all([
     listOverdueItems(undefined, 50),
     listStaleItems(undefined, 3, 50),
-    loadMemoriesByType("pattern", 10)
+    loadMemoriesByType("pattern", 10),
+    computeRelationshipHealth(chatId)
   ]);
 
   const { system, user } = buildStatusPrompt({
@@ -730,7 +917,8 @@ async function handleStatus(
       totalStale: staleItems.length,
       totalOpen: peopleWithItems.reduce((acc, p) => acc + p.stats.totalOpen, 0)
     },
-    memories
+    memories,
+    healthScores
   });
 
   const response = await callClaude({ system, userMessage: user, maxTokens: 2048 });
@@ -855,10 +1043,24 @@ async function handleEmail(
     context: { originalRequest: rawRequest, intent, outputId }
   });
   await appendConversationMessage(convId, "user", rawRequest);
-  await appendConversationMessage(convId, "assistant", response + "\n\nQuer ajustar o tom ou algum ponto?");
-  await updateCosConversation(convId, { state: "clarifying" });
 
-  await sendText(chatId, response + "\n\nQuer ajustar o tom ou algum ponto?");
+  // If SMTP is enabled and person has email, offer send button
+  const emailEnabled = (await import("../../services/email.js")).isEmailEnabled();
+  if (emailEnabled && person.email) {
+    const footer = `\n\nDestinatario: ${person.email}`;
+    await appendConversationMessage(convId, "assistant", response + footer);
+    await updateCosConversation(convId, { state: "clarifying" });
+    await sendTextWithButtons(chatId, response + footer, [
+      [
+        { text: "📧 Enviar", callback_data: `email_send:${outputId}` },
+        { text: "✏️ Ajustar", callback_data: `email_adjust:${outputId}` }
+      ]
+    ]);
+  } else {
+    await appendConversationMessage(convId, "assistant", response + "\n\nQuer ajustar o tom ou algum ponto?");
+    await updateCosConversation(convId, { state: "clarifying" });
+    await sendText(chatId, response + "\n\nQuer ajustar o tom ou algum ponto?");
+  }
 
   return { success: true, agentId: "chiefofstaff", summary: `Draft de email gerado para ${person.name}.` };
 }
@@ -987,6 +1189,12 @@ async function handleReminder(
   const recurrenceLabel = parsed.recurrence ? ` (recorrente: ${parsed.recurrence})` : "";
 
   await sendText(chatId, `🔔 Lembrete agendado!\n\n📝 ${parsed.text}\n📅 ${dateStr} às ${timeStr}${recurrenceLabel}\n\nVou te avisar na hora.`);
+
+  if (parsed.recurrence) {
+    await sendTextWithButtons(chatId, `Recorrencia: ${parsed.recurrence}`, [
+      [{ text: "Cancelar recorrencia", callback_data: `reminder_cancel:${reminderId}` }]
+    ]);
+  }
 
   return { success: true, agentId: "chiefofstaff", summary: `Lembrete criado: ${parsed.text}` };
 }
@@ -1196,6 +1404,218 @@ async function handleConversaGeral(
 
   await sendText(chatId, response);
   return { success: true, agentId: "chiefofstaff", summary: "Resposta conversacional enviada." };
+}
+
+// ── Dashboard Notes Processing (shared core logic) ──────────────────
+
+export interface DashboardNotesResult {
+  summary: string;
+  executiveBullets: string[];
+  actionItems: number;
+  decisions: number;
+  commitments: number;
+  teamMood: string | null;
+}
+
+export async function processNotesFromDashboard(params: {
+  chatId: number;
+  personId: number;
+  notesText: string;
+}): Promise<DashboardNotesResult> {
+  const people = await getPeopleList(params.chatId);
+  const person = people.find((p) => p.id === params.personId);
+  if (!person) {
+    throw new Error(`Person not found: ${params.personId}`);
+  }
+
+  const memories = await loadMemoriesForPerson(person.id);
+
+  const { system, user } = buildNotesProcessingPrompt({
+    person,
+    notesText: params.notesText,
+    memories,
+    currentDate: new Date().toISOString().slice(0, 10)
+  });
+
+  const response = await callClaude({ system, userMessage: user, maxTokens: 4096 });
+  if (!response) {
+    throw new Error("Claude call returned null");
+  }
+
+  let parsed: {
+    summary?: string;
+    executive_bullets?: string[];
+    action_items?: Array<{ title: string; owner: string; due: string | null; priority: string }>;
+    decisions?: Array<{ summary: string; rationale?: string; participants?: string[]; review_date?: string }>;
+    commitments?: Array<{ summary: string; direction: "mine" | "theirs"; deadline: string | null }>;
+    person_insights?: string[];
+    team_mood?: string;
+    risks?: Array<{ description: string; severity: string }>;
+    telegram_message?: string;
+  };
+
+  try {
+    const jsonMatch = response.match(/\{[\s\S]*\}/);
+    parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { summary: response };
+  } catch {
+    parsed = { summary: response };
+  }
+
+  const categories = await listCategories();
+  const defaultCategory = categories[0]?.id ?? 1;
+  let createdItems = 0;
+
+  // Create action items
+  if (parsed.action_items && Array.isArray(parsed.action_items)) {
+    for (const item of parsed.action_items) {
+      try {
+        await insertInboxItem({
+          chatId: params.chatId,
+          messageId: 0,
+          inputType: "text",
+          rawText: `[1:1 ${person.name}] ${item.title}`,
+          normalizedText: item.title,
+          summaryPtBr: item.title,
+          categoryId: defaultCategory,
+          bucket: "AREAS",
+          action: "CREATE_TASK",
+          priority: (item.priority as "ALTA" | "MEDIA" | "BAIXA") || "MEDIA",
+          actionTitle: item.title,
+          dueAt: item.due || undefined,
+          followUpWith: item.owner || person.name,
+          processingStage: "planejado",
+          confidence: 0.9,
+          metadata: { source: "marta_dashboard_upload", personId: person.id }
+        });
+        createdItems++;
+      } catch (error) {
+        log.warn("dashboard_notes:action_item_failed", { item, error });
+      }
+    }
+  }
+
+  // Save person insights
+  if (parsed.person_insights && Array.isArray(parsed.person_insights)) {
+    for (const insight of parsed.person_insights) {
+      const slug = insight.toLowerCase().replace(/[^a-z0-9à-ú]+/g, "_").slice(0, 40);
+      const key = `${person.name.toLowerCase().replace(/\s+/g, "_")}_${slug}`;
+      await upsertCosMemory({
+        memoryType: "person_insight",
+        personId: person.id,
+        key,
+        content: insight,
+        source: `dashboard upload ${new Date().toISOString().slice(0, 10)}`
+      });
+    }
+  }
+
+  // Save decisions
+  let createdDecisions = 0;
+  if (parsed.decisions && Array.isArray(parsed.decisions)) {
+    for (const decision of parsed.decisions) {
+      if (!decision.summary) continue;
+      try {
+        const personIds = [person.id];
+        if (decision.participants && Array.isArray(decision.participants)) {
+          for (const name of decision.participants) {
+            const resolved = await resolvePersonFuzzy(name, people);
+            if (resolved && !personIds.includes(resolved.id)) {
+              personIds.push(resolved.id);
+            }
+          }
+        }
+        const reviewDate = decision.review_date
+          ? new Date(decision.review_date)
+          : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+        await insertDecision({
+          chatId: params.chatId,
+          personIds,
+          summary: decision.summary,
+          rationale: decision.rationale ?? undefined,
+          context: `1:1 com ${person.name} (dashboard upload)`,
+          decidedAt: new Date(),
+          reviewAt: reviewDate
+        });
+        createdDecisions++;
+      } catch (error) {
+        log.warn("dashboard_notes:decision_failed", { decision, error });
+      }
+    }
+  }
+
+  // Save commitments
+  let createdCommitments = 0;
+  if (parsed.commitments && Array.isArray(parsed.commitments)) {
+    for (const commitment of parsed.commitments) {
+      if (!commitment.summary) continue;
+      try {
+        await insertCommitment({
+          chatId: params.chatId,
+          personId: person.id,
+          direction: commitment.direction === "theirs" ? "theirs" : "mine",
+          summary: commitment.summary,
+          deadline: commitment.deadline || undefined
+        });
+        createdCommitments++;
+      } catch (error) {
+        log.warn("dashboard_notes:commitment_failed", { commitment, error });
+      }
+    }
+  }
+
+  // Save risks and mood
+  if (parsed.risks && Array.isArray(parsed.risks)) {
+    for (const risk of parsed.risks) {
+      if (!risk.description) continue;
+      const slug = risk.description.toLowerCase().replace(/[^a-z0-9à-ú]+/g, "_").slice(0, 40);
+      await upsertCosMemory({
+        memoryType: "meeting_risk",
+        personId: person.id,
+        key: `risk_${person.name.toLowerCase().replace(/\s+/g, "_")}_${slug}`,
+        content: `[${risk.severity ?? "medium"}] ${risk.description}`,
+        source: `dashboard upload ${new Date().toISOString().slice(0, 10)}`
+      });
+    }
+  }
+
+  if (parsed.team_mood) {
+    await upsertCosMemory({
+      memoryType: "person_mood",
+      personId: person.id,
+      key: `mood_${person.name.toLowerCase().replace(/\s+/g, "_")}`,
+      content: `${person.name} parecia ${parsed.team_mood} no 1:1 de ${new Date().toISOString().slice(0, 10)}`,
+      source: `dashboard upload ${new Date().toISOString().slice(0, 10)}`
+    });
+  }
+
+  await updateLastOneOnOne(person.id);
+  await updateLastContact(person.id);
+
+  // Save output record
+  await insertCosOutput({
+    chatId: params.chatId,
+    outputType: "one_on_one_notes",
+    personId: person.id,
+    title: `Notas 1:1 ${person.name} — ${new Date().toISOString().slice(0, 10)} (dashboard)`,
+    content: response,
+    metadata: {
+      actionItemsCreated: createdItems,
+      decisionsCreated: createdDecisions,
+      commitmentsCreated: createdCommitments,
+      executiveBullets: parsed.executive_bullets ?? [],
+      teamMood: parsed.team_mood ?? null,
+      source: "dashboard_upload"
+    }
+  });
+
+  return {
+    summary: parsed.summary ?? "Notas processadas.",
+    executiveBullets: parsed.executive_bullets ?? [],
+    actionItems: createdItems,
+    decisions: createdDecisions,
+    commitments: createdCommitments,
+    teamMood: parsed.team_mood ?? null
+  };
 }
 
 // ── Registration ──────────────────────────────────────────────────────

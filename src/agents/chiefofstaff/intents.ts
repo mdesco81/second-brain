@@ -83,7 +83,8 @@ Responda APENAS com JSON valido:
 
 export async function classifyMartaIntent(
   text: string,
-  peopleList?: Person[]
+  peopleList?: Person[],
+  conversationHistory?: string
 ): Promise<MartaIntent> {
   const fallback: MartaIntent = {
     intent: "conversa_geral",
@@ -101,9 +102,13 @@ export async function classifyMartaIntent(
       ? `\nPessoas registradas: ${people.map((p) => `${p.name}${p.nameVariants.length > 0 ? ` (${p.nameVariants.join(", ")})` : ""}${p.role ? ` — ${p.role}` : ""}`).join("; ")}`
       : "";
 
+    const classificationMessage = conversationHistory
+      ? `Conversa anterior:\n${conversationHistory}\n\nNova mensagem do usuario: ${text}`
+      : text;
+
     const response = await callClaude({
       system: INTENT_SYSTEM_PROMPT + peopleContext,
-      userMessage: text,
+      userMessage: classificationMessage,
       model: "fast",
       maxTokens: 512
     });

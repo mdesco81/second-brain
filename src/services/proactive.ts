@@ -11,10 +11,13 @@ import {
   getUpcomingEvents,
   insertProactiveRun,
   listArchiveSuggestions,
+  computeRelationshipHealth,
+  listCommitmentsForMeeting,
   listDecisionsByPerson,
   listDecisionsForReview,
   listItemsByPerson,
   listOpenActionItems,
+  listOverdueCommitments,
   listOverdueItems,
   listPendingDrafts,
   listPeople,
@@ -61,13 +64,14 @@ async function deliverDailyRun(chatIds: number[]): Promise<void> {
     try {
       // Load core data + enriched data in parallel
       const calendarEnabled = isCalendarEnabled();
-      const [focusItems, overdueItems, staleItems, calendarEvents, people, pendingDrafts] = await Promise.all([
+      const [focusItems, overdueItems, staleItems, calendarEvents, people, pendingDrafts, overdueCommits] = await Promise.all([
         listOpenActionItems(chatId, 8),
         listOverdueItems(chatId, 5),
         listStaleItems(chatId, 3, 5),
         calendarEnabled ? getTodayEvents(chatId) : Promise.resolve([] as CalendarEvent[]),
         listPeople(true),
-        listPendingDrafts(chatId)
+        listPendingDrafts(chatId),
+        listOverdueCommitments(chatId)
       ]);
 
       // Build team stats for direct reports
@@ -80,7 +84,8 @@ async function deliverDailyRun(chatIds: number[]): Promise<void> {
         staleItems,
         calendarEvents.length > 0 ? calendarEvents : undefined,
         teamStats.length > 0 ? teamStats : undefined,
-        pendingDrafts.length > 0 ? pendingDrafts : undefined
+        pendingDrafts.length > 0 ? pendingDrafts : undefined,
+        overdueCommits.length > 0 ? overdueCommits : undefined
       );
       await sendText(chatId, message);
       await insertProactiveRun(chatId, message, "daily");
@@ -309,6 +314,23 @@ export function startProactiveScheduler(): void {
     { timezone: env.TIMEZONE }
   );
 
+  // Relationship health alerts: weekly, same day as weekly report, 2h after
+  const healthAlertHour = Math.min(env.WEEKLY_REPORT_HOUR + 2, 21);
+  const healthAlertExpression = `0 ${healthAlertHour} * * ${env.WEEKLY_REPORT_DAY}`;
+  cron.schedule(
+    healthAlertExpression,
+    async () => {
+      try {
+        const chatIds = await listProactiveChats();
+        if (chatIds.length === 0) return;
+        await deliverRelationshipHealthAlerts(chatIds);
+      } catch (error) {
+        log.error("Relationship health alert failed", { error });
+      }
+    },
+    { timezone: env.TIMEZONE }
+  );
+
   // Housekeeping: expire stale conversations and decay unused memories (daily at 3am)
   cron.schedule(
     "0 3 * * *",
@@ -490,6 +512,34 @@ async function deliverMartaCrossTeamInsight(chatIds: number[]): Promise<void> {
   log.info("Marta cross-team insight delivered", { recipients: chatIds.length, insightsCount: insights.length });
 }
 
+async function deliverRelationshipHealthAlerts(chatIds: number[]): Promise<void> {
+  for (const chatId of chatIds) {
+    try {
+      const healthScores = await computeRelationshipHealth(chatId);
+      const coldRelationships = healthScores.filter((h) => h.level === "cold");
+
+      if (coldRelationships.length === 0) continue;
+
+      const lines: string[] = ["🌡️ *Alerta de Saude de Relacionamentos*", ""];
+      for (const r of coldRelationships) {
+        lines.push(`🔴 *${r.personName}* — score: ${r.score}/100`);
+        for (const alert of r.alerts) {
+          lines.push(`  • ${alert}`);
+        }
+        lines.push("");
+      }
+      lines.push("_Considere agendar um 1:1 ou mandar uma mensagem para reconectar._");
+
+      const message = lines.join("\n");
+      await sendText(chatId, message);
+      await insertProactiveRun(chatId, message, "weekly");
+      log.info("relationship_health:alert_sent", { chatId, coldCount: coldRelationships.length });
+    } catch (error) {
+      log.error("relationship_health:alert_failed", { chatId, error });
+    }
+  }
+}
+
 // ── Calendar-driven proactive delivery ───────────────────────────────
 
 async function deliverPreMeetingBriefs(chatId: number): Promise<void> {
@@ -508,10 +558,11 @@ async function deliverPreMeetingBriefs(chatId: number): Promise<void> {
 
       // For 1:1s with known person, build a rich brief
       if (person) {
-        const [openItems, memories, pendingDecisions] = await Promise.all([
+        const [openItems, memories, pendingDecisions, commitments] = await Promise.all([
           listItemsByPerson(person.name, ["open"]),
           loadMemoriesForPerson(person.id, 5),
-          listDecisionsByPerson([person.id], 5)
+          listDecisionsByPerson([person.id], 5),
+          listCommitmentsForMeeting([person.id])
         ]);
 
         const message = buildPreMeetingBrief({
@@ -520,6 +571,7 @@ async function deliverPreMeetingBriefs(chatId: number): Promise<void> {
           openItems,
           memories,
           pendingDecisions,
+          commitments,
           minutesUntil
         });
         await sendText(chatId, message);

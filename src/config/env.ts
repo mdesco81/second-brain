@@ -30,7 +30,15 @@ const envSchema = z.object({
   GOOGLE_REFRESH_TOKEN: z.preprocess((v) => v === "" ? undefined : v, z.string().min(1).optional()),
   CALENDAR_SYNC_INTERVAL_MIN: z.coerce.number().int().min(1).max(60).default(5),
   PRE_MEETING_MINUTES: z.coerce.number().int().min(5).max(60).default(15),
-  POST_MEETING_MINUTES: z.coerce.number().int().min(5).max(30).default(10)
+  POST_MEETING_MINUTES: z.coerce.number().int().min(5).max(30).default(10),
+
+  // SMTP email sending (all optional — email disabled when not configured)
+  SMTP_HOST: z.preprocess((v) => v === "" ? undefined : v, z.string().min(1).optional()),
+  SMTP_PORT: z.coerce.number().int().min(1).max(65535).default(587),
+  SMTP_SECURE: z.preprocess((v) => v === "true" || v === "1", z.boolean().default(false)),
+  SMTP_USER: z.preprocess((v) => v === "" ? undefined : v, z.string().min(1).optional()),
+  SMTP_PASS: z.preprocess((v) => v === "" ? undefined : v, z.string().min(1).optional()),
+  SMTP_FROM: z.preprocess((v) => v === "" ? undefined : v, z.string().min(1).optional())
 });
 
 const parsed = envSchema.safeParse(process.env);

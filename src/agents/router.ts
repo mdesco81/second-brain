@@ -10,9 +10,11 @@ import {
   completeCosConversation,
   createCosConversation,
   getActiveCosConversation,
+  listPeople,
   updateCosConversation
 } from "../db/schema.js";
 import { handleFollowUp } from "./chiefofstaff/index.js";
+import { classifyMartaIntent } from "./chiefofstaff/intents.js";
 import { buildHelpMessage } from "./chiefofstaff/prompts.js";
 import pdfParse from "pdf-parse";
 
@@ -78,16 +80,14 @@ export async function classifyAgentIntent(text: string): Promise<AgentIntent> {
       return fallback;
     }
 
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
+    let parsed: { agentId?: string; confidence?: number; metadata?: Record<string, unknown> };
+    try {
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return fallback;
+      parsed = JSON.parse(jsonMatch[0]);
+    } catch {
       return fallback;
     }
-
-    const parsed = JSON.parse(jsonMatch[0]) as {
-      agentId?: string;
-      confidence?: number;
-      metadata?: Record<string, unknown>;
-    };
 
     return {
       agentId: parsed.agentId || "unknown",
@@ -255,12 +255,24 @@ export async function routeToMarta(
     return;
   }
 
-  // When user explicitly invokes "Marta" keyword, close any active conversation
-  // so the new request is processed fresh instead of being treated as a follow-up.
+  // When user explicitly invokes "Marta" keyword, check if the new request matches
+  // the active conversation's intent. If same intent → treat as follow-up (don't close).
+  // If different intent → close the old conversation and process fresh.
   const activeConv = await getActiveCosConversation(chatId);
   if (activeConv) {
-    await completeCosConversation(activeConv.id);
-    log.info("marta:explicit_keyword_closed_conversation", { chatId, convId: activeConv.id, prevIntent: activeConv.intent });
+    const newIntent = await classifyMartaIntent(strippedText);
+    if (newIntent.intent === activeConv.intent) {
+      // Same intent — let the normal Marta processing detect the active conversation
+      // and treat this as a follow-up instead of starting a new conversation.
+      log.info("marta:explicit_keyword_same_intent_follow_up", {
+        chatId, convId: activeConv.id, intent: activeConv.intent
+      });
+    } else {
+      await completeCosConversation(activeConv.id);
+      log.info("marta:explicit_keyword_closed_conversation", {
+        chatId, convId: activeConv.id, prevIntent: activeConv.intent, newIntent: newIntent.intent
+      });
+    }
   }
 
   // Extract content from PDF/image attachments
@@ -294,6 +306,106 @@ export async function routeToMarta(
   }
 }
 
+// ── Smart Conversational Routing (no keyword required) ──────────────
+
+export interface SmartRouteResult {
+  agent: "marta" | "jarbas" | "intake";
+  confidence: number;
+  reasoning: string;
+}
+
+const SMART_ROUTING_PROMPT = `Voce e um meta-roteador de mensagens. Classifique se a mensagem do usuario deve ser processada por um assistente virtual ou capturada como informacao.
+
+AGENTES DISPONIVEIS:
+
+1. "marta" — Chief of Staff virtual. Responsavel por:
+   - Briefings e preparacao para reunioes/1:1s ("prepara o briefing", "me ajuda com o 1:1", "o que pegar com")
+   - Processar notas de reuniao ("anota aqui", "notas do 1:1", "acabei de sair da reuniao", "segue o transcript")
+   - Status da equipe ("como ta a galera", "panorama", "status")
+   - Draft de emails ("escreve um email", "manda mensagem pro", "email de cobranca")
+   - Registrar pessoa na equipe ("adiciona o fulano", "novo liderado", "registra")
+   - Lembretes ("me lembra", "nao esquece de", "lembrete")
+   - Agendar eventos ("agendar reuniao", "marca um 1:1", "coloca na agenda")
+   - Reflexao estrategica ("o que tenho negligenciado", "reflexao", "analise estrategica")
+   - Conversa sobre gestao de equipe, lideranca, follow-ups, compromissos
+
+2. "jarbas" — Ghostwriter de conteudo. Responsavel por:
+   - Escrever posts para LinkedIn
+   - Criar artigos longos
+   - Gerar conteudo sobre um tema
+   - Qualquer pedido de criacao de texto/conteudo para publicacao
+
+3. "intake" — Captura de informacao/conhecimento. Para:
+   - Links, artigos, referencias para ler depois
+   - Notas pessoais, ideias soltas, pensamentos
+   - Informacoes para guardar (financeiro, saude, estudos)
+   - Qualquer coisa que NAO e um pedido de acao para Marta ou Jarbas
+   - Mensagens ambiguas ou muito curtas para classificar com confianca
+
+REGRAS CRITICAS:
+- Se menciona pessoas da equipe + acao (briefing, notas, email, status) → "marta" com confianca alta
+- Se menciona criar/escrever conteudo/post/artigo → "jarbas" com confianca alta
+- Se e uma informacao solta, link, nota pessoal → "intake"
+- Se for ambiguo, prefira "intake" com confianca baixa (< 0.5)
+- Confianca deve refletir o quao certo voce esta: 0.9+ = obvio, 0.7-0.9 = provavel, < 0.7 = incerto
+
+Responda APENAS com JSON valido:
+{"agent": "marta" | "jarbas" | "intake", "confidence": 0.0-1.0, "reasoning": "explicacao curta"}`;
+
+export async function smartRouteMessage(
+  text: string,
+  chatId: number
+): Promise<SmartRouteResult> {
+  const fallback: SmartRouteResult = { agent: "intake", confidence: 0.5, reasoning: "fallback" };
+
+  // Skip very short messages — not enough context to classify
+  if (text.length < 5) return fallback;
+
+  try {
+    // Load registered people names for context
+    const people = await listPeople(true);
+    const peopleContext = people.length > 0
+      ? `\nPessoas registradas na equipe: ${people.map((p) => p.name).join(", ")}`
+      : "";
+
+    const response = await callClaude({
+      system: SMART_ROUTING_PROMPT + peopleContext,
+      userMessage: text,
+      model: "fast",
+      maxTokens: 128
+    });
+
+    if (!response) return fallback;
+
+    let parsed: { agent?: string; confidence?: number; reasoning?: string };
+    try {
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return fallback;
+      parsed = JSON.parse(jsonMatch[0]);
+    } catch {
+      return fallback;
+    }
+
+    const validAgents = ["marta", "jarbas", "intake"];
+    const agent = validAgents.includes(parsed.agent ?? "")
+      ? (parsed.agent as SmartRouteResult["agent"])
+      : "intake";
+    const confidence = typeof parsed.confidence === "number" ? parsed.confidence : 0.5;
+
+    log.info("smart_route:classified", {
+      agent,
+      confidence,
+      reasoning: parsed.reasoning,
+      textPreview: text.slice(0, 80)
+    });
+
+    return { agent, confidence, reasoning: parsed.reasoning ?? "" };
+  } catch (error) {
+    log.warn("smart_route:classification_failed", { error });
+    return fallback;
+  }
+}
+
 export async function handleMartaFollowUpFromIntake(
   chatId: number,
   messageId: number,
@@ -312,11 +424,11 @@ export async function handleMartaFollowUpFromIntake(
     const context = activeConv.context as { originalRequest?: string; retryCount?: number };
     const retryCount = context.retryCount ?? 0;
 
-    if (retryCount >= 1) {
-      // Already retried once — stop the loop, complete conversation, let Second Brain handle it
+    if (retryCount >= 3) {
+      // Already retried 3 times — stop the loop, complete conversation, save to inbox
       await completeCosConversation(activeConv.id);
       log.info("jarbas:follow_up_max_retries", { chatId, retryCount });
-      await sendText(chatId, "Nao consegui entender o pedido para o Jarbas. Tente usar: \"Jarbas escreve um post sobre [tema]\" ou \"Jarbas faz um artigo sobre [tema]\".");
+      await sendText(chatId, "Nao consegui processar para Jarbas. Guardei como item no seu inbox.");
       return true;
     }
 

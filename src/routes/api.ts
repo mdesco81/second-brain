@@ -1,4 +1,6 @@
 import { Router, text as expressText } from "express";
+import multer from "multer";
+import pdfParse from "pdf-parse";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
@@ -34,14 +36,23 @@ import {
   updatePerson,
   deactivatePerson,
   upsertPerson,
-  listPeople
+  listPeople,
+  listProactiveChats,
+  listOpenCommitments,
+  listCommitmentsByPerson,
+  updateCommitmentStatus,
+  computeRelationshipHealth,
+  listSentEmailsByPerson
 } from "../db/schema.js";
 import { ActionPriority, ActionStatus } from "../types/domain.js";
 import { writeActionBoard } from "../services/storage.js";
 import { analyzeFinalVersion, saveFinalVersion } from "../agents/ghostwriter/knowledge.js";
 import { embedText, generateDistillation } from "../services/openai.js";
+import { processNotesFromDashboard } from "../agents/chiefofstaff/index.js";
 import { log } from "../utils/logger.js";
 import { cosineSimilarity } from "../utils/math.js";
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
 export const apiRouter = Router();
 
@@ -845,6 +856,150 @@ apiRouter.delete("/people/:id", async (req, res, next) => {
       return;
     }
     res.json({ ok: true, id });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Dashboard Notes Upload ───────────────────────────────────────────
+
+apiRouter.post("/cos/upload-notes", upload.single("file"), async (req, res, next) => {
+  try {
+    const personId = Number(req.body?.personId);
+    if (!Number.isInteger(personId) || personId <= 0) {
+      res.status(400).json({ ok: false, error: "personId_required" });
+      return;
+    }
+
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ ok: false, error: "file_required" });
+      return;
+    }
+
+    const allowedTypes = [
+      "application/pdf",
+      "text/markdown",
+      "text/plain",
+      "text/x-markdown"
+    ];
+    if (!allowedTypes.includes(file.mimetype)) {
+      res.status(400).json({ ok: false, error: "unsupported_file_type", allowed: allowedTypes });
+      return;
+    }
+
+    // Extract text from file
+    let notesText: string;
+    if (file.mimetype === "application/pdf") {
+      const parsed = await pdfParse(file.buffer);
+      notesText = parsed.text;
+    } else {
+      notesText = file.buffer.toString("utf-8");
+    }
+
+    if (!notesText.trim()) {
+      res.status(400).json({ ok: false, error: "empty_file" });
+      return;
+    }
+
+    // Determine chatId — use provided or fall back to first proactive chat
+    let chatId = Number(req.body?.chatId);
+    if (!chatId || isNaN(chatId)) {
+      const proactiveChats = await listProactiveChats();
+      if (proactiveChats.length === 0) {
+        res.status(400).json({ ok: false, error: "no_chat_available" });
+        return;
+      }
+      chatId = proactiveChats[0];
+    }
+
+    const result = await processNotesFromDashboard({ chatId, personId, notesText });
+
+    res.json({ ok: true, result });
+  } catch (error) {
+    log.error("api:upload_notes_failed", { error });
+    next(error);
+  }
+});
+
+// ── Commitments API ──────────────────────────────────────────────────
+
+apiRouter.get("/commitments", async (req, res, next) => {
+  try {
+    const direction = typeof req.query.direction === "string" ? req.query.direction : undefined;
+    const [commitments, people] = await Promise.all([
+      listOpenCommitments(undefined, direction as "mine" | "theirs" | undefined),
+      listPeople(true)
+    ]);
+    const peopleMap = new Map(people.map((p) => [p.id, p.name]));
+    const enriched = commitments.map((c) => ({
+      ...c,
+      personName: c.personId ? peopleMap.get(c.personId) ?? null : null
+    }));
+    res.json({ ok: true, commitments: enriched });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.get("/commitments/person/:id", async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ ok: false, error: "invalid_id" });
+      return;
+    }
+    const commitments = await listCommitmentsByPerson(id);
+    res.json({ ok: true, commitments });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.patch("/commitments/:id/status", async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    const { status } = req.body as { status?: string };
+    const validStatuses = ["open", "fulfilled", "broken", "cancelled"];
+    if (!Number.isInteger(id) || id <= 0 || !status || !validStatuses.includes(status)) {
+      res.status(400).json({ ok: false, error: "invalid_params" });
+      return;
+    }
+    await updateCommitmentStatus(id, status as "open" | "fulfilled" | "broken" | "cancelled");
+    res.json({ ok: true, id, status });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Relationship Health API ──────────────────────────────────────────
+
+apiRouter.get("/relationship-health", async (_req, res, next) => {
+  try {
+    const proactiveChats = await listProactiveChats();
+    const chatId = proactiveChats[0];
+    if (!chatId) {
+      res.json({ ok: true, health: [] });
+      return;
+    }
+    const health = await computeRelationshipHealth(chatId);
+    res.json({ ok: true, health });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Sent Emails API ──────────────────────────────────────────────────
+
+apiRouter.get("/sent-emails/person/:id", async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ ok: false, error: "invalid_id" });
+      return;
+    }
+    const emails = await listSentEmailsByPerson(id);
+    res.json({ ok: true, emails });
   } catch (error) {
     next(error);
   }

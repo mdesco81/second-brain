@@ -101,8 +101,41 @@
 
       <!-- Marta (Chief of Staff) Tab Content -->
       <section class="marta-view" id="marta-view" style="display:none">
+        <!-- Upload Notes -->
+        <div class="marta-upload-section">
+          <h2 class="section-title">&#128196; Upload de Notas</h2>
+          <div class="upload-area" id="upload-area">
+            <div class="upload-dropzone" id="upload-dropzone">
+              <span class="upload-icon">&#128228;</span>
+              <p class="upload-text">Arraste um arquivo aqui ou clique para selecionar</p>
+              <p class="upload-hint">PDF, Markdown ou Texto (max 5MB)</p>
+              <input type="file" id="upload-file" accept=".pdf,.md,.txt,.text" />
+            </div>
+            <div class="upload-fields">
+              <div class="field">
+                <label for="upload-person">Pessoa</label>
+                <select id="upload-person"></select>
+              </div>
+              <button type="button" class="btn primary" id="upload-btn" disabled>Processar Notas</button>
+            </div>
+          </div>
+          <div class="upload-result" id="upload-result" style="display:none"></div>
+        </div>
+
+        <!-- Relationship Health Heatmap -->
+        <div class="marta-health-section" id="marta-health-section" style="display:none">
+          <h2 class="section-title">&#128153; Saude dos Relacionamentos</h2>
+          <div class="health-heatmap" id="health-heatmap"></div>
+        </div>
+
         <h2 class="section-title">&#128276; Lembretes Pendentes</h2>
         <div class="marta-reminders" id="marta-reminders"></div>
+
+        <!-- Commitments -->
+        <div class="marta-commitments-section" id="marta-commitments-section" style="display:none">
+          <h2 class="section-title">&#129309; Compromissos Abertos</h2>
+          <div class="commitments-grid" id="commitments-grid"></div>
+        </div>
 
         <div class="section-title-row">
           <h2 class="section-title">&#128101; Pessoas</h2>

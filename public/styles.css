@@ -412,6 +412,7 @@ body {
 .tag.overdue { background: var(--danger-bg); color: var(--danger); font-weight: 700; }
 .tag.id-tag { background: #f1f1ef; color: var(--muted); }
 .tag.type-tag { background: #dfecdf; color: #448361; }
+.tag.forwarded-tag { background: #e8def8; color: #6750a4; font-size: 0.72rem; }
 
 /* Card: Expanded detail */
 .card-detail {
@@ -1594,3 +1595,308 @@ dialog.confirm-dialog {
 .marta-card:hover .marta-card-action { opacity: 1; }
 .marta-card-action:hover { background: #e6f4ea; color: #137333; }
 .marta-card.marta-card-eliminated { opacity: 0.4; text-decoration: line-through; }
+
+/* ── Notes Upload ────────────────────────────────────────────────── */
+.marta-upload-section { margin-bottom: 2rem; }
+
+.upload-area {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.upload-dropzone {
+  border: 2px dashed var(--line);
+  border-radius: var(--radius);
+  padding: 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  position: relative;
+}
+
+.upload-dropzone:hover,
+.upload-dropzone.drag-over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.upload-dropzone input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.upload-icon { font-size: 1.8rem; display: block; margin-bottom: 6px; }
+.upload-text { margin: 0 0 4px; font-size: 0.88rem; font-weight: 500; color: var(--text); }
+.upload-hint { margin: 0; font-size: 0.75rem; color: var(--muted); }
+
+.upload-dropzone.has-file {
+  border-color: var(--ok);
+  background: var(--ok-bg);
+}
+
+.upload-fields {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  margin-top: 12px;
+}
+
+.upload-fields .field { flex: 1; margin-bottom: 0; }
+
+.upload-result {
+  background: var(--card);
+  border: 1px solid var(--ok);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-top: 12px;
+  animation: cardEnter 0.25s ease-out;
+}
+
+.upload-result h3 { margin: 0 0 10px; font-size: 0.95rem; color: var(--ok); }
+
+.upload-result-stats {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.upload-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.upload-result-summary {
+  font-size: 0.85rem;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.upload-result-bullets {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+}
+
+.upload-result-bullets li {
+  font-size: 0.82rem;
+  padding: 4px 0;
+  color: var(--text);
+  border-bottom: 1px solid var(--line);
+}
+
+.upload-result-bullets li:last-child { border-bottom: none; }
+
+.upload-spinner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+/* ── Relationship Health Heatmap ──────────────────────────────────── */
+.marta-health-section { margin-bottom: 2rem; }
+
+.health-heatmap {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.health-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
+  border-left: 4px solid var(--muted);
+  transition: box-shadow 0.15s;
+}
+
+.health-card:hover { box-shadow: var(--shadow-md); }
+
+.health-card.health-hot { border-left-color: var(--ok); }
+.health-card.health-warm { border-left-color: var(--warn); }
+.health-card.health-cold { border-left-color: var(--danger); }
+
+.health-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.health-card-name {
+  font-weight: 600;
+  font-size: 0.88rem;
+}
+
+.health-card-score {
+  font-weight: 700;
+  font-size: 0.85rem;
+  padding: 2px 10px;
+  border-radius: 999px;
+}
+
+.health-hot .health-card-score { background: var(--ok-bg); color: var(--ok); }
+.health-warm .health-card-score { background: var(--warn-bg); color: var(--warn); }
+.health-cold .health-card-score { background: var(--danger-bg); color: var(--danger); }
+
+.health-card-factors {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.health-factor {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.health-factor-bar {
+  width: 60px;
+  height: 4px;
+  background: var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.health-factor-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.health-card-alerts {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.health-alert-item {
+  font-size: 0.72rem;
+  color: var(--danger);
+  font-weight: 500;
+}
+
+/* ── Commitments Section ──────────────────────────────────────────── */
+.marta-commitments-section { margin-bottom: 2rem; }
+
+.commitments-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.commitments-col-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.commitment-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+
+.commitment-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.commitment-summary {
+  font-size: 0.82rem;
+  font-weight: 500;
+  line-height: 1.35;
+  flex: 1;
+}
+
+.commitment-person {
+  font-size: 0.7rem;
+  color: var(--accent);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.commitment-meta {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  align-items: center;
+}
+
+.commitment-deadline {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.commitment-deadline.overdue {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.commitment-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.commitment-actions button {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  transition: all 0.12s;
+}
+
+.commitment-actions button:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.commitment-actions .btn-fulfill:hover {
+  border-color: var(--ok);
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.commitment-actions .btn-cancel-commitment:hover {
+  border-color: var(--danger);
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+@media (max-width: 640px) {
+  .commitments-grid { grid-template-columns: 1fr; }
+  .health-heatmap { grid-template-columns: 1fr; }
+  .upload-fields { flex-direction: column; }
+  .upload-fields .btn { width: 100%; }
+}

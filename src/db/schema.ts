@@ -177,7 +177,7 @@ export async function ensureSchema(): Promise<void> {
       context JSONB DEFAULT '{}',
       messages JSONB DEFAULT '[]',
       turns INTEGER DEFAULT 0,
-      max_turns INTEGER DEFAULT 2,
+      max_turns INTEGER DEFAULT 6,
       output_id INTEGER REFERENCES cos_outputs(id),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -350,6 +350,60 @@ export async function ensureSchema(): Promise<void> {
     ALTER TABLE chat_subscriptions
       ADD COLUMN IF NOT EXISTS calendar_sync_token TEXT,
       ADD COLUMN IF NOT EXISTS calendar_last_sync TIMESTAMPTZ;
+  `);
+
+  // ── Phase 2: Commitments, Sent Emails, Relationship Health ──────────
+  await pool.query(`
+    ALTER TABLE people
+      ADD COLUMN IF NOT EXISTS last_contact_at TIMESTAMPTZ;
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS commitments (
+      id SERIAL PRIMARY KEY,
+      chat_id BIGINT NOT NULL,
+      person_id INTEGER REFERENCES people(id),
+      direction TEXT NOT NULL DEFAULT 'mine',
+      summary TEXT NOT NULL,
+      deadline DATE,
+      status TEXT NOT NULL DEFAULT 'open',
+      source_output_id INTEGER REFERENCES cos_outputs(id),
+      source_item_id INTEGER REFERENCES inbox_items(id),
+      fulfilled_at TIMESTAMPTZ,
+      follow_up_count INTEGER NOT NULL DEFAULT 0,
+      last_follow_up_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_commitments_person_status
+      ON commitments(person_id, status);
+    CREATE INDEX IF NOT EXISTS idx_commitments_chat_status
+      ON commitments(chat_id, status);
+    CREATE INDEX IF NOT EXISTS idx_commitments_deadline
+      ON commitments(deadline) WHERE status = 'open';
+    CREATE INDEX IF NOT EXISTS idx_commitments_direction_status
+      ON commitments(direction, status);
+
+    CREATE TABLE IF NOT EXISTS sent_emails (
+      id SERIAL PRIMARY KEY,
+      chat_id BIGINT NOT NULL,
+      person_id INTEGER REFERENCES people(id),
+      output_id INTEGER REFERENCES cos_outputs(id),
+      recipient_email TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      body TEXT NOT NULL,
+      template TEXT,
+      status TEXT NOT NULL DEFAULT 'sent',
+      message_id_header TEXT,
+      sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sent_emails_person
+      ON sent_emails(person_id, sent_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_sent_emails_chat
+      ON sent_emails(chat_id, sent_at DESC);
   `);
 
   for (const category of DEFAULT_CATEGORIES) {
@@ -2206,6 +2260,7 @@ export interface Person {
   email: string | null;
   oneOnOneCadence: string;
   lastOneOnOne: string | null;
+  lastContactAt: string | null;
   notes: string | null;
   active: boolean;
   createdAt: string;
@@ -2297,14 +2352,15 @@ export async function listPeople(onlyActive = true): Promise<Person[]> {
     email: string | null;
     one_on_one_cadence: string;
     last_one_on_one: string | null;
+    last_contact_at: string | null;
     notes: string | null;
     active: boolean;
     created_at: string;
     updated_at: string;
   }>(
     `SELECT id, name, name_variants, role, relationship, email,
-            one_on_one_cadence, last_one_on_one::TEXT, notes, active,
-            created_at::TEXT, updated_at::TEXT
+            one_on_one_cadence, last_one_on_one::TEXT, last_contact_at::TEXT,
+            notes, active, created_at::TEXT, updated_at::TEXT
      FROM people
      WHERE ($1::BOOLEAN = FALSE OR active = TRUE)
      ORDER BY name`,
@@ -2319,6 +2375,7 @@ export async function listPeople(onlyActive = true): Promise<Person[]> {
     email: row.email,
     oneOnOneCadence: row.one_on_one_cadence,
     lastOneOnOne: row.last_one_on_one,
+    lastContactAt: row.last_contact_at,
     notes: row.notes,
     active: row.active,
     createdAt: row.created_at,
@@ -2337,14 +2394,15 @@ export async function findPersonByName(namePart: string): Promise<Person[]> {
     email: string | null;
     one_on_one_cadence: string;
     last_one_on_one: string | null;
+    last_contact_at: string | null;
     notes: string | null;
     active: boolean;
     created_at: string;
     updated_at: string;
   }>(
     `SELECT id, name, name_variants, role, relationship, email,
-            one_on_one_cadence, last_one_on_one::TEXT, notes, active,
-            created_at::TEXT, updated_at::TEXT
+            one_on_one_cadence, last_one_on_one::TEXT, last_contact_at::TEXT,
+            notes, active, created_at::TEXT, updated_at::TEXT
      FROM people
      WHERE active = TRUE
        AND (LOWER(name) LIKE $1 OR $2 = ANY(SELECT LOWER(unnest(name_variants))))
@@ -2361,6 +2419,7 @@ export async function findPersonByName(namePart: string): Promise<Person[]> {
     email: row.email,
     oneOnOneCadence: row.one_on_one_cadence,
     lastOneOnOne: row.last_one_on_one,
+    lastContactAt: row.last_contact_at,
     notes: row.notes,
     active: row.active,
     createdAt: row.created_at,
@@ -2900,13 +2959,13 @@ export async function createCosConversation(params: {
 }
 
 export async function getActiveCosConversation(chatId: number): Promise<CosConversation | null> {
-  // Auto-expire conversations older than 30 minutes
+  // Auto-expire conversations older than 2 hours
   await pool.query(
     `UPDATE cos_conversations
      SET state = 'expired', expired_at = NOW(), updated_at = NOW()
      WHERE chat_id = $1
        AND state IN ('active', 'clarifying')
-       AND updated_at < NOW() - INTERVAL '30 minutes'`,
+       AND updated_at < NOW() - INTERVAL '2 hours'`,
     [chatId]
   );
 
@@ -2933,6 +2992,36 @@ export async function getActiveCosConversation(chatId: number): Promise<CosConve
      ORDER BY created_at DESC
      LIMIT 1`,
     [chatId]
+  );
+
+  const row = result.rows[0];
+  if (!row) return null;
+  return mapCosConversationRow(row);
+}
+
+export async function getActiveCosConversationById(convId: number): Promise<CosConversation | null> {
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    intent: string;
+    person_id: number | null;
+    state: string;
+    context: Record<string, unknown>;
+    messages: Array<{ role: string; content: string; timestamp: string }>;
+    turns: number;
+    max_turns: number;
+    output_id: number | null;
+    created_at: string;
+    updated_at: string;
+    expired_at: string | null;
+  }>(
+    `SELECT id, chat_id::TEXT, intent, person_id, state, context, messages,
+            turns, max_turns, output_id, created_at::TEXT, updated_at::TEXT,
+            expired_at::TEXT
+     FROM cos_conversations
+     WHERE id = $1 AND state IN ('active', 'clarifying')
+     LIMIT 1`,
+    [convId]
   );
 
   const row = result.rows[0];
@@ -3013,7 +3102,7 @@ export async function expireStaleConversations(): Promise<number> {
     `UPDATE cos_conversations
      SET state = 'expired', expired_at = NOW(), updated_at = NOW()
      WHERE state IN ('active', 'clarifying')
-       AND updated_at < NOW() - INTERVAL '30 minutes'
+       AND updated_at < NOW() - INTERVAL '2 hours'
      RETURNING id`
   );
   return result.rowCount ?? 0;
@@ -3528,8 +3617,40 @@ export async function scheduleNextRecurrence(id: number): Promise<number | null>
       }
       break;
     }
-    default:
+    case "weekdays": {
+      // Advance to next weekday (Mon-Fri)
+      nextTrigger = new Date(currentTrigger.getTime() + 24 * 60 * 60 * 1000);
+      while (nextTrigger.getDay() === 0 || nextTrigger.getDay() === 6) {
+        nextTrigger = new Date(nextTrigger.getTime() + 24 * 60 * 60 * 1000);
+      }
+      break;
+    }
+    default: {
+      // Handle dynamic patterns: every_N_days:N, specific_days:1,3,5
+      if (reminder.recurrence.startsWith("every_") && reminder.recurrence.includes("_days:")) {
+        const n = parseInt(reminder.recurrence.split(":")[1], 10);
+        if (n > 0 && n <= 365) {
+          nextTrigger = new Date(currentTrigger.getTime() + n * 24 * 60 * 60 * 1000);
+          break;
+        }
+      }
+
+      if (reminder.recurrence.startsWith("specific_days:")) {
+        const daysStr = reminder.recurrence.split(":")[1];
+        const targetDays = daysStr.split(",").map(d => parseInt(d.trim(), 10)).filter(d => d >= 0 && d <= 6);
+        if (targetDays.length > 0) {
+          nextTrigger = new Date(currentTrigger.getTime() + 24 * 60 * 60 * 1000);
+          let safety = 0;
+          while (!targetDays.includes(nextTrigger.getDay()) && safety < 8) {
+            nextTrigger = new Date(nextTrigger.getTime() + 24 * 60 * 60 * 1000);
+            safety++;
+          }
+          break;
+        }
+      }
+
       return null; // Unknown recurrence type
+    }
   }
 
   // Check if next occurrence is past the end date
@@ -3574,6 +3695,19 @@ export async function insertDecision(params: {
   reviewAt?: Date;
   sourceOutputId?: number;
 }): Promise<number> {
+  // Deduplication: skip if a pending decision with same summary exists (within last 7 days)
+  const existing = await pool.query<{ id: number }>(
+    `SELECT id FROM decisions
+     WHERE chat_id = $1 AND status = 'pending'
+       AND LOWER(summary) = LOWER($2)
+       AND created_at > NOW() - INTERVAL '7 days'
+     LIMIT 1`,
+    [params.chatId, params.summary]
+  );
+  if (existing.rows.length > 0) {
+    return existing.rows[0].id; // Return existing ID instead of creating duplicate
+  }
+
   const result = await pool.query<{ id: number }>(
     `INSERT INTO decisions (chat_id, person_ids, summary, rationale, context, decided_at, status, review_at, source_output_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -3686,6 +3820,489 @@ export async function listPendingDrafts(chatId?: number): Promise<PendingDraft[]
     contentType: (row.metadata?.agentContentType as string) ?? null,
     createdAt: row.created_at
   }));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Phase 2 — Commitments, Sent Emails, Relationship Health
+// ══════════════════════════════════════════════════════════════════════
+
+// ── Commitments ───────────────────────────────────────────────────────
+
+export interface Commitment {
+  id: number;
+  chatId: number;
+  personId: number | null;
+  direction: "mine" | "theirs";
+  summary: string;
+  deadline: string | null;
+  status: "open" | "fulfilled" | "broken" | "cancelled";
+  sourceOutputId: number | null;
+  sourceItemId: number | null;
+  fulfilledAt: string | null;
+  followUpCount: number;
+  lastFollowUpAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function mapCommitmentRow(row: {
+  id: number;
+  chat_id: string;
+  person_id: number | null;
+  direction: string;
+  summary: string;
+  deadline: string | null;
+  status: string;
+  source_output_id: number | null;
+  source_item_id: number | null;
+  fulfilled_at: string | null;
+  follow_up_count: number;
+  last_follow_up_at: string | null;
+  created_at: string;
+  updated_at: string;
+}): Commitment {
+  return {
+    id: row.id,
+    chatId: Number(row.chat_id),
+    personId: row.person_id,
+    direction: row.direction as "mine" | "theirs",
+    summary: row.summary,
+    deadline: row.deadline,
+    status: row.status as Commitment["status"],
+    sourceOutputId: row.source_output_id,
+    sourceItemId: row.source_item_id,
+    fulfilledAt: row.fulfilled_at,
+    followUpCount: row.follow_up_count,
+    lastFollowUpAt: row.last_follow_up_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+const COMMITMENT_SELECT = `
+  id, chat_id::TEXT, person_id, direction, summary, deadline::TEXT,
+  status, source_output_id, source_item_id, fulfilled_at::TEXT,
+  follow_up_count, last_follow_up_at::TEXT, created_at::TEXT, updated_at::TEXT
+`;
+
+export async function insertCommitment(params: {
+  chatId: number;
+  personId?: number;
+  direction: "mine" | "theirs";
+  summary: string;
+  deadline?: string;
+  sourceOutputId?: number;
+  sourceItemId?: number;
+}): Promise<number> {
+  // Deduplication: skip if an open commitment with very similar summary exists for same person
+  if (params.personId) {
+    const existing = await pool.query<{ id: number }>(
+      `SELECT id FROM commitments
+       WHERE person_id = $1 AND status = 'open' AND direction = $2
+         AND LOWER(summary) = LOWER($3)
+       LIMIT 1`,
+      [params.personId, params.direction, params.summary]
+    );
+    if (existing.rows.length > 0) {
+      return existing.rows[0].id; // Return existing ID instead of creating duplicate
+    }
+  }
+
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO commitments (chat_id, person_id, direction, summary, deadline, source_output_id, source_item_id)
+     VALUES ($1, $2, $3, $4, $5::DATE, $6, $7)
+     RETURNING id`,
+    [
+      params.chatId,
+      params.personId ?? null,
+      params.direction,
+      params.summary,
+      params.deadline ?? null,
+      params.sourceOutputId ?? null,
+      params.sourceItemId ?? null
+    ]
+  );
+  return result.rows[0].id;
+}
+
+export async function listCommitmentsByPerson(personId: number, statusFilter?: string): Promise<Commitment[]> {
+  const result = await pool.query<Record<string, unknown>>(
+    `SELECT ${COMMITMENT_SELECT}
+     FROM commitments
+     WHERE person_id = $1
+       AND ($2::TEXT IS NULL OR status = $2)
+     ORDER BY
+       CASE status WHEN 'open' THEN 0 WHEN 'fulfilled' THEN 1 WHEN 'broken' THEN 2 ELSE 3 END,
+       deadline ASC NULLS LAST,
+       created_at DESC
+     LIMIT 50`,
+    [personId, statusFilter ?? null]
+  );
+  return result.rows.map(mapCommitmentRow as (r: Record<string, unknown>) => Commitment);
+}
+
+export async function listOpenCommitments(chatId?: number, direction?: "mine" | "theirs"): Promise<Commitment[]> {
+  const result = await pool.query<Record<string, unknown>>(
+    `SELECT ${COMMITMENT_SELECT}
+     FROM commitments
+     WHERE status = 'open'
+       AND ($1::BIGINT IS NULL OR chat_id = $1)
+       AND ($2::TEXT IS NULL OR direction = $2)
+     ORDER BY deadline ASC NULLS LAST, created_at DESC
+     LIMIT 100`,
+    [chatId ?? null, direction ?? null]
+  );
+  return result.rows.map(mapCommitmentRow as (r: Record<string, unknown>) => Commitment);
+}
+
+export async function listOverdueCommitments(chatId?: number): Promise<Commitment[]> {
+  const result = await pool.query<Record<string, unknown>>(
+    `SELECT ${COMMITMENT_SELECT}
+     FROM commitments
+     WHERE status = 'open'
+       AND deadline < CURRENT_DATE
+       AND ($1::BIGINT IS NULL OR chat_id = $1)
+     ORDER BY deadline ASC, created_at DESC
+     LIMIT 50`,
+    [chatId ?? null]
+  );
+  return result.rows.map(mapCommitmentRow as (r: Record<string, unknown>) => Commitment);
+}
+
+export async function listCommitmentsForMeeting(personIds: number[]): Promise<Commitment[]> {
+  if (personIds.length === 0) return [];
+  const result = await pool.query<Record<string, unknown>>(
+    `SELECT ${COMMITMENT_SELECT}
+     FROM commitments
+     WHERE person_id = ANY($1::INTEGER[])
+       AND status = 'open'
+     ORDER BY direction, deadline ASC NULLS LAST, created_at DESC
+     LIMIT 30`,
+    [personIds]
+  );
+  return result.rows.map(mapCommitmentRow as (r: Record<string, unknown>) => Commitment);
+}
+
+export async function fulfillCommitment(id: number): Promise<boolean> {
+  const result = await pool.query<{ id: number }>(
+    `UPDATE commitments
+     SET status = 'fulfilled',
+         fulfilled_at = NOW(),
+         updated_at = NOW()
+     WHERE id = $1 AND status = 'open'
+     RETURNING id`,
+    [id]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function updateCommitmentStatus(
+  id: number,
+  status: "open" | "fulfilled" | "broken" | "cancelled"
+): Promise<boolean> {
+  const result = await pool.query<{ id: number }>(
+    `UPDATE commitments
+     SET status = $2,
+         fulfilled_at = CASE WHEN $2 = 'fulfilled' THEN NOW() ELSE fulfilled_at END,
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING id`,
+    [id, status]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function incrementCommitmentFollowUp(id: number): Promise<void> {
+  await pool.query(
+    `UPDATE commitments
+     SET follow_up_count = follow_up_count + 1,
+         last_follow_up_at = NOW(),
+         updated_at = NOW()
+     WHERE id = $1`,
+    [id]
+  );
+}
+
+export async function getCommitment(id: number): Promise<Commitment | null> {
+  const result = await pool.query<Record<string, unknown>>(
+    `SELECT ${COMMITMENT_SELECT} FROM commitments WHERE id = $1`,
+    [id]
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return mapCommitmentRow(row as Parameters<typeof mapCommitmentRow>[0]);
+}
+
+// ── Sent Emails ───────────────────────────────────────────────────────
+
+export interface SentEmail {
+  id: number;
+  chatId: number;
+  personId: number | null;
+  outputId: number | null;
+  recipientEmail: string;
+  subject: string;
+  body: string;
+  template: string | null;
+  status: string;
+  messageIdHeader: string | null;
+  sentAt: string;
+  createdAt: string;
+}
+
+export async function insertSentEmail(params: {
+  chatId: number;
+  personId?: number;
+  outputId?: number;
+  recipientEmail: string;
+  subject: string;
+  body: string;
+  template?: string;
+  messageIdHeader?: string;
+}): Promise<number> {
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO sent_emails (chat_id, person_id, output_id, recipient_email, subject, body, template, message_id_header)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING id`,
+    [
+      params.chatId,
+      params.personId ?? null,
+      params.outputId ?? null,
+      params.recipientEmail,
+      params.subject,
+      params.body,
+      params.template ?? null,
+      params.messageIdHeader ?? null
+    ]
+  );
+  return result.rows[0].id;
+}
+
+export async function listSentEmailsByPerson(personId: number, limit = 20): Promise<SentEmail[]> {
+  const result = await pool.query<{
+    id: number;
+    chat_id: string;
+    person_id: number | null;
+    output_id: number | null;
+    recipient_email: string;
+    subject: string;
+    body: string;
+    template: string | null;
+    status: string;
+    message_id_header: string | null;
+    sent_at: string;
+    created_at: string;
+  }>(
+    `SELECT id, chat_id::TEXT, person_id, output_id, recipient_email, subject, body,
+            template, status, message_id_header, sent_at::TEXT, created_at::TEXT
+     FROM sent_emails
+     WHERE person_id = $1
+     ORDER BY sent_at DESC
+     LIMIT $2`,
+    [personId, limit]
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    chatId: Number(row.chat_id),
+    personId: row.person_id,
+    outputId: row.output_id,
+    recipientEmail: row.recipient_email,
+    subject: row.subject,
+    body: row.body,
+    template: row.template,
+    status: row.status,
+    messageIdHeader: row.message_id_header,
+    sentAt: row.sent_at,
+    createdAt: row.created_at
+  }));
+}
+
+// ── Last Contact ──────────────────────────────────────────────────────
+
+export async function updateLastContact(personId: number): Promise<void> {
+  await pool.query(
+    `UPDATE people SET last_contact_at = NOW(), updated_at = NOW() WHERE id = $1`,
+    [personId]
+  );
+}
+
+// ── Relationship Health ───────────────────────────────────────────────
+
+export interface RelationshipHealth {
+  personId: number;
+  personName: string;
+  score: number;
+  level: "hot" | "warm" | "cold";
+  factors: {
+    oneOnOneAdherence: number;
+    openItemsHealth: number;
+    commitmentFulfillment: number;
+    contactRecency: number;
+  };
+  alerts: string[];
+}
+
+export async function computeRelationshipHealth(chatId: number): Promise<RelationshipHealth[]> {
+  const people = await listPeople(true);
+  if (people.length === 0) return [];
+
+  const now = Date.now();
+  const DAY_MS = 86400000;
+
+  // Escape ILIKE wildcards in person names
+  function escapeIlike(name: string): string {
+    return name.replace(/%/g, "\\%").replace(/_/g, "\\_");
+  }
+
+  // Batch queries — avoid N+1 per-person queries
+  const personIds = people.map((p) => p.id);
+  const escapedNames = people.map((p) => escapeIlike(p.name));
+
+  const [openItemsRes, overdueItemsRes, commitStatsRes, overdueCommitsRes] = await Promise.all([
+    // Open items per person name (via follow_up_with ILIKE)
+    pool.query<{ name: string; total: string }>(
+      `SELECT unnest($1::TEXT[]) AS name,
+              COUNT(i.id)::TEXT AS total
+       FROM unnest($1::TEXT[]) AS name
+       LEFT JOIN inbox_items i
+         ON i.status = 'open' AND i.action <> 'NONE'
+         AND i.follow_up_with ILIKE '%' || name || '%'
+       GROUP BY name`,
+      [escapedNames]
+    ),
+    // Overdue items per person name
+    pool.query<{ name: string; total: string }>(
+      `SELECT unnest($1::TEXT[]) AS name,
+              COUNT(i.id)::TEXT AS total
+       FROM unnest($1::TEXT[]) AS name
+       LEFT JOIN inbox_items i
+         ON i.status = 'open' AND i.action <> 'NONE'
+         AND i.follow_up_with ILIKE '%' || name || '%'
+         AND i.due_at < CURRENT_DATE
+       GROUP BY name`,
+      [escapedNames]
+    ),
+    // Commitment stats per person_id
+    pool.query<{ person_id: number; total: string; fulfilled: string }>(
+      `SELECT person_id,
+              COUNT(*)::TEXT AS total,
+              COUNT(*) FILTER (WHERE status = 'fulfilled')::TEXT AS fulfilled
+       FROM commitments
+       WHERE person_id = ANY($1::INTEGER[])
+       GROUP BY person_id`,
+      [personIds]
+    ),
+    // Overdue commitments per person_id
+    pool.query<{ person_id: number; total: string }>(
+      `SELECT person_id,
+              COUNT(*)::TEXT AS total
+       FROM commitments
+       WHERE person_id = ANY($1::INTEGER[])
+         AND status = 'open' AND deadline < CURRENT_DATE
+       GROUP BY person_id`,
+      [personIds]
+    )
+  ]);
+
+  // Build lookup maps
+  const openItemsMap = new Map(openItemsRes.rows.map((r) => [r.name, Number(r.total)]));
+  const overdueItemsMap = new Map(overdueItemsRes.rows.map((r) => [r.name, Number(r.total)]));
+  const commitStatsMap = new Map(commitStatsRes.rows.map((r) => [r.person_id, { total: Number(r.total), fulfilled: Number(r.fulfilled) }]));
+  const overdueCommitsMap = new Map(overdueCommitsRes.rows.map((r) => [r.person_id, Number(r.total)]));
+
+  const results: RelationshipHealth[] = [];
+
+  for (let i = 0; i < people.length; i++) {
+    const person = people[i];
+    const escapedName = escapedNames[i];
+    const alerts: string[] = [];
+
+    // Factor 1: 1:1 adherence (0-25)
+    let oneOnOneScore = 25;
+    const cadenceDays = person.oneOnOneCadence === "weekly" ? 7
+      : person.oneOnOneCadence === "biweekly" ? 14
+      : person.oneOnOneCadence === "monthly" ? 30
+      : 14; // default biweekly
+
+    if (person.lastOneOnOne) {
+      const daysSince = Math.floor((now - new Date(person.lastOneOnOne).getTime()) / DAY_MS);
+      const ratio = daysSince / cadenceDays;
+      if (ratio <= 1.2) {
+        oneOnOneScore = 25;
+      } else {
+        oneOnOneScore = Math.max(0, Math.round(25 * (1 - (ratio - 1.2) / 2)));
+      }
+      if (daysSince > cadenceDays * 1.5) {
+        alerts.push(`Sem 1:1 ha ${daysSince} dias`);
+      }
+    } else {
+      oneOnOneScore = 10; // no data = neutral-low
+    }
+
+    // Factor 2: Open items health (0-25) — from batch maps
+    const openCount = openItemsMap.get(escapedName) ?? 0;
+    const overdueCount = overdueItemsMap.get(escapedName) ?? 0;
+    let openItemsScore = 25;
+    if (openCount > 0) {
+      const overdueRatio = overdueCount / openCount;
+      openItemsScore = Math.round(25 * (1 - overdueRatio));
+    }
+    if (overdueCount > 0) {
+      alerts.push(`${overdueCount} item(ns) vencido(s)`);
+    }
+
+    // Factor 3: Commitment fulfillment (0-25) — from batch maps
+    const commitData = commitStatsMap.get(person.id) ?? { total: 0, fulfilled: 0 };
+    let commitScore: number;
+    if (commitData.total === 0) {
+      commitScore = 15; // no data = neutral
+    } else {
+      commitScore = Math.round(25 * (commitData.fulfilled / commitData.total));
+    }
+    const overdueCommitCount = overdueCommitsMap.get(person.id) ?? 0;
+    if (overdueCommitCount > 0) {
+      alerts.push(`${overdueCommitCount} compromisso(s) vencido(s)`);
+    }
+
+    // Factor 4: Contact recency (0-25)
+    let contactScore = 25;
+    const lastContact = person.lastContactAt || person.lastOneOnOne;
+    if (lastContact) {
+      const daysSince = Math.floor((now - new Date(lastContact).getTime()) / DAY_MS);
+      if (daysSince <= 7) {
+        contactScore = 25;
+      } else if (daysSince >= 60) {
+        contactScore = 0;
+      } else {
+        contactScore = Math.round(25 * (1 - (daysSince - 7) / 53));
+      }
+      if (daysSince > 30) {
+        alerts.push(`Sem contato ha ${daysSince} dias`);
+      }
+    } else {
+      contactScore = 5; // no data = low
+    }
+
+    const score = oneOnOneScore + openItemsScore + commitScore + contactScore;
+    const level: RelationshipHealth["level"] =
+      score >= 75 ? "hot" : score >= 40 ? "warm" : "cold";
+
+    results.push({
+      personId: person.id,
+      personName: person.name,
+      score,
+      level,
+      factors: {
+        oneOnOneAdherence: oneOnOneScore,
+        openItemsHealth: openItemsScore,
+        commitmentFulfillment: commitScore,
+        contactRecency: contactScore
+      },
+      alerts
+    });
+  }
+
+  return results;
 }
 
 export async function closePool(): Promise<void> {

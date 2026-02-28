@@ -8,6 +8,7 @@ import { ensureKnowledgeTree } from "./services/storage.js";
 import { deleteWebhook, setWebhook } from "./services/telegram.js";
 import { hasAI } from "./services/openai.js";
 import { isCalendarEnabled, syncCalendarEvents } from "./services/calendar.js";
+import { initEmailTransporter } from "./services/email.js";
 import { log } from "./utils/logger.js";
 import { registerGhostwriter } from "./agents/ghostwriter/index.js";
 import { registerChiefOfStaff } from "./agents/chiefofstaff/index.js";
@@ -71,6 +72,7 @@ async function bootstrap(): Promise<void> {
   startProactiveScheduler();
   registerGhostwriter();
   registerChiefOfStaff();
+  await initEmailTransporter();
 
   // Initial Google Calendar sync on startup (non-blocking)
   if (isCalendarEnabled()) {

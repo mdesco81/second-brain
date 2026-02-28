@@ -38,6 +38,28 @@ export interface TelegramMessage {
   audio?: TelegramAudio;
   document?: TelegramDocument;
   photo?: TelegramPhotoSize[];
+  forward_from?: {
+    id: number;
+    is_bot?: boolean;
+    first_name: string;
+    last_name?: string;
+    username?: string;
+  };
+  forward_from_chat?: {
+    id: number;
+    type: string;
+    title?: string;
+    username?: string;
+  };
+  forward_date?: number;
+  forward_origin?: {
+    type: string;
+    sender_user?: { id: number; first_name: string; last_name?: string; username?: string };
+    sender_user_name?: string;
+    sender_chat?: { id: number; title: string; type: string; username?: string };
+    chat?: { id: number; title: string; type: string; username?: string };
+    date?: number;
+  };
 }
 
 export interface TelegramCallbackQuery {
