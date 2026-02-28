@@ -35,7 +35,8 @@ const state = {
   jarbasOutputs: null,
   jarbasPreviewCache: {},
   inboxItemIds: new Set(),
-  martaData: null
+  martaData: null,
+  remindersData: null
 };
 
 // ============================================================================
@@ -328,9 +329,14 @@ async function loadJarbasOutputs() {
 // ============================================================================
 async function loadMartaData() {
   try {
-    const res = await fetch("/api/cos");
-    if (!res.ok) throw new Error("Failed to load CoS data");
-    state.martaData = await res.json();
+    const [cosRes, remRes] = await Promise.all([
+      fetch("/api/cos"),
+      fetch("/api/reminders")
+    ]);
+    if (!cosRes.ok) throw new Error("Failed to load CoS data");
+    state.martaData = await cosRes.json();
+    state.remindersData = remRes.ok ? (await remRes.json()).reminders || [] : [];
+    renderReminders();
     renderMartaView();
   } catch (err) {
     console.error("loadMartaData error:", err);
@@ -340,6 +346,42 @@ async function loadMartaData() {
       emptyState.innerHTML = '<p>Erro ao carregar dados da Marta. <button onclick="loadMartaData()" class="btn btn-secondary" style="margin-top:8px">Tentar novamente</button></p>';
     }
   }
+}
+
+function renderReminders() {
+  const container = document.getElementById("marta-reminders");
+  if (!container) return;
+  const reminders = state.remindersData || [];
+
+  if (reminders.length === 0) {
+    container.innerHTML = '<div class="marta-empty-col">Nenhum lembrete pendente.</div>';
+    return;
+  }
+
+  container.innerHTML = reminders.map((r) => {
+    const triggerDate = new Date(r.triggerAt);
+    const dateStr = triggerDate.toLocaleString("pt-BR", {
+      day: "2-digit", month: "2-digit", year: "numeric",
+      hour: "2-digit", minute: "2-digit"
+    });
+    const isPast = triggerDate < new Date();
+    const recurrenceBadge = r.recurrence
+      ? `<span class="reminder-recurrence">${escapeHtml(r.recurrence)}</span>`
+      : "";
+    const personBadge = r.personName
+      ? `<span class="reminder-person">${escapeHtml(r.personName)}</span>`
+      : "";
+
+    return `<div class="reminder-card${isPast ? " reminder-overdue" : ""}">
+      <div class="reminder-text">${escapeHtml(r.text)}</div>
+      <div class="reminder-meta">
+        <span class="reminder-date${isPast ? " overdue" : ""}">${dateStr}</span>
+        ${recurrenceBadge}
+        ${personBadge}
+      </div>
+      <button class="btn-cancel-reminder" data-reminder-id="${r.id}" title="Cancelar lembrete">&times;</button>
+    </div>`;
+  }).join("");
 }
 
 function renderMartaView() {
@@ -368,11 +410,16 @@ function renderMartaView() {
 
     const openCards = (person.items.open || []).map((item) => renderMartaCard(item)).join("");
     const doneCards = (person.items.done || []).slice(0, 8).map((item) => renderMartaCard(item)).join("");
+    const eliminatedCards = (person.items.eliminated || []).slice(0, 5).map((item) => renderMartaCard(item)).join("");
 
     return `<div class="marta-person-board">
       <div class="marta-person-header ${alertClass}">
         <span class="marta-person-name">&#128100; ${escapeHtml(person.name)}${person.role ? ` (${escapeHtml(person.role)})` : ""}</span>
-        <span class="marta-person-meta">1:1: ${lastOO} | ${alertIcon}</span>
+        <div class="marta-person-actions">
+          <span class="marta-person-meta">1:1: ${lastOO} | ${alertIcon}</span>
+          <button class="btn-edit-person" data-person-id="${person.id}" title="Editar">&#9998;</button>
+          <button class="btn-deactivate-person" data-person-id="${person.id}" title="Desativar">&#10005;</button>
+        </div>
       </div>
       <div class="marta-person-kanban">
         <div class="marta-kanban-col">
@@ -382,6 +429,10 @@ function renderMartaView() {
         <div class="marta-kanban-col done-col">
           <div class="marta-kanban-header">Concluido (${person.stats.totalDone})</div>
           <div class="marta-kanban-cards">${doneCards || '<div class="marta-empty-col">Nenhum item</div>'}</div>
+        </div>
+        <div class="marta-kanban-col eliminated-col">
+          <div class="marta-kanban-header">Eliminado</div>
+          <div class="marta-kanban-cards">${eliminatedCards || '<div class="marta-empty-col">Nenhum item</div>'}</div>
         </div>
       </div>
     </div>`;
@@ -428,9 +479,18 @@ function renderMartaCard(item) {
   const title = item.actionTitle || item.summaryPtBr;
   const dueTag = item.dueAt ? `<span class="marta-card-due">${item.dueAt}</span>` : "";
   const isDone = item.status === "done";
+  const isEliminated = item.status === "eliminated";
 
-  return `<div class="marta-card ${priorityClass}${isDone ? " marta-card-done" : ""}">
-    <div class="marta-card-title">#${item.id} ${escapeHtml(title.length > 60 ? title.slice(0, 60) + "..." : title)}</div>
+  const actionBtn = isDone
+    ? `<button class="marta-card-action" data-marta-status="${item.id}" data-to="open" title="Reabrir">&#8635;</button>`
+    : isEliminated ? ""
+    : `<button class="marta-card-action" data-marta-status="${item.id}" data-to="done" title="Concluir">&#10003;</button>`;
+
+  return `<div class="marta-card ${priorityClass}${isDone ? " marta-card-done" : ""}${isEliminated ? " marta-card-eliminated" : ""}">
+    <div class="marta-card-top">
+      <div class="marta-card-title">#${item.id} ${escapeHtml(title.length > 60 ? title.slice(0, 60) + "..." : title)}</div>
+      ${actionBtn}
+    </div>
     ${dueTag}
     ${item.nextStep ? `<div class="marta-card-next">${escapeHtml(item.nextStep)}</div>` : ""}
   </div>`;
@@ -487,6 +547,124 @@ document.addEventListener("click", async (e) => {
         expandBtn.innerHTML = "&#128065; Ver completo";
       }
     }
+    return;
+  }
+});
+
+// ── Person Modal ──────────────────────────────────────────────────────
+const personModal = document.getElementById("person-modal");
+let editingPersonId = null;
+
+function openPersonModal(person) {
+  editingPersonId = person ? person.id : null;
+  document.getElementById("person-modal-title").textContent =
+    person ? "Editar Pessoa" : "Nova Pessoa";
+  document.getElementById("person-name").value = person?.name || "";
+  document.getElementById("person-role").value = person?.role || "";
+  document.getElementById("person-relationship").value = person?.relationship || "direct_report";
+  document.getElementById("person-email").value = person?.email || "";
+  document.getElementById("person-cadence").value = person?.oneOnOneCadence || "weekly";
+  document.getElementById("person-notes").value = person?.notes || "";
+  personModal.showModal();
+}
+
+document.getElementById("btn-add-person")?.addEventListener("click", () => openPersonModal(null));
+document.getElementById("person-modal-close")?.addEventListener("click", () => personModal.close());
+document.getElementById("person-modal-cancel")?.addEventListener("click", () => personModal.close());
+
+document.getElementById("person-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fields = {
+    name: document.getElementById("person-name").value.trim(),
+    role: document.getElementById("person-role").value.trim(),
+    relationship: document.getElementById("person-relationship").value,
+    email: document.getElementById("person-email").value.trim(),
+    oneOnOneCadence: document.getElementById("person-cadence").value,
+    notes: document.getElementById("person-notes").value.trim()
+  };
+  if (!fields.name) { showToast("Nome e obrigatorio", "error"); return; }
+
+  try {
+    if (editingPersonId) {
+      const r = await fetch(`/api/people/${editingPersonId}`, {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify(fields)
+      });
+      if (!r.ok) throw new Error();
+      showToast("Pessoa atualizada!", "success");
+    } else {
+      const r = await fetch("/api/people", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify(fields)
+      });
+      if (!r.ok) throw new Error();
+      showToast("Pessoa adicionada!", "success");
+    }
+    personModal.close();
+    state.martaData = null;
+    loadMartaData();
+  } catch { showToast("Erro ao salvar pessoa", "error"); }
+});
+
+// ── Marta delegated click handlers ────────────────────────────────────
+document.addEventListener("click", async (e) => {
+  // Edit person
+  const editBtn = e.target.closest(".btn-edit-person");
+  if (editBtn) {
+    const personId = Number(editBtn.dataset.personId);
+    const person = state.martaData?.people?.find(p => p.id === personId);
+    if (person) openPersonModal(person);
+    return;
+  }
+
+  // Deactivate person
+  const deactivateBtn = e.target.closest(".btn-deactivate-person");
+  if (deactivateBtn) {
+    const personId = Number(deactivateBtn.dataset.personId);
+    const person = state.martaData?.people?.find(p => p.id === personId);
+    if (!confirm(`Desativar ${person?.name || "esta pessoa"}? Os itens nao serao excluidos.`)) return;
+    try {
+      const r = await fetch(`/api/people/${personId}`, { method: "DELETE" });
+      if (!r.ok) throw new Error();
+      showToast("Pessoa desativada!", "success");
+      state.martaData = null;
+      loadMartaData();
+    } catch { showToast("Erro ao desativar pessoa", "error"); }
+    return;
+  }
+
+  // Cancel reminder
+  const cancelBtn = e.target.closest(".btn-cancel-reminder");
+  if (cancelBtn) {
+    const id = Number(cancelBtn.dataset.reminderId);
+    if (!confirm("Cancelar este lembrete?")) return;
+    try {
+      const r = await fetch(`/api/reminders/${id}/cancel`, { method: "POST" });
+      if (!r.ok) throw new Error();
+      showToast("Lembrete cancelado!", "success");
+      const remRes = await fetch("/api/reminders");
+      state.remindersData = remRes.ok ? (await remRes.json()).reminders || [] : [];
+      renderReminders();
+    } catch { showToast("Erro ao cancelar lembrete", "error"); }
+    return;
+  }
+
+  // Marta kanban status toggle
+  const statusBtn = e.target.closest("[data-marta-status]");
+  if (statusBtn) {
+    e.stopPropagation();
+    const id = Number(statusBtn.dataset.martaStatus);
+    const newStatus = statusBtn.dataset.to;
+    try {
+      const r = await fetch(`/api/actions/${id}/status`, {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: newStatus })
+      });
+      if (!r.ok) throw new Error();
+      showToast(newStatus === "done" ? "Item concluido!" : "Item reaberto!", "success");
+      state.martaData = null;
+      loadMartaData();
+    } catch { showToast("Erro ao atualizar status", "error"); }
     return;
   }
 });

@@ -1536,3 +1536,61 @@ dialog.confirm-dialog {
   margin-bottom: 1rem;
   color: var(--text);
 }
+
+/* ── Reminders ─────────────────────────────────────────────────────── */
+.marta-reminders { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem; }
+.reminder-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.reminder-card.reminder-overdue { border-left: 3px solid #e74c3c; background: #fdf0ef; }
+.reminder-text { flex: 1; font-size: 0.85rem; font-weight: 500; }
+.reminder-meta { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.reminder-date { font-size: 0.75rem; color: #8590a2; }
+.reminder-date.overdue { color: #e74c3c; font-weight: 600; }
+.reminder-recurrence {
+  font-size: 0.65rem; padding: 2px 6px; background: #e8f0fe; color: #1967d2;
+  border-radius: 4px; font-weight: 600; text-transform: uppercase;
+}
+.reminder-person {
+  font-size: 0.65rem; padding: 2px 6px; background: #e6f4ea; color: #137333;
+  border-radius: 4px; font-weight: 600;
+}
+.btn-cancel-reminder {
+  background: none; border: 1px solid var(--line); border-radius: 4px;
+  padding: 2px 8px; font-size: 1rem; cursor: pointer; color: #e74c3c; flex-shrink: 0;
+  line-height: 1;
+}
+.btn-cancel-reminder:hover { background: #fdf0ef; }
+
+/* ── People management ─────────────────────────────────────────────── */
+.section-title-row {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 2rem; margin-bottom: 1rem;
+}
+.section-title-row .section-title { margin: 0; }
+.btn-sm { padding: 5px 12px; font-size: 0.78rem; }
+.marta-person-actions { display: flex; align-items: center; gap: 8px; }
+.btn-edit-person, .btn-deactivate-person {
+  background: none; border: none; cursor: pointer; font-size: 0.9rem;
+  padding: 2px 6px; border-radius: 4px; opacity: 0.4; transition: opacity 0.15s, background 0.15s;
+}
+.btn-edit-person:hover { opacity: 1; background: rgba(0,0,0,0.06); }
+.btn-deactivate-person:hover { opacity: 1; background: #fdf0ef; color: #e74c3c; }
+
+/* ── Kanban improvements ───────────────────────────────────────────── */
+.marta-kanban-col.eliminated-col { opacity: 0.5; }
+.marta-card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 4px; }
+.marta-card-action {
+  background: none; border: 1px solid var(--line); border-radius: 4px;
+  cursor: pointer; font-size: 0.7rem; padding: 1px 5px; opacity: 0;
+  transition: opacity 0.15s; flex-shrink: 0;
+}
+.marta-card:hover .marta-card-action { opacity: 1; }
+.marta-card-action:hover { background: #e6f4ea; color: #137333; }
+.marta-card.marta-card-eliminated { opacity: 0.4; text-decoration: line-through; }

@@ -2246,6 +2246,47 @@ export async function upsertPerson(params: {
   return result.rows[0].id;
 }
 
+export async function updatePerson(id: number, fields: {
+  name?: string;
+  nameVariants?: string[];
+  role?: string | null;
+  relationship?: string;
+  email?: string | null;
+  oneOnOneCadence?: string;
+  notes?: string | null;
+}): Promise<boolean> {
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  let idx = 1;
+
+  if (fields.name !== undefined) { sets.push(`name = $${idx++}`); values.push(fields.name); }
+  if (fields.nameVariants !== undefined) { sets.push(`name_variants = $${idx++}`); values.push(fields.nameVariants); }
+  if (fields.role !== undefined) { sets.push(`role = $${idx++}`); values.push(fields.role); }
+  if (fields.relationship !== undefined) { sets.push(`relationship = $${idx++}`); values.push(fields.relationship); }
+  if (fields.email !== undefined) { sets.push(`email = $${idx++}`); values.push(fields.email); }
+  if (fields.oneOnOneCadence !== undefined) { sets.push(`one_on_one_cadence = $${idx++}`); values.push(fields.oneOnOneCadence); }
+  if (fields.notes !== undefined) { sets.push(`notes = $${idx++}`); values.push(fields.notes); }
+
+  if (sets.length === 0) return false;
+
+  sets.push("updated_at = NOW()");
+  values.push(id);
+
+  const result = await pool.query(
+    `UPDATE people SET ${sets.join(", ")} WHERE id = $${idx} AND active = TRUE`,
+    values
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function deactivatePerson(id: number): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE people SET active = FALSE, updated_at = NOW() WHERE id = $1 AND active = TRUE`,
+    [id]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 export async function listPeople(onlyActive = true): Promise<Person[]> {
   const result = await pool.query<{
     id: number;
@@ -3437,6 +3478,20 @@ export async function listPendingReminders(chatId: number): Promise<Reminder[]> 
     [chatId]
   );
   return result.rows.map(mapReminder);
+}
+
+export async function listAllPendingReminders(): Promise<Array<Reminder & { personName: string | null }>> {
+  const result = await pool.query(
+    `SELECT r.*, p.name AS person_name
+     FROM reminders r
+     LEFT JOIN people p ON r.person_id = p.id
+     WHERE r.status = 'pending'
+     ORDER BY r.trigger_at ASC`
+  );
+  return result.rows.map((row: Record<string, unknown>) => ({
+    ...mapReminder(row),
+    personName: (row.person_name as string | null) ?? null
+  }));
 }
 
 export async function scheduleNextRecurrence(id: number): Promise<number | null> {

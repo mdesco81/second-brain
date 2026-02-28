@@ -28,7 +28,13 @@ import {
   updateInboxItemMetadata,
   updateInboxItemStatusById,
   updateProgressiveLayer,
-  upsertCategory
+  upsertCategory,
+  listAllPendingReminders,
+  cancelReminder,
+  updatePerson,
+  deactivatePerson,
+  upsertPerson,
+  listPeople
 } from "../db/schema.js";
 import { ActionPriority, ActionStatus } from "../types/domain.js";
 import { writeActionBoard } from "../services/storage.js";
@@ -686,6 +692,8 @@ apiRouter.get("/cos", async (_req, res, next) => {
         name: p.name,
         role: p.role,
         relationship: p.relationship,
+        email: p.email,
+        notes: p.notes,
         lastOneOnOne: p.lastOneOnOne,
         oneOnOneCadence: p.oneOnOneCadence,
         items: p.items,
@@ -734,6 +742,109 @@ apiRouter.patch("/cos/output/:id/status", async (req, res, next) => {
     }
     await updateCosOutputStatus(id, status);
     res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Reminders API ─────────────────────────────────────────────────────
+
+apiRouter.get("/reminders", async (_req, res, next) => {
+  try {
+    const reminders = await listAllPendingReminders();
+    res.json({ ok: true, reminders });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.post("/reminders/:id/cancel", async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ ok: false, error: "invalid_id" });
+      return;
+    }
+    await cancelReminder(id);
+    res.json({ ok: true, id });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── People API ────────────────────────────────────────────────────────
+
+apiRouter.get("/people", async (req, res, next) => {
+  try {
+    const onlyActive = req.query.all !== "true";
+    const people = await listPeople(onlyActive);
+    res.json({ ok: true, people });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.post("/people", async (req, res, next) => {
+  try {
+    const body = req.body ?? {};
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!name) {
+      res.status(400).json({ ok: false, error: "name_required" });
+      return;
+    }
+    const id = await upsertPerson({
+      name,
+      role: typeof body.role === "string" ? body.role.trim() || undefined : undefined,
+      relationship: typeof body.relationship === "string" ? body.relationship.trim() || undefined : undefined,
+      email: typeof body.email === "string" ? body.email.trim() || undefined : undefined
+    });
+    res.status(201).json({ ok: true, id });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.patch("/people/:id", async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ ok: false, error: "invalid_id" });
+      return;
+    }
+    const body = req.body ?? {};
+    const fields: Parameters<typeof updatePerson>[1] = {};
+
+    if (typeof body.name === "string" && body.name.trim()) fields.name = body.name.trim();
+    if (typeof body.role === "string") fields.role = body.role.trim() || null;
+    if (typeof body.relationship === "string" && body.relationship.trim()) fields.relationship = body.relationship.trim();
+    if (typeof body.email === "string") fields.email = body.email.trim() || null;
+    if (typeof body.oneOnOneCadence === "string") fields.oneOnOneCadence = body.oneOnOneCadence.trim();
+    if (typeof body.notes === "string") fields.notes = body.notes.trim() || null;
+
+    const updated = await updatePerson(id, fields);
+    if (!updated) {
+      res.status(404).json({ ok: false, error: "not_found" });
+      return;
+    }
+    res.json({ ok: true, id });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.delete("/people/:id", async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ ok: false, error: "invalid_id" });
+      return;
+    }
+    const deactivated = await deactivatePerson(id);
+    if (!deactivated) {
+      res.status(404).json({ ok: false, error: "not_found" });
+      return;
+    }
+    res.json({ ok: true, id });
   } catch (error) {
     next(error);
   }

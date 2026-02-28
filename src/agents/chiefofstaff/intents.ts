@@ -3,7 +3,7 @@ import { findPersonByName, listPeople, Person } from "../../db/schema.js";
 import { log } from "../../utils/logger.js";
 
 export interface MartaIntent {
-  intent: "briefing" | "notas" | "status" | "email" | "equipe" | "reflexao" | "ajuda" | "reminder" | "conversa_geral";
+  intent: "briefing" | "notas" | "status" | "email" | "equipe" | "reflexao" | "ajuda" | "reminder" | "agendar" | "conversa_geral";
   person: string | null;
   personId: number | null;
   tema: string | null;
@@ -15,7 +15,7 @@ export interface MartaIntent {
 const INTENT_SYSTEM_PROMPT = `Voce e o classificador de intencoes da Marta, Chief of Staff virtual.
 Recebe uma mensagem em linguagem natural (ja sem a keyword "marta") e extrai:
 
-1. intent: briefing | notas | status | email | equipe | reflexao | ajuda | reminder | conversa_geral
+1. intent: briefing | notas | status | email | equipe | reflexao | ajuda | reminder | agendar | conversa_geral
 2. pessoa: nome PROPRIO da pessoa mencionada (ou null). Extraia APENAS o nome, sem papel/cargo.
 3. tema: topico/assunto mencionado (ou null)
 4. detalhes_extras: papel/cargo da pessoa OU instrucoes adicionais. Para intent "equipe", SEMPRE coloque o cargo/papel aqui.
@@ -47,6 +47,13 @@ Regras de classificacao:
     - "toda segunda me lembra de fazer weekly review" → reminder, tema="fazer weekly review", detalhes_extras="toda segunda"
     - "lembrete: ligar pro contador sexta" → reminder, tema="ligar pro contador", detalhes_extras="sexta"
     - "nao esquece de mandar o report ate as 17h" → reminder, tema="mandar o report", detalhes_extras="hoje as 17h"
+- "agendar": criar evento no calendario, agendar reuniao, marcar compromisso. Palavras-chave: "agendar", "marcar", "marcar reuniao", "criar evento", "agenda pra mim", "bota na agenda", "coloca na agenda".
+  Extrair: pessoa (se mencionada), tema (titulo do evento), detalhes_extras (data, hora, duracao, participantes, local).
+  Exemplos:
+    - "agendar reuniao com Pedro amanha as 14h" → agendar, pessoa=Pedro, tema="reuniao com Pedro", detalhes_extras="amanha as 14h"
+    - "marca um 1:1 com a Ana sexta as 10h por 30 minutos" → agendar, pessoa=Ana, tema="1:1 com Ana", detalhes_extras="sexta as 10h por 30 minutos"
+    - "coloca na agenda: planejamento trimestral quinta as 9h" → agendar, tema="planejamento trimestral", detalhes_extras="quinta as 9h"
+    - "bota na agenda reuniao de equipe amanha as 15h na sala 3" → agendar, tema="reuniao de equipe", detalhes_extras="amanha as 15h na sala 3"
 - "ajuda": "o que voce faz", "como funciona", "help", "ajuda"
 - "conversa_geral": qualquer outra coisa que nao se encaixe acima
 
@@ -66,7 +73,7 @@ Para needs_clarification (outros intents):
 
 Responda APENAS com JSON valido:
 {
-  "intent": "briefing" | "notas" | "status" | "email" | "equipe" | "reflexao" | "ajuda" | "reminder" | "conversa_geral",
+  "intent": "briefing" | "notas" | "status" | "email" | "equipe" | "reflexao" | "ajuda" | "reminder" | "agendar" | "conversa_geral",
   "pessoa": "nome" | null,
   "tema": "topico" | null,
   "detalhes_extras": "instrucoes ou cargo/papel" | null,
@@ -115,7 +122,7 @@ export async function classifyMartaIntent(
       clarification_question?: string | null;
     };
 
-    const validIntents = ["briefing", "notas", "status", "email", "equipe", "reflexao", "ajuda", "reminder", "conversa_geral"];
+    const validIntents = ["briefing", "notas", "status", "email", "equipe", "reflexao", "ajuda", "reminder", "agendar", "conversa_geral"];
     const intent = validIntents.includes(parsed.intent ?? "")
       ? (parsed.intent as MartaIntent["intent"])
       : "conversa_geral";

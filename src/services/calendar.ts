@@ -201,6 +201,88 @@ export async function syncCalendarEvents(chatId: number, _isRetry = false): Prom
   }
 }
 
+// ── Create Event ──────────────────────────────────────────────────────
+
+export interface CreateEventParams {
+  chatId: number;
+  title: string;
+  startAt: string; // ISO string
+  endAt: string;   // ISO string
+  description?: string;
+  attendees?: string[]; // email addresses
+  location?: string;
+}
+
+/**
+ * Create an event on Google Calendar and persist it locally.
+ * Returns the Google Calendar event ID.
+ */
+export async function createCalendarEvent(params: CreateEventParams): Promise<string> {
+  if (!isCalendarEnabled()) {
+    throw new Error("Google Calendar integration is not configured");
+  }
+
+  const calClient = getCalendarClient();
+
+  const requestBody: calendar_v3.Schema$Event = {
+    summary: params.title,
+    start: { dateTime: params.startAt },
+    end: { dateTime: params.endAt },
+  };
+
+  if (params.description) {
+    requestBody.description = params.description;
+  }
+
+  if (params.location) {
+    requestBody.location = params.location;
+  }
+
+  if (params.attendees && params.attendees.length > 0) {
+    requestBody.attendees = params.attendees.map((email) => ({ email }));
+  }
+
+  const response = await calClient.events.insert({
+    calendarId: "primary",
+    requestBody,
+  });
+
+  const eventId = response.data.id;
+  if (!eventId) {
+    throw new Error("Google Calendar returned no event ID");
+  }
+
+  // Persist locally
+  const startAt = response.data.start?.dateTime ?? params.startAt;
+  const endAt = response.data.end?.dateTime ?? params.endAt;
+
+  const attendees = (response.data.attendees ?? [])
+    .filter((a) => !a.self && a.email)
+    .map((a) => ({
+      email: a.email!,
+      name: a.displayName ?? undefined,
+      responseStatus: a.responseStatus ?? undefined,
+    }));
+
+  await upsertCalendarEvent({
+    chatId: params.chatId,
+    externalId: eventId,
+    calendarId: "primary",
+    title: params.title,
+    description: params.description,
+    startAt,
+    endAt,
+    location: params.location,
+    attendees,
+    isOneOnOne: attendees.length === 1,
+    status: "confirmed",
+    rawEvent: response.data as Record<string, unknown>,
+  });
+
+  log.info("calendar:event_created", { chatId: params.chatId, eventId, title: params.title });
+  return eventId;
+}
+
 /**
  * Safely extract HTTP error code from Google API errors.
  */

@@ -285,6 +285,7 @@ Posso te ajudar com:
 ✉️ *Draft de email* — "Marta, manda email pro Pedro sobre o atraso do projeto"
 👥 *Registrar pessoa* — "Marta, adiciona o Carlos, ele e tech lead"
 🔔 *Lembretes* — "Marta, me lembra de cobrar o Pedro amanha as 10h"
+📅 *Agendar* — "Marta, agendar reuniao com Pedro amanha as 14h"
 🔮 *Reflexao estrategica* — "Marta, o que tenho negligenciado?"
 
 Pode falar naturalmente comigo — entendo linguagem informal, audios e textos longos. Se precisar de mais contexto, vou te perguntar (no maximo 2x).
@@ -322,6 +323,39 @@ Responda APENAS com JSON valido:
 }`;
 
   return { system, user: params.text };
+}
+
+export function buildEventParsingPrompt(text: string, timezone: string): { system: string; user: string } {
+  const now = new Date();
+  const currentDate = now.toISOString().slice(0, 10);
+
+  const system = `Voce e um parser de eventos de calendario em linguagem natural em PT-BR.
+Extraia os detalhes de um evento a partir de um pedido em linguagem natural.
+
+DATA DE REFERENCIA: ${currentDate} (timezone: ${timezone})
+
+Regras:
+- "amanha" = dia seguinte a data de referencia
+- "segunda", "terca", etc = proximo dia da semana a partir de hoje
+- Se nao mencionar hora, use 09:00 como padrao
+- Se nao mencionar data, assuma HOJE
+- Se nao mencionar duracao, assuma 60 minutos
+- Extraia emails de participantes se mencionados (ex: "com pedro@email.com")
+- Extraia local se mencionado (ex: "na sala 3", "no zoom", "link: https://...")
+- "title" deve ser um titulo conciso para o evento
+
+Responda APENAS com JSON valido:
+{
+  "title": "titulo do evento",
+  "date": "YYYY-MM-DD",
+  "startTime": "HH:MM",
+  "duration": 60,
+  "attendees": ["email@example.com"],
+  "location": "local ou null",
+  "description": "descricao adicional ou null"
+}`;
+
+  return { system, user: text };
 }
 
 export function buildConversationalPrompt(params: {

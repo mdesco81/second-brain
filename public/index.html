@@ -101,7 +101,15 @@
 
       <!-- Marta (Chief of Staff) Tab Content -->
       <section class="marta-view" id="marta-view" style="display:none">
+        <h2 class="section-title">&#128276; Lembretes Pendentes</h2>
+        <div class="marta-reminders" id="marta-reminders"></div>
+
+        <div class="section-title-row">
+          <h2 class="section-title">&#128101; Pessoas</h2>
+          <button type="button" class="btn primary btn-sm" id="btn-add-person">+ Adicionar</button>
+        </div>
         <div class="marta-people" id="marta-people"></div>
+
         <h2 class="section-title" style="margin-top:2rem">Outputs da Marta</h2>
         <div class="marta-outputs" id="marta-outputs"></div>
         <div class="empty-state" id="marta-empty" style="display:none">
@@ -247,6 +255,65 @@
     <dialog id="image-lightbox" class="lightbox-dialog" aria-label="Visualizador de imagem">
       <button type="button" class="lightbox-close" id="lightbox-close">&times;</button>
       <img id="lightbox-img" src="" alt="Imagem em tela cheia" class="lightbox-img" />
+    </dialog>
+
+    <!-- Person Modal -->
+    <dialog id="person-modal">
+      <form method="dialog" class="edit-form" id="person-form">
+        <header class="modal-header">
+          <h2 id="person-modal-title">Nova Pessoa</h2>
+          <button type="button" class="close-btn" id="person-modal-close">&times;</button>
+        </header>
+
+        <div class="field">
+          <label for="person-name">Nome *</label>
+          <input type="text" id="person-name" required placeholder="Nome completo" />
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="person-role">Papel / Cargo</label>
+            <input type="text" id="person-role" placeholder="Ex: Gerente de Vendas" />
+          </div>
+          <div class="field">
+            <label for="person-relationship">Relacao</label>
+            <select id="person-relationship">
+              <option value="direct_report">Subordinado direto</option>
+              <option value="peer">Par</option>
+              <option value="manager">Gestor</option>
+              <option value="client">Cliente</option>
+              <option value="vendor">Fornecedor</option>
+              <option value="other">Outro</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="person-email">Email</label>
+            <input type="email" id="person-email" placeholder="email@exemplo.com" />
+          </div>
+          <div class="field">
+            <label for="person-cadence">Cadencia 1:1</label>
+            <select id="person-cadence">
+              <option value="weekly">Semanal</option>
+              <option value="biweekly">Quinzenal</option>
+              <option value="monthly">Mensal</option>
+              <option value="none">Nenhuma</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="person-notes">Notas</label>
+          <textarea id="person-notes" rows="2" placeholder="Observacoes sobre esta pessoa"></textarea>
+        </div>
+
+        <footer class="modal-footer">
+          <button type="button" class="btn secondary" id="person-modal-cancel">Cancelar</button>
+          <button type="submit" class="btn primary" id="person-modal-save">Salvar</button>
+        </footer>
+      </form>
     </dialog>
 
     <script src="/app.js" type="module"></script>

@@ -43,12 +43,14 @@ import {
   buildBriefingPrompt,
   buildConversationalPrompt,
   buildEmailDraftPrompt,
+  buildEventParsingPrompt,
   buildHelpMessage,
   buildNotesProcessingPrompt,
   buildReflectionPrompt,
   buildReminderParsingPrompt,
   buildStatusPrompt
 } from "./prompts.js";
+import { createCalendarEvent, isCalendarEnabled } from "../../services/calendar.js";
 
 // ── Multi-instruction detection ──────────────────────────────────────
 
@@ -361,6 +363,8 @@ async function executeIntent(
       return await handleReflexao(chatId, messageId, rawRequest);
     case "reminder":
       return await handleReminder(chatId, messageId, rawRequest, intent);
+    case "agendar":
+      return await handleAgendar(chatId, messageId, rawRequest, intent);
     case "ajuda":
       await sendText(chatId, buildHelpMessage());
       return { success: true, agentId: "chiefofstaff", summary: "Ajuda enviada." };
@@ -985,6 +989,112 @@ async function handleReminder(
   await sendText(chatId, `🔔 Lembrete agendado!\n\n📝 ${parsed.text}\n📅 ${dateStr} às ${timeStr}${recurrenceLabel}\n\nVou te avisar na hora.`);
 
   return { success: true, agentId: "chiefofstaff", summary: `Lembrete criado: ${parsed.text}` };
+}
+
+// ── Intent: Agendar (Calendar Event) ──────────────────────────────────
+
+async function handleAgendar(
+  chatId: number,
+  _messageId: number,
+  rawRequest: string,
+  intent: MartaIntent
+): Promise<AgentResult> {
+  if (!isCalendarEnabled()) {
+    await sendText(chatId, "O Google Calendar nao esta configurado. Configure as credenciais (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN) no .env para usar essa funcionalidade.");
+    return { success: false, agentId: "chiefofstaff", summary: "Calendar not configured", error: "calendar_not_enabled" };
+  }
+
+  await sendTypingIndicator(chatId);
+
+  // Use Claude to parse natural language event details
+  const { system, user } = buildEventParsingPrompt(rawRequest, env.TIMEZONE);
+
+  const response = await callClaude({ system, userMessage: user, model: "fast", maxTokens: 256 });
+  if (!response) {
+    await sendText(chatId, "Nao consegui entender os detalhes do evento. Pode reformular? Ex: \"agendar reuniao com Pedro amanha as 14h\"");
+    return { success: false, agentId: "chiefofstaff", summary: "Event parse failed", error: "null response" };
+  }
+
+  let parsed: {
+    title?: string;
+    date?: string;
+    startTime?: string;
+    duration?: number;
+    attendees?: string[];
+    location?: string | null;
+    description?: string | null;
+  };
+
+  try {
+    const jsonMatch = response.match(/\{[\s\S]*\}/);
+    parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : {};
+  } catch {
+    parsed = {};
+  }
+
+  if (!parsed.title || !parsed.date || !parsed.startTime) {
+    // Ask for clarification
+    const convId = await createCosConversation({
+      chatId,
+      intent: "agendar",
+      context: { originalRequest: rawRequest, intent }
+    });
+    await appendConversationMessage(convId, "user", rawRequest);
+    const question = "Entendi que voce quer agendar algo, mas nao consegui extrair todos os detalhes. Pode me dizer o titulo, data e hora? Ex: \"reuniao com Pedro amanha as 14h\"";
+    await appendConversationMessage(convId, "assistant", question);
+    await updateCosConversation(convId, { state: "clarifying" });
+    await sendText(chatId, question);
+    return { success: true, agentId: "chiefofstaff", summary: "Aguardando detalhes do evento." };
+  }
+
+  const duration = parsed.duration ?? 60;
+  const attendees = parsed.attendees ?? [];
+  const location = parsed.location ?? undefined;
+  const description = parsed.description ?? undefined;
+
+  // Build ISO datetime strings using timezone
+  const startDate = new Date(`${parsed.date}T${parsed.startTime}:00`);
+  if (isNaN(startDate.getTime())) {
+    await sendText(chatId, "Nao consegui interpretar a data/hora. Pode tentar de novo?");
+    return { success: false, agentId: "chiefofstaff", summary: "Invalid date", error: "invalid_date" };
+  }
+
+  const endDate = new Date(startDate.getTime() + duration * 60 * 1000);
+  const startAt = startDate.toISOString();
+  const endAt = endDate.toISOString();
+
+  try {
+    const eventId = await createCalendarEvent({
+      chatId,
+      title: parsed.title,
+      startAt,
+      endAt,
+      description,
+      attendees,
+      location,
+    });
+
+    await logCosEvent({
+      chatId,
+      eventType: "calendar_event_created",
+      details: { eventId, title: parsed.title, startAt, endAt, duration, attendees, location }
+    });
+
+    // Format confirmation
+    const dateStr = startDate.toLocaleDateString("pt-BR", { weekday: "long", day: "numeric", month: "long", timeZone: env.TIMEZONE });
+    const timeStr = startDate.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", timeZone: env.TIMEZONE });
+    const attendeesInfo = attendees.length > 0 ? `\n👥 Participantes: ${attendees.join(", ")}` : "";
+    const locationInfo = location ? `\n📍 Local: ${location}` : "";
+
+    await sendText(chatId, `📅 Evento criado!\n\n📝 ${parsed.title}\n🗓 ${dateStr} as ${timeStr} (${duration}min)${attendeesInfo}${locationInfo}`);
+
+    return { success: true, agentId: "chiefofstaff", summary: `Evento criado: ${parsed.title}` };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    log.error("marta:calendar_event_creation_failed", { chatId, error: errorMsg });
+    await sendText(chatId, "Nao consegui criar o evento no Google Calendar. Verifique se as credenciais estao corretas e tente novamente.");
+    return { success: false, agentId: "chiefofstaff", summary: "Calendar event creation failed", error: errorMsg };
+  }
 }
 
 // ── Intent: Reflexao Estrategica ──────────────────────────────────────
