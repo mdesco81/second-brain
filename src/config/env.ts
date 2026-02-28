@@ -4,7 +4,7 @@ import { z } from "zod";
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().min(1).max(65535).default(8080),
-  APP_BASE_URL: z.string().url().optional(),
+  APP_BASE_URL: z.preprocess((v) => v === "" ? undefined : v, z.string().url().optional()),
   POSTGRES_URL: z.string().min(1),
   TELEGRAM_BOT_TOKEN: z.string().min(1),
   TELEGRAM_WEBHOOK_SECRET: z.string().min(1),
