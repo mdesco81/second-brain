@@ -635,15 +635,15 @@ function renderMartaView() {
         </div>
       </div>
       <div class="marta-person-kanban">
-        <div class="marta-kanban-col">
+        <div class="marta-kanban-col" data-marta-col-status="open">
           <div class="marta-kanban-header">Pendente (${(person.items.open || []).length})</div>
           <div class="marta-kanban-cards">${openCards || '<div class="marta-empty-col">Nenhum item</div>'}</div>
         </div>
-        <div class="marta-kanban-col done-col">
+        <div class="marta-kanban-col done-col" data-marta-col-status="done">
           <div class="marta-kanban-header">Concluido (${person.stats.totalDone})</div>
           <div class="marta-kanban-cards">${doneCards || '<div class="marta-empty-col">Nenhum item</div>'}</div>
         </div>
-        <div class="marta-kanban-col eliminated-col">
+        <div class="marta-kanban-col eliminated-col" data-marta-col-status="eliminated">
           <div class="marta-kanban-header">Eliminado</div>
           <div class="marta-kanban-cards">${eliminatedCards || '<div class="marta-empty-col">Nenhum item</div>'}</div>
         </div>
@@ -700,7 +700,7 @@ function renderMartaCard(item) {
     : isEliminated ? ""
     : `<button class="marta-card-action" data-marta-status="${item.id}" data-to="done" title="Concluir">&#10003;</button>`;
 
-  return `<div class="marta-card ${priorityClass}${isDone ? " marta-card-done" : ""}${isEliminated ? " marta-card-eliminated" : ""}">
+  return `<div class="marta-card ${priorityClass}${isDone ? " marta-card-done" : ""}${isEliminated ? " marta-card-eliminated" : ""}" draggable="true" data-marta-card-id="${item.id}" data-marta-card-status="${item.status}">
     <div class="marta-card-top">
       <div class="marta-card-title">#${item.id} ${escapeHtml(title.length > 60 ? title.slice(0, 60) + "..." : title)}</div>
       ${actionBtn}
@@ -949,6 +949,70 @@ document.addEventListener("click", async (e) => {
       renderCommitments();
     } catch { showToast("Erro ao cancelar compromisso", "error"); }
     return;
+  }
+});
+
+// ============================================================================
+// Marta Drag and Drop
+// ============================================================================
+let martaDraggedId = null;
+
+document.addEventListener("dragstart", (e) => {
+  const card = e.target.closest("[data-marta-card-id]");
+  if (!card) return;
+
+  martaDraggedId = Number(card.dataset.martaCardId);
+  card.classList.add("marta-card-dragging");
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/marta-card", card.dataset.martaCardId);
+});
+
+document.addEventListener("dragend", (e) => {
+  const card = e.target.closest("[data-marta-card-id]");
+  if (card) card.classList.remove("marta-card-dragging");
+  martaDraggedId = null;
+  document.querySelectorAll(".marta-kanban-col.marta-drag-over").forEach((col) => col.classList.remove("marta-drag-over"));
+});
+
+document.addEventListener("dragover", (e) => {
+  const col = e.target.closest("[data-marta-col-status]");
+  if (!col || martaDraggedId === null) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+  col.classList.add("marta-drag-over");
+});
+
+document.addEventListener("dragleave", (e) => {
+  const col = e.target.closest("[data-marta-col-status]");
+  if (!col) return;
+  if (!col.contains(e.relatedTarget)) {
+    col.classList.remove("marta-drag-over");
+  }
+});
+
+document.addEventListener("drop", async (e) => {
+  const col = e.target.closest("[data-marta-col-status]");
+  if (!col || martaDraggedId === null) return;
+  e.preventDefault();
+  col.classList.remove("marta-drag-over");
+
+  const cardId = Number(e.dataTransfer.getData("text/marta-card"));
+  const newStatus = col.dataset.martaColStatus;
+  if (!cardId || !newStatus) return;
+
+  try {
+    const r = await fetch(`/api/actions/${cardId}/status`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: newStatus })
+    });
+    if (!r.ok) throw new Error();
+    const msgs = { open: "Item reaberto!", done: "Item concluido!", eliminated: "Item eliminado!" };
+    showToast(msgs[newStatus] || "Status atualizado!", "success");
+    state.martaData = null;
+    loadMartaData();
+  } catch {
+    showToast("Erro ao mover item", "error");
   }
 });
 

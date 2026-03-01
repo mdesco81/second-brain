@@ -302,10 +302,27 @@ export async function classifyContent(rawText: string): Promise<ClassificationRe
   const actionTitle = normalizeActionTitle(aiResult.actionTitle, action, summaryPtBr);
   const followUpWithPtBr = normalizeFollowUpWith(aiResult.followUpWithPtBr, action, rawText);
 
+  // Guard: if AI classified as LinkedIn-related but confidence is low or
+  // the raw text doesn't contain explicit LinkedIn content creation intent, downgrade to Inbox Geral
+  let finalCategoryName = aiResult.categoryName;
+  let finalCategoryDescription = aiResult.categoryDescription;
+  let finalShouldCreate = aiResult.shouldCreateCategory;
+  const isLinkedInCategory = /linkedin/i.test(aiResult.categoryName);
+  if (isLinkedInCategory) {
+    const hasExplicitLinkedInIntent = /\b(linkedin|linked\s*in)\b/i.test(rawText)
+      && /\b(post|artigo|escreve|cria|publica|redige|monta|faz um)\b/i.test(rawText);
+    if (!hasExplicitLinkedInIntent) {
+      log.info("classifyContent: downgrading LinkedIn category to Inbox Geral (no explicit LinkedIn creation intent in raw text)");
+      finalCategoryName = "Inbox Geral";
+      finalCategoryDescription = "Itens ainda sem classificacao especifica";
+      finalShouldCreate = true;
+    }
+  }
+
   return {
     summaryPtBr,
-    categoryName: aiResult.categoryName,
-    categoryDescription: aiResult.categoryDescription,
+    categoryName: finalCategoryName,
+    categoryDescription: finalCategoryDescription,
     bucket: aiResult.bucket,
     action,
     actionTitle,
@@ -315,7 +332,7 @@ export async function classifyContent(rawText: string): Promise<ClassificationRe
     dueDateISO,
     priority,
     confidence: clampConfidence(aiResult.confidence),
-    shouldCreateCategory: aiResult.shouldCreateCategory,
+    shouldCreateCategory: finalShouldCreate,
     followUpQuestionPtBr: aiResult.followUpQuestionPtBr
   };
 }
