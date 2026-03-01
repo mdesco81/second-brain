@@ -1239,9 +1239,29 @@ async function tryResolvePendingRelation(chatId: number, message: TelegramMessag
 // to handle a Marta follow-up simultaneously).
 const chatLocks = new Map<number, Promise<void>>();
 
+// Safety timeout: if a message takes longer than this, release the lock
+// so subsequent messages are not stuck forever (prevents deadlocks caused
+// by hung API calls or unexpected infinite waits).
+const CHAT_LOCK_TIMEOUT_MS = 120_000; // 2 minutes
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Timeout after ${ms}ms: ${label}`));
+    }, ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); }
+    );
+  });
+}
+
 function withChatLock(chatId: number, fn: () => Promise<void>): Promise<void> {
   const previous = chatLocks.get(chatId) ?? Promise.resolve();
-  const current = previous.then(fn, fn); // Run after previous completes (even on error)
+  const current = previous.then(
+    () => withTimeout(fn(), CHAT_LOCK_TIMEOUT_MS, `chatLock:${chatId}`),
+    () => withTimeout(fn(), CHAT_LOCK_TIMEOUT_MS, `chatLock:${chatId}`)
+  );
   chatLocks.set(chatId, current);
   // Cleanup: remove the lock entry once done so the map doesn't grow unbounded
   current.finally(() => {
@@ -1496,6 +1516,11 @@ async function processTelegramMessageInner(
   }
 
   // Step 6 — Content extraction (audio transcription, PDF text, image description)
+  // Send typing indicator EARLY for audio/image/PDF — these involve slow API calls
+  // (transcription, vision, parsing) and the user needs feedback that the bot is working.
+  if (isAudioMessage || message.photo || message.document) {
+    await sendTypingIndicator(chatId);
+  }
   const extracted = await extractFromMessage(message);
   if (!extracted.normalizedText) {
     const categoryId = await upsertCategory("Inbox Geral", "Itens sem extração automatica completa", "agent");
