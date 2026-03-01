@@ -1242,29 +1242,42 @@ const chatLocks = new Map<number, Promise<void>>();
 // Safety timeout: if a message takes longer than this, release the lock
 // so subsequent messages are not stuck forever (prevents deadlocks caused
 // by hung API calls or unexpected infinite waits).
-const CHAT_LOCK_TIMEOUT_MS = 120_000; // 2 minutes
-
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`Timeout after ${ms}ms: ${label}`));
-    }, ms);
-    promise.then(
-      (value) => { clearTimeout(timer); resolve(value); },
-      (error) => { clearTimeout(timer); reject(error); }
-    );
-  });
-}
+const CHAT_LOCK_TIMEOUT_MS = 120_000; // 2 minutes — covers transcription + cleanup + classification
+const LOCK_WAIT_TIMEOUT_MS = 30_000;  // 30s max wait for previous lock to release
 
 function withChatLock(chatId: number, fn: () => Promise<void>): Promise<void> {
   const previous = chatLocks.get(chatId) ?? Promise.resolve();
-  const current = previous.then(
-    () => withTimeout(fn(), CHAT_LOCK_TIMEOUT_MS, `chatLock:${chatId}`),
-    () => withTimeout(fn(), CHAT_LOCK_TIMEOUT_MS, `chatLock:${chatId}`)
-  );
+
+  const current = (async () => {
+    // Wait for previous lock, but DON'T wait forever.
+    // If previous is stuck (hung API call), proceed after LOCK_WAIT_TIMEOUT_MS.
+    // This prevents permanent deadlocks from old stuck messages.
+    try {
+      await Promise.race([
+        previous,
+        new Promise<void>((resolve) => setTimeout(resolve, LOCK_WAIT_TIMEOUT_MS))
+      ]);
+    } catch {
+      // previous rejected — that's fine, proceed with fn()
+    }
+
+    // Execute fn() with its own timeout to prevent THIS message from hanging
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        log.error("withChatLock: fn() timed out", { chatId, timeoutMs: CHAT_LOCK_TIMEOUT_MS });
+        reject(new Error(`Timeout after ${CHAT_LOCK_TIMEOUT_MS}ms: chatLock:${chatId}`));
+      }, CHAT_LOCK_TIMEOUT_MS);
+
+      fn().then(
+        () => { clearTimeout(timer); resolve(); },
+        (error) => { clearTimeout(timer); reject(error); }
+      );
+    });
+  })();
+
   chatLocks.set(chatId, current);
   // Cleanup: remove the lock entry once done so the map doesn't grow unbounded
-  current.finally(() => {
+  current.catch(() => {}).finally(() => {
     if (chatLocks.get(chatId) === current) {
       chatLocks.delete(chatId);
     }
