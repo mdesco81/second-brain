@@ -272,9 +272,10 @@ export async function handleCallbackQuery(query: TelegramCallbackQuery): Promise
           log.info("callback:email_sent", { chatId, outputId: itemId, to: recipientEmail });
         } catch (error) {
           log.error("callback:email_send_failed", { chatId, outputId: itemId, error });
-          emailSendsInFlight.delete(itemId);
           await answerCallbackQuery(query.id, "Erro ao enviar email.");
           await sendText(chatId, "Nao consegui enviar o email. Verifique as configuracoes SMTP.");
+        } finally {
+          emailSendsInFlight.delete(itemId);
         }
         break;
       }

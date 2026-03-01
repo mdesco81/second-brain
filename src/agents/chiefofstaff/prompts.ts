@@ -115,6 +115,7 @@ export function buildNotesProcessingPrompt(params: {
   notesText: string;
   memories: CosMemory[];
   currentDate?: string;
+  teamMembers?: string;
 }): { system: string; user: string } {
   const memoryBlock = params.memories.length > 0
     ? `\n\nMEMORIAS SOBRE ${params.person.name.toUpperCase()}:\n${params.memories.map((m) => `- [${m.memoryType}] ${m.content}`).join("\n")}`
@@ -122,33 +123,47 @@ export function buildNotesProcessingPrompt(params: {
 
   const dateRef = params.currentDate ?? new Date().toISOString().slice(0, 10);
 
+  const teamBlock = params.teamMembers
+    ? `\n\nMEMBROS DA EQUIPE (use estes nomes EXATOS no campo "owner" dos action_items e em "participants" das decisions):\n${params.teamMembers}\n- Eu / Lider (para action items do proprio lider)`
+    : "";
+
   const system = `${MARTA_PERSONA}
 
-TAREFA: Processar notas/transcript de 1:1 com ${params.person.name}.
+TAREFA: Processar notas/transcript de reuniao com ${params.person.name}.
 Data de referencia: ${dateRef}
+${teamBlock}
 
-Extraia e estruture:
-1. *Decisoes tomadas* — o que foi decidido na reuniao. Sinais: "decidimos", "ficou definido", "combinamos", "vamos", "a direcao e", "optamos por", "fechamos que"
-2. *Action items* — quem faz o que, com prazo se mencionado. Retorne como JSON array no campo "action_items"
-3. *Compromissos* — promessas feitas por mim ou pela outra pessoa. Sinais: "vou", "prometo", "fico de", "me comprometo", "vai entregar", "garanto que", "ate [data] eu", "combinado que [pessoa] faz". Classifique a direcao: "mine" (eu prometi) ou "theirs" (a outra pessoa prometeu)
-4. *Temas pendentes* — que ficaram sem resolucao
-5. *Sinais de risco/preocupacao* — sentimentos, hesitacoes, flags vermelhas
-6. *Follow-ups necessarios* — o que precisa ser acompanhado
-7. *Insights sobre a pessoa* — observacoes para eu aprender sobre o estilo e preferencias dela
-8. *Humor/clima da reuniao* — como a pessoa parecia (motivada, preocupada, frustrada, neutra, etc.)
-9. *Bullets executivos* — 3-5 bullets de alto nivel que capturam o essencial da reuniao para referencia rapida
+INSTRUCOES DE INTERPRETACAO:
+Voce esta recebendo notas brutas de uma reuniao. Seu trabalho e INTERPRETAR o conteudo, NAO copiar/colar o texto.
+Extraia e estruture as seguintes informacoes:
 
-Para cada action item, retorne:
-{ "title": "titulo imperativo", "owner": "quem", "due": "prazo ou null", "priority": "ALTA|MEDIA|BAIXA" }
+1. *Decisoes tomadas* — o que foi decidido. Sinais: "decidimos", "ficou definido", "combinamos", "vamos", "a direcao e", "optamos por", "fechamos que"
+2. *Action items* — CADA atividade, tarefa ou entrega mencionada, com dono e prazo. SEJA GRANULAR: se ha 5 atividades para 3 pessoas diferentes, crie 5 action items separados, cada um com seu dono correto.
+3. *Compromissos* — promessas feitas. "mine" = o lider prometeu. "theirs" = ${params.person.name} ou outra pessoa prometeu.
+4. *Sinais de risco* — hesitacoes, bloqueios, preocupacoes
+5. *Insights sobre a pessoa* — observacoes de estilo, preferencias, motivacao
+6. *Humor/clima* — como ${params.person.name} parecia
+7. *Bullets executivos* — 3-5 bullets de alto nivel
 
-Para cada decisao, retorne como OBJETO (nao string):
-{ "summary": "resumo da decisao", "rationale": "por que foi decidido (se mencionado, senao null)", "participants": ["nome1", ...], "review_date": "YYYY-MM-DD sugerido para revisao (30 dias por padrao)" }
+REGRAS CRITICAS PARA ACTION ITEMS:
+- Crie UM action_item para CADA atividade distinta mencionada
+- O campo "owner" DEVE conter o nome da pessoa responsavel (use os nomes exatos da lista de membros da equipe)
+- Se o lider deve fazer algo, use "Eu" como owner
+- Se ${params.person.name} deve fazer algo, use "${params.person.name}" como owner
+- Se outra pessoa da equipe for mencionada, use o nome dela
+- Resolva prazos relativos (ex: "sexta" = proximo YYYY-MM-DD a partir de ${dateRef})
+- Prioridade: ALTA para urgente/bloqueante, MEDIA para importante, BAIXA para nice-to-have
 
-Para cada compromisso, retorne:
-{ "summary": "descricao do compromisso", "direction": "mine|theirs", "deadline": "YYYY-MM-DD ou null (resolva prazos relativos como 'sexta' a partir da data de referencia)" }
+REGRAS CRITICAS PARA COMPROMISSOS:
+- "direction": "mine" = eu (o lider) me comprometi a fazer
+- "direction": "theirs" = a outra pessoa se comprometeu
+
+Para cada action item: { "title": "titulo imperativo e claro", "owner": "nome exato", "due": "YYYY-MM-DD ou null", "priority": "ALTA|MEDIA|BAIXA" }
+Para cada decisao: { "summary": "resumo", "rationale": "por que (ou null)", "participants": ["nome1", ...], "review_date": "YYYY-MM-DD" }
+Para cada compromisso: { "summary": "descricao", "direction": "mine|theirs", "deadline": "YYYY-MM-DD ou null" }
 ${memoryBlock}
 
-Responda com JSON:
+FORMATO DE RESPOSTA: Retorne APENAS um JSON valido, sem texto antes ou depois, sem markdown code fences.
 {
   "summary": "resumo executivo em 2-3 frases",
   "executive_bullets": ["bullet 1", "bullet 2", ...],
@@ -161,7 +176,7 @@ Responda com JSON:
   "person_insights": ["insight 1", ...],
   "team_mood": "motivado|preocupado|frustrado|neutro|empolgado|cansado",
   "risks": [{"description": "descricao do risco", "severity": "high|medium|low"}],
-  "telegram_message": "mensagem formatada para Telegram resumindo a reuniao"
+  "telegram_message": "mensagem formatada para Telegram resumindo a reuniao com emojis e secoes"
 }`;
 
   const user = `Pessoa: ${params.person.name} (${params.person.role ?? "liderado"})

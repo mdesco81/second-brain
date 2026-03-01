@@ -59,18 +59,153 @@ import { createCalendarEvent, isCalendarEnabled } from "../../services/calendar.
 // ── Safe JSON extraction utility ─────────────────────────────────────
 
 /**
- * Safely extract and parse the first JSON object from a string.
- * Handles cases where the LLM response contains text around the JSON.
+ * Safely extract and parse the outermost JSON object from a string.
+ * Uses bracket-counting instead of greedy regex to handle cases where
+ * the LLM response contains text, code blocks, or nested braces around the JSON.
  * Returns the fallback value if parsing fails.
  */
 function safeParseJson<T>(text: string, fallback: T): T {
+  // Strategy 1: Try parsing the whole text as JSON (best case: clean response)
+  try {
+    const trimmed = text.trim()
+      .replace(/^```(?:json)?\s*\n?/i, "")
+      .replace(/\n?\s*```$/i, "")
+      .trim();
+    if (trimmed.startsWith("{")) {
+      return JSON.parse(trimmed) as T;
+    }
+  } catch { /* fall through */ }
+
+  // Strategy 2: Bracket-counting to find the outermost balanced JSON object
+  try {
+    const startIdx = text.indexOf("{");
+    if (startIdx === -1) return fallback;
+
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = startIdx; i < text.length; i++) {
+      const ch = text[i];
+
+      if (escape) { escape = false; continue; }
+      if (ch === "\\") { escape = true; continue; }
+
+      if (ch === '"' && !escape) { inString = !inString; continue; }
+      if (inString) continue;
+
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          const candidate = text.slice(startIdx, i + 1);
+          return JSON.parse(candidate) as T;
+        }
+      }
+    }
+  } catch { /* fall through */ }
+
+  // Strategy 3: Greedy regex as last resort
   try {
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return fallback;
-    return JSON.parse(jsonMatch[0]) as T;
-  } catch {
-    return fallback;
+    if (jsonMatch) return JSON.parse(jsonMatch[0]) as T;
+  } catch { /* fall through */ }
+
+  return fallback;
+}
+
+// ── Format notes for human-readable display ──────────────────────────
+
+/**
+ * Build a clean, human-readable text from parsed notes data.
+ * Used to store in cos_outputs.content so the dashboard shows a
+ * readable summary instead of raw JSON.
+ */
+function formatNotesContent(parsed: {
+  summary?: string;
+  executive_bullets?: string[];
+  action_items?: Array<{ title: string; owner?: string; due?: string | null; priority?: string }>;
+  decisions?: Array<{ summary: string }>;
+  commitments?: Array<{ summary: string; direction?: string; deadline?: string | null }>;
+  team_mood?: string;
+  risks?: Array<{ description: string; severity?: string }>;
+  telegram_message?: string;
+}, stats: { items: number; decisions: number; commitments: number }): string {
+  const lines: string[] = [];
+
+  // Summary / executive overview
+  if (parsed.summary) {
+    lines.push(parsed.summary);
+    lines.push("");
   }
+
+  // Executive bullets
+  if (parsed.executive_bullets?.length) {
+    lines.push("📌 Pontos-chave:");
+    for (const b of parsed.executive_bullets) {
+      lines.push(`  • ${b}`);
+    }
+    lines.push("");
+  }
+
+  // Action items
+  if (parsed.action_items?.length) {
+    lines.push(`✅ Action items (${parsed.action_items.length}):`);
+    for (const item of parsed.action_items) {
+      const owner = item.owner ? ` [${item.owner}]` : "";
+      const due = item.due ? ` — prazo: ${item.due}` : "";
+      const prio = item.priority ? ` (${item.priority})` : "";
+      lines.push(`  • ${item.title}${owner}${prio}${due}`);
+    }
+    lines.push("");
+  }
+
+  // Decisions
+  if (parsed.decisions?.length) {
+    lines.push(`📋 Decisões (${parsed.decisions.length}):`);
+    for (const d of parsed.decisions) {
+      lines.push(`  • ${d.summary}`);
+    }
+    lines.push("");
+  }
+
+  // Commitments
+  if (parsed.commitments?.length) {
+    lines.push(`🤝 Compromissos (${parsed.commitments.length}):`);
+    for (const c of parsed.commitments) {
+      const dir = c.direction === "theirs" ? "[deles]" : "[meu]";
+      const dl = c.deadline ? ` — prazo: ${c.deadline}` : "";
+      lines.push(`  • ${dir} ${c.summary}${dl}`);
+    }
+    lines.push("");
+  }
+
+  // Risks
+  if (parsed.risks?.length) {
+    lines.push("⚠️ Riscos:");
+    for (const r of parsed.risks) {
+      const sev = r.severity ? `[${r.severity}] ` : "";
+      lines.push(`  • ${sev}${r.description}`);
+    }
+    lines.push("");
+  }
+
+  // Team mood
+  if (parsed.team_mood) {
+    lines.push(`🧠 Clima: ${parsed.team_mood}`);
+    lines.push("");
+  }
+
+  // Stats footer
+  const statParts: string[] = [];
+  if (stats.items > 0) statParts.push(`${stats.items} action item${stats.items > 1 ? "s" : ""}`);
+  if (stats.decisions > 0) statParts.push(`${stats.decisions} decisão${stats.decisions > 1 ? "ões" : ""}`);
+  if (stats.commitments > 0) statParts.push(`${stats.commitments} compromisso${stats.commitments > 1 ? "s" : ""}`);
+  if (statParts.length > 0) {
+    lines.push(`— Registrado: ${statParts.join(", ")}`);
+  }
+
+  return lines.join("\n").trim() || parsed.telegram_message || parsed.summary || "Notas processadas.";
 }
 
 // ── Multi-instruction detection ──────────────────────────────────────
@@ -655,15 +790,25 @@ async function handleNotas(
 
   // Use media content (PDF text / image description) as the primary notes content
   // when available, combined with caption text for context
-  const notesText = mediaContent
+  let notesText = mediaContent
     ? [rawRequest, mediaContent].filter(Boolean).join("\n\n")
     : rawRequest;
+
+  // Truncate very long notes to avoid token overflow
+  const MAX_NOTES_LENGTH = 12_000;
+  if (notesText.length > MAX_NOTES_LENGTH) {
+    log.warn("marta:notes_truncated", { personId: person.id, originalLength: notesText.length });
+    notesText = notesText.slice(0, MAX_NOTES_LENGTH) + "\n\n[... texto truncado por limite de tamanho ...]";
+  }
+
+  const teamList = people.map((p) => `- ${p.name} (${p.role ?? "liderado"})`).join("\n");
 
   const { system, user } = buildNotesProcessingPrompt({
     person,
     notesText,
     memories,
-    currentDate: new Date().toISOString().slice(0, 10)
+    currentDate: new Date().toISOString().slice(0, 10),
+    teamMembers: teamList
   });
 
   const response = await callClaude({ system, userMessage: user, maxTokens: 4096 });
@@ -672,7 +817,7 @@ async function handleNotas(
     return { success: false, agentId: "chiefofstaff", summary: "Claude call failed", error: "null response" };
   }
 
-  let parsed: {
+  type NotesPayload = {
     summary?: string;
     executive_bullets?: string[];
     action_items?: Array<{ title: string; owner: string; due: string | null; priority: string }>;
@@ -684,14 +829,9 @@ async function handleNotas(
     telegram_message?: string;
   };
 
-  try {
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { summary: response, telegram_message: response };
-  } catch {
-    parsed = { summary: response, telegram_message: response };
-  }
+  const parsed = safeParseJson<NotesPayload>(response, { summary: response, telegram_message: response });
 
-  // Create action items from notes
+  // Create action items from notes — resolve owners to person entities
   const categories = await listCategories();
   const defaultCategory = categories[0]?.id ?? 1;
   let createdItems = 0;
@@ -699,6 +839,10 @@ async function handleNotas(
   if (parsed.action_items && Array.isArray(parsed.action_items)) {
     for (const item of parsed.action_items) {
       try {
+        const ownerName = item.owner || person.name;
+        const resolvedOwner = await resolvePersonFuzzy(ownerName, people);
+        const resolvedPersonId = resolvedOwner?.id ?? person.id;
+
         await insertInboxItem({
           chatId,
           messageId: 0,
@@ -712,10 +856,15 @@ async function handleNotas(
           priority: (item.priority as "ALTA" | "MEDIA" | "BAIXA") || "MEDIA",
           actionTitle: item.title,
           dueAt: item.due || undefined,
-          followUpWith: item.owner || person.name,
+          followUpWith: resolvedOwner?.name ?? ownerName,
           processingStage: "planejado",
           confidence: 0.9,
-          metadata: { source: "marta_1on1", personId: person.id }
+          metadata: {
+            source: "marta_1on1",
+            personId: resolvedPersonId,
+            meetingWith: person.name,
+            meetingPersonId: person.id
+          }
         });
         createdItems++;
       } catch (error) {
@@ -842,13 +991,18 @@ async function handleNotas(
     log.warn("marta:calendar_link_failed", { error });
   }
 
-  // Save output
+  // Save output — format as human-readable text instead of raw JSON
+  const displayContent = formatNotesContent(parsed, {
+    items: createdItems,
+    decisions: createdDecisions,
+    commitments: createdCommitments
+  });
   const outputId = await insertCosOutput({
     chatId,
     outputType: "one_on_one_notes",
     personId: person.id,
     title: `Notas 1:1 ${person.name} — ${new Date().toISOString().slice(0, 10)}`,
-    content: response,
+    content: displayContent,
     metadata: {
       actionItemsCreated: createdItems,
       decisionsCreated: createdDecisions,
@@ -1430,11 +1584,27 @@ export async function processNotesFromDashboard(params: {
 
   const memories = await loadMemoriesForPerson(person.id);
 
+  // Truncate very long notes to avoid token overflow (keep ~12k chars ≈ ~3k tokens)
+  const MAX_NOTES_LENGTH = 12_000;
+  let notesText = params.notesText;
+  if (notesText.length > MAX_NOTES_LENGTH) {
+    log.warn("dashboard_notes:truncated", {
+      personId: person.id,
+      originalLength: notesText.length,
+      truncatedTo: MAX_NOTES_LENGTH
+    });
+    notesText = notesText.slice(0, MAX_NOTES_LENGTH) + "\n\n[... texto truncado por limite de tamanho ...]";
+  }
+
+  // Build list of team members for the prompt so Claude can assign owners correctly
+  const teamList = people.map((p) => `- ${p.name} (${p.role ?? "liderado"})`).join("\n");
+
   const { system, user } = buildNotesProcessingPrompt({
     person,
-    notesText: params.notesText,
+    notesText,
     memories,
-    currentDate: new Date().toISOString().slice(0, 10)
+    currentDate: new Date().toISOString().slice(0, 10),
+    teamMembers: teamList
   });
 
   const response = await callClaude({ system, userMessage: user, maxTokens: 4096 });
@@ -1442,7 +1612,7 @@ export async function processNotesFromDashboard(params: {
     throw new Error("Claude call returned null");
   }
 
-  let parsed: {
+  type NotesPayload = {
     summary?: string;
     executive_bullets?: string[];
     action_items?: Array<{ title: string; owner: string; due: string | null; priority: string }>;
@@ -1454,21 +1624,30 @@ export async function processNotesFromDashboard(params: {
     telegram_message?: string;
   };
 
-  try {
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { summary: response };
-  } catch {
-    parsed = { summary: response };
+  const parsed = safeParseJson<NotesPayload>(response, { summary: response });
+
+  // If parsing returned the raw response as summary (fallback), log warning
+  if (!parsed.action_items && !parsed.decisions && !parsed.commitments && parsed.summary === response) {
+    log.warn("dashboard_notes:json_parse_fallback", {
+      personId: person.id,
+      responseLength: response.length,
+      responseStart: response.slice(0, 200)
+    });
   }
 
   const categories = await listCategories();
   const defaultCategory = categories[0]?.id ?? 1;
   let createdItems = 0;
 
-  // Create action items
+  // Create action items — resolve each owner to a person entity
   if (parsed.action_items && Array.isArray(parsed.action_items)) {
     for (const item of parsed.action_items) {
       try {
+        // Resolve the owner name to a person entity
+        const ownerName = item.owner || person.name;
+        const resolvedOwner = await resolvePersonFuzzy(ownerName, people);
+        const resolvedPersonId = resolvedOwner?.id ?? person.id;
+
         await insertInboxItem({
           chatId: params.chatId,
           messageId: 0,
@@ -1482,12 +1661,24 @@ export async function processNotesFromDashboard(params: {
           priority: (item.priority as "ALTA" | "MEDIA" | "BAIXA") || "MEDIA",
           actionTitle: item.title,
           dueAt: item.due || undefined,
-          followUpWith: item.owner || person.name,
+          followUpWith: resolvedOwner?.name ?? ownerName,
           processingStage: "planejado",
           confidence: 0.9,
-          metadata: { source: "marta_dashboard_upload", personId: person.id }
+          metadata: {
+            source: "marta_dashboard_upload",
+            personId: resolvedPersonId,
+            meetingWith: person.name,
+            meetingPersonId: person.id
+          }
         });
         createdItems++;
+        log.info("dashboard_notes:action_item_created", {
+          title: item.title,
+          owner: ownerName,
+          resolvedOwner: resolvedOwner?.name ?? null,
+          resolvedPersonId,
+          priority: item.priority
+        });
       } catch (error) {
         log.warn("dashboard_notes:action_item_failed", { item, error });
       }
@@ -1591,13 +1782,18 @@ export async function processNotesFromDashboard(params: {
   await updateLastOneOnOne(person.id);
   await updateLastContact(person.id);
 
-  // Save output record
+  // Save output record — format as human-readable text instead of raw JSON
+  const displayContent = formatNotesContent(parsed, {
+    items: createdItems,
+    decisions: createdDecisions,
+    commitments: createdCommitments
+  });
   await insertCosOutput({
     chatId: params.chatId,
     outputType: "one_on_one_notes",
     personId: person.id,
     title: `Notas 1:1 ${person.name} — ${new Date().toISOString().slice(0, 10)} (dashboard)`,
-    content: response,
+    content: displayContent,
     metadata: {
       actionItemsCreated: createdItems,
       decisionsCreated: createdDecisions,

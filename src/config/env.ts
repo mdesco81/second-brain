@@ -16,7 +16,9 @@ const envSchema = z.object({
   OPENAI_TRANSCRIBE_MODEL: z.string().default("gpt-4o-mini-transcribe"),
   OPENAI_EMBED_MODEL: z.string().default("text-embedding-3-small"),
   PERPLEXITY_API_KEY: z.preprocess((v) => v === "" ? undefined : v, z.string().min(1).optional()),
-  TIMEZONE: z.string().default("America/Sao_Paulo"),
+  TIMEZONE: z.string().default("America/Sao_Paulo").refine((val) => {
+    try { Intl.DateTimeFormat("en-US", { timeZone: val }); return true; } catch { return false; }
+  }, "Invalid IANA timezone (e.g. America/Sao_Paulo)"),
   PROACTIVE_HOUR: z.coerce.number().int().min(0).max(23).default(9),
   PROACTIVE_MINUTE: z.coerce.number().int().min(0).max(59).default(0),
   WEEKLY_REPORT_DAY: z.coerce.number().int().min(0).max(6).default(1),

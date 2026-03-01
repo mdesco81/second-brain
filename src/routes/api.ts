@@ -727,8 +727,8 @@ apiRouter.get("/cos", async (_req, res, next) => {
 
 apiRouter.get("/cos/output/:id", async (req, res, next) => {
   try {
-    const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
       res.status(400).json({ error: "Invalid output ID" });
       return;
     }
@@ -745,9 +745,9 @@ apiRouter.get("/cos/output/:id", async (req, res, next) => {
 
 apiRouter.patch("/cos/output/:id/status", async (req, res, next) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = Number(req.params.id);
     const { status } = req.body as { status?: string };
-    if (isNaN(id) || !status) {
+    if (!Number.isInteger(id) || id <= 0 || !status) {
       res.status(400).json({ error: "Invalid parameters" });
       return;
     }
