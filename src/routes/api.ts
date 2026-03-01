@@ -26,6 +26,7 @@ import {
   searchItemsByIds,
   textSearchItems,
   updateCosOutputStatus,
+  deleteCosOutput,
   updateInboxItemFields,
   updateInboxItemMetadata,
   updateInboxItemStatusById,
@@ -752,6 +753,24 @@ apiRouter.patch("/cos/output/:id/status", async (req, res, next) => {
       return;
     }
     await updateCosOutputStatus(id, status);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.delete("/cos/output/:id", async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      res.status(400).json({ error: "Invalid output ID" });
+      return;
+    }
+    const deleted = await deleteCosOutput(id);
+    if (!deleted) {
+      res.status(404).json({ error: "Output not found" });
+      return;
+    }
     res.json({ ok: true });
   } catch (error) {
     next(error);

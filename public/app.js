@@ -678,6 +678,7 @@ function renderMartaView() {
         <div class="marta-output-actions">
           <button class="btn-copy-output" data-output-id="${output.id}" title="Copiar conteudo">&#128203; Copiar</button>
           <button class="btn-expand-output" data-output-id="${output.id}" title="Ver completo">&#128065; Ver completo</button>
+          <button class="btn-delete-output" data-output-id="${output.id}" title="Excluir output">&#128465; Excluir</button>
         </div>
         <div class="marta-output-full" id="output-full-${output.id}" style="display:none">
           <pre class="marta-output-content">Carregando...</pre>
@@ -759,6 +760,31 @@ document.addEventListener("click", async (e) => {
         fullEl.style.display = "none";
         expandBtn.innerHTML = "&#128065; Ver completo";
       }
+    }
+    return;
+  }
+
+  const deleteBtn = e.target.closest(".btn-delete-output");
+  if (deleteBtn) {
+    const id = deleteBtn.dataset.outputId;
+    const card = deleteBtn.closest(".marta-output-card");
+    const title = card?.querySelector(".marta-output-title")?.textContent || `Output #${id}`;
+    const confirmed = await showConfirm({
+      title: "Excluir output",
+      message: `Tem certeza que deseja excluir "${title}"? Esta ação não pode ser desfeita.`,
+      icon: "🗑️",
+      okText: "Excluir",
+      okClass: "danger"
+    });
+    if (!confirmed) return;
+    try {
+      const res = await fetch(`/api/cos/output/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Delete failed");
+      card?.remove();
+      delete martaFullContentCache[id];
+      showToast("Output excluído!", "success");
+    } catch {
+      showToast("Erro ao excluir output", "error");
     }
     return;
   }

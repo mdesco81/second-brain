@@ -1516,6 +1516,17 @@ dialog.confirm-dialog {
   background: var(--border);
 }
 
+.marta-output-actions .btn-delete-output {
+  color: var(--danger, #dc3545);
+  margin-left: auto;
+}
+
+.marta-output-actions .btn-delete-output:hover {
+  background: var(--danger, #dc3545);
+  color: #fff;
+  border-color: var(--danger, #dc3545);
+}
+
 .marta-output-full {
   margin-top: 12px;
   border-top: 1px solid var(--border);

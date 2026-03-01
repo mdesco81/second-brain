@@ -2656,6 +2656,11 @@ export async function updateCosOutputStatus(id: number, status: string): Promise
   await pool.query(`UPDATE cos_outputs SET status = $2 WHERE id = $1`, [id, status]);
 }
 
+export async function deleteCosOutput(id: number): Promise<boolean> {
+  const result = await pool.query(`DELETE FROM cos_outputs WHERE id = $1`, [id]);
+  return (result.rowCount ?? 0) > 0;
+}
+
 export async function getLatestCosOutput(personId: number, outputType: string): Promise<CosOutput | null> {
   const result = await pool.query<{
     id: number;
