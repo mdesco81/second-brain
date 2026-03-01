@@ -188,7 +188,7 @@ export async function transcribeAudio(params: {
           if (text) {
             return text;
           }
-        } catch (error) {
+        } catch (error: unknown) {
           log.warn("Audio transcription attempt failed", {
             model,
             fileName: params.fileName,
@@ -198,6 +198,12 @@ export async function transcribeAudio(params: {
             detectedExt,
             error
           });
+          // If quota is exhausted, stop immediately — no point retrying other models
+          const errObj = error as Record<string, unknown>;
+          if (errObj?.code === "insufficient_quota" || errObj?.status === 429) {
+            log.error("OpenAI quota exhausted — aborting all transcription attempts");
+            return null;
+          }
         }
       }
     }

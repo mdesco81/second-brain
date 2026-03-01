@@ -1322,28 +1322,42 @@ export async function processTelegramMessage(message: TelegramMessage): Promise<
   const messageId = message.message_id;
   inflightCount += 1;
 
-  await withChatLock(chatId, async () => {
-    try {
-      await processTelegramMessageInner(chatId, messageId, message);
-    } catch (error) {
-      log.error("processTelegramMessage crashed — notifying user", {
-        chatId,
-        messageId,
-        inputType: inferInputType(message),
-        error
-      });
+  try {
+    await withChatLock(chatId, async () => {
       try {
+        await processTelegramMessageInner(chatId, messageId, message);
+      } catch (error) {
+        log.error("processTelegramMessage crashed — notifying user", {
+          chatId,
+          messageId,
+          inputType: inferInputType(message),
+          error
+        });
         await sendText(
           chatId,
           "Ocorreu um erro ao processar sua mensagem. Tente novamente ou envie em texto."
         );
-      } catch (sendError) {
-        log.error("Failed to send error notification to user", { chatId, sendError });
       }
-    } finally {
-      inflightDone();
+    });
+  } catch (error) {
+    // withChatLock timeout OR inner sendText failure — always notify user
+    log.error("processTelegramMessage: lock-level failure", {
+      chatId,
+      messageId,
+      inputType: inferInputType(message),
+      error
+    });
+    try {
+      await sendText(
+        chatId,
+        "⏳ O processamento demorou demais e foi interrompido. Tente novamente ou envie em texto."
+      );
+    } catch (sendError) {
+      log.error("Failed to send timeout notification to user", { chatId, sendError });
     }
-  });
+  } finally {
+    inflightDone();
+  }
 }
 
 async function processTelegramMessageInner(
