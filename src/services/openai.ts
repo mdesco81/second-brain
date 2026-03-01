@@ -774,6 +774,17 @@ export async function callClaude(params: {
         messages: [{ role: "user", content: params.userMessage }]
       });
 
+      // Detect truncated responses — critical for JSON outputs
+      if (response.stop_reason === "max_tokens") {
+        log.warn("callClaude:response_truncated", {
+          model,
+          maxTokens: params.maxTokens ?? 4096,
+          inputTokens: response.usage?.input_tokens,
+          outputTokens: response.usage?.output_tokens,
+          hint: "Response was cut off by max_tokens limit. Increase maxTokens for this call."
+        });
+      }
+
       const textBlock = response.content.find((block) => block.type === "text");
       return textBlock?.text?.trim() ?? null;
     } catch (error) {

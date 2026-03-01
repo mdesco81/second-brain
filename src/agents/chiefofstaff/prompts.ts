@@ -164,19 +164,16 @@ Para cada compromisso: { "summary": "descricao", "direction": "mine|theirs", "de
 ${memoryBlock}
 
 FORMATO DE RESPOSTA: Retorne APENAS um JSON valido, sem texto antes ou depois, sem markdown code fences.
+IMPORTANTE: A resposta pode ser longa para reunioes complexas. Priorize COMPLETAR o JSON corretamente — e melhor ter todos os action_items e decisions do que gastar tokens com campos opcionais.
 {
   "summary": "resumo executivo em 2-3 frases",
   "executive_bullets": ["bullet 1", "bullet 2", ...],
-  "decisions": [{"summary": "...", "rationale": "...", "participants": ["..."], "review_date": "..."}],
   "action_items": [{"title": "...", "owner": "...", "due": "...", "priority": "..."}],
+  "decisions": [{"summary": "...", "rationale": "...", "participants": ["..."], "review_date": "..."}],
   "commitments": [{"summary": "...", "direction": "mine|theirs", "deadline": "YYYY-MM-DD|null"}],
-  "pending_topics": ["topico 1", ...],
-  "risk_signals": ["sinal 1", ...],
-  "follow_ups": ["follow-up 1", ...],
   "person_insights": ["insight 1", ...],
   "team_mood": "motivado|preocupado|frustrado|neutro|empolgado|cansado",
-  "risks": [{"description": "descricao do risco", "severity": "high|medium|low"}],
-  "telegram_message": "mensagem formatada para Telegram resumindo a reuniao com emojis e secoes"
+  "risks": [{"description": "descricao do risco", "severity": "high|medium|low"}]
 }`;
 
   const user = `Pessoa: ${params.person.name} (${params.person.role ?? "liderado"})

@@ -811,7 +811,8 @@ async function handleNotas(
     teamMembers: teamList
   });
 
-  const response = await callClaude({ system, userMessage: user, maxTokens: 4096 });
+  // Use 16000 tokens — complex meetings with 30+ action items easily exceed 4096
+  const response = await callClaude({ system, userMessage: user, maxTokens: 16_000 });
   if (!response) {
     await sendText(chatId, "Nao consegui processar as notas. Tente novamente.");
     return { success: false, agentId: "chiefofstaff", summary: "Claude call failed", error: "null response" };
@@ -830,6 +831,16 @@ async function handleNotas(
   };
 
   const parsed = safeParseJson<NotesPayload>(response, { summary: response, telegram_message: response });
+
+  // Detect if parsing failed (Claude response likely truncated or malformed)
+  if (!parsed.action_items && !parsed.decisions && parsed.summary === response) {
+    log.warn("marta:notes_parse_failed", {
+      personId: person.id,
+      responseLength: response.length,
+      responseEnd: response.slice(-200),
+      hint: "JSON parse failed — response may have been truncated by max_tokens limit"
+    });
+  }
 
   // Create action items from notes — resolve owners to person entities
   const categories = await listCategories();
@@ -1020,23 +1031,33 @@ async function handleNotas(
     details: { actionItemsCreated: createdItems, decisionsCreated: createdDecisions, commitmentsCreated: createdCommitments }
   });
 
-  // Send Telegram message
+  // Send Telegram message — build from parsed data (telegram_message removed from prompt to save tokens)
   const telegramMsg = parsed.telegram_message ?? parsed.summary ?? "Notas processadas.";
-  const footerParts: string[] = [];
+  const tgParts: string[] = [`📝 1:1 com ${person.name}\n\n${telegramMsg}`];
+
+  if (parsed.executive_bullets?.length) {
+    tgParts.push("\n\n📌 Pontos-chave:");
+    for (const b of parsed.executive_bullets) {
+      tgParts.push(`  • ${b}`);
+    }
+  }
+
+  const statParts: string[] = [];
   if (createdItems > 0) {
-    footerParts.push(`✅ ${createdItems} action item${createdItems > 1 ? "s" : ""} criado${createdItems > 1 ? "s" : ""}`);
+    statParts.push(`✅ ${createdItems} action item${createdItems > 1 ? "s" : ""} criado${createdItems > 1 ? "s" : ""}`);
   }
   if (createdDecisions > 0) {
-    footerParts.push(`📋 ${createdDecisions} ${createdDecisions > 1 ? "decisoes registradas" : "decisao registrada"} no journal`);
+    statParts.push(`📋 ${createdDecisions} ${createdDecisions > 1 ? "decisoes registradas" : "decisao registrada"} no journal`);
   }
   if (createdCommitments > 0) {
-    footerParts.push(`🤝 ${createdCommitments} compromisso${createdCommitments > 1 ? "s registrados" : " registrado"}`);
+    statParts.push(`🤝 ${createdCommitments} compromisso${createdCommitments > 1 ? "s registrados" : " registrado"}`);
   }
-  const footer = footerParts.length > 0
-    ? `\n\n${footerParts.join("\n")}. Algum ajuste ou algo que eu perdi?`
+  const footer = statParts.length > 0
+    ? `\n\n${statParts.join("\n")}\n\nAlgum ajuste ou algo que eu perdi?`
     : "\n\nNenhum action item, decisao ou compromisso identificados. Quer que eu revise algo?";
+  tgParts.push(footer);
 
-  await sendText(chatId, telegramMsg + footer);
+  await sendText(chatId, tgParts.join("\n"));
 
   return { success: true, agentId: "chiefofstaff", summary: `Notas processadas: ${createdItems} items, ${createdDecisions} decisoes, ${createdCommitments} compromissos.` };
 }
@@ -1607,7 +1628,8 @@ export async function processNotesFromDashboard(params: {
     teamMembers: teamList
   });
 
-  const response = await callClaude({ system, userMessage: user, maxTokens: 4096 });
+  // Use 16000 tokens — complex meetings with 30+ action items easily exceed 4096
+  const response = await callClaude({ system, userMessage: user, maxTokens: 16_000 });
   if (!response) {
     throw new Error("Claude call returned null");
   }
@@ -1626,12 +1648,13 @@ export async function processNotesFromDashboard(params: {
 
   const parsed = safeParseJson<NotesPayload>(response, { summary: response });
 
-  // If parsing returned the raw response as summary (fallback), log warning
+  // Detect if parsing failed (Claude response likely truncated or malformed)
   if (!parsed.action_items && !parsed.decisions && !parsed.commitments && parsed.summary === response) {
-    log.warn("dashboard_notes:json_parse_fallback", {
+    log.warn("dashboard_notes:json_parse_failed", {
       personId: person.id,
       responseLength: response.length,
-      responseStart: response.slice(0, 200)
+      responseEnd: response.slice(-200),
+      hint: "JSON parse failed — response may have been truncated by max_tokens limit"
     });
   }
 
