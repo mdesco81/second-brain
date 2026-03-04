@@ -1096,7 +1096,7 @@ async function handleStatus(
     healthScores
   });
 
-  const response = await callClaude({ system, userMessage: user, maxTokens: 2048 });
+  const response = await callClaude({ system, userMessage: user, model: "fast", maxTokens: 2048 });
   if (!response) {
     await sendText(chatId, "Nao consegui gerar o panorama. Tente novamente.");
     return { success: false, agentId: "chiefofstaff", summary: "Claude call failed", error: "null response" };
@@ -1194,7 +1194,7 @@ async function handleEmail(
     memories
   });
 
-  const response = await callClaude({ system, userMessage: user, maxTokens: 1024 });
+  const response = await callClaude({ system, userMessage: user, model: "fast", maxTokens: 1024 });
   if (!response) {
     await sendText(chatId, "Nao consegui gerar o draft. Tente novamente.");
     return { success: false, agentId: "chiefofstaff", summary: "Claude call failed", error: "null response" };
@@ -1571,7 +1571,7 @@ async function handleConversaGeral(
     memories
   });
 
-  const response = await callClaude({ system, userMessage: user, maxTokens: 1024 });
+  const response = await callClaude({ system, userMessage: user, model: "fast", maxTokens: 1024 });
   if (!response) {
     await sendText(chatId, "Desculpa, nao consegui processar. Pode reformular?");
     return { success: false, agentId: "chiefofstaff", summary: "Claude call failed", error: "null response" };

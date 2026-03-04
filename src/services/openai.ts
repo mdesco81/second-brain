@@ -56,7 +56,7 @@ export interface AIIntakePlannerOutput {
 // Claude handles text generation (classification, planning, vision).
 // OpenAI is still used for audio transcription and embeddings.
 
-const API_TIMEOUT_MS = 60_000; // 60s timeout for all AI API calls
+const API_TIMEOUT_MS = 90_000; // 90s timeout for all AI API calls (articles can generate 8k tokens)
 
 const anthropicClient = env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, timeout: API_TIMEOUT_MS })
@@ -306,7 +306,7 @@ export async function describeImage(base64DataUrl: string): Promise<string | nul
 
   try {
     const response = await anthropicClient.messages.create({
-      model: env.ANTHROPIC_MODEL,
+      model: env.ANTHROPIC_FAST_MODEL,
       max_tokens: 1024,
       messages: [
         {
@@ -627,33 +627,29 @@ CRITICAL CARD COUNT RULES:
     inputTypeLabel = "TEXT MESSAGE";
   }
 
-  try {
-    const response = await anthropicClient.messages.create({
-      model: env.ANTHROPIC_MODEL,
-      max_tokens: 8192,
-      system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: `Known categories:\n${JSON.stringify(input.knownCategories, null, 2)}\n\nOpen context candidates:\n${JSON.stringify(
-            input.openContext,
-            null,
-            2
-          )}\n\nInput type: ${inputTypeLabel}\n\nIncoming content:\n${input.text}`
-        }
-      ]
-    });
+  const userContent = `Known categories:\n${JSON.stringify(input.knownCategories, null, 2)}\n\nOpen context candidates:\n${JSON.stringify(
+    input.openContext,
+    null,
+    2
+  )}\n\nInput type: ${inputTypeLabel}\n\nIncoming content:\n${input.text}`;
 
-    const textBlock = response.content.find((block) => block.type === "text");
-    let raw = textBlock?.text?.trim();
-    if (!raw) {
+  const parsePlannerResponse = (text: string): AIIntakePlannerOutput | null => {
+    let raw = text.trim();
+    if (!raw) return null;
+    raw = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?\s*```$/i, "").trim();
+
+    let parsed: AIIntakePlannerOutput;
+    try {
+      parsed = JSON.parse(raw) as AIIntakePlannerOutput;
+    } catch {
+      log.warn("planIntake: failed to parse JSON response", { raw: raw.slice(0, 200) });
       return null;
     }
 
-    // Strip markdown code fences if present (models sometimes wrap JSON in ```json...```)
-    raw = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?\s*```$/i, "").trim();
-
-    const parsed = JSON.parse(raw) as AIIntakePlannerOutput;
+    if (!parsed.decision || !Array.isArray(parsed.cards) || parsed.cards.length === 0) {
+      log.warn("planIntake: response missing required fields", { hasDecision: !!parsed.decision, cardCount: parsed.cards?.length });
+      return null;
+    }
 
     // Validate: if mode is "split" but only 1 card, fix to "new"
     if (parsed.decision.mode === "split" && parsed.cards.length < 2) {
@@ -670,6 +666,59 @@ CRITICAL CARD COUNT RULES:
     }
 
     return parsed;
+  };
+
+  // ── Two-pass approach for cost efficiency ──
+  // Pass 1 (Haiku): handles simple mode=new cases (majority of messages).
+  // Pass 2 (Sonnet): only for merge/split which require deeper reasoning.
+  // Haiku gets a tight timeout to avoid adding latency when it fails.
+
+  const HAIKU_TIMEOUT_MS = 15_000;
+
+  try {
+    const haikuResponse = await anthropicClient.messages.create(
+      {
+        model: env.ANTHROPIC_FAST_MODEL,
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userContent }]
+      },
+      { signal: AbortSignal.timeout(HAIKU_TIMEOUT_MS) }
+    );
+
+    const haikuText = haikuResponse.content.find((block) => block.type === "text")?.text ?? "";
+    const haikuResult = parsePlannerResponse(haikuText);
+
+    if (haikuResult) {
+      const needsSonnet = haikuResult.decision.mode === "merge"
+        || haikuResult.decision.mode === "split"
+        || haikuResult.decision.confidence < 0.7;
+
+      if (!needsSonnet) {
+        log.info("planIntake: Haiku handled (mode=new)", { confidence: haikuResult.decision.confidence });
+        return haikuResult;
+      }
+
+      log.info("planIntake: escalating to Sonnet", {
+        mode: haikuResult.decision.mode,
+        confidence: haikuResult.decision.confidence
+      });
+    }
+  } catch (error) {
+    log.warn("planIntake: Haiku pass failed, falling back to Sonnet", { error });
+  }
+
+  // Pass 2: Sonnet for merge/split/low-confidence cases
+  try {
+    const response = await anthropicClient.messages.create({
+      model: env.ANTHROPIC_MODEL,
+      max_tokens: 8192,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userContent }]
+    });
+
+    const textBlock = response.content.find((block) => block.type === "text");
+    return parsePlannerResponse(textBlock?.text ?? "");
   } catch (error) {
     log.error("AI intake planning failed", { error });
     return null;
@@ -741,29 +790,62 @@ export async function classifyWithAI(input: AIClassificationInput): Promise<AICl
     "Respond with a single JSON card object (not wrapped in an array)."
   ].join("\n");
 
+  const userContent = `Known categories:\n${JSON.stringify(input.knownCategories, null, 2)}\n\nInput content:\n${input.text}`;
+
+  const parseClassification = (text: string): AIClassificationOutput | null => {
+    let raw = text.trim();
+    if (!raw) return null;
+    raw = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?\s*```$/i, "").trim();
+    try {
+      return JSON.parse(raw) as AIClassificationOutput;
+    } catch {
+      log.warn("classifyWithAI: failed to parse JSON response", { raw: raw.slice(0, 200) });
+      return null;
+    }
+  };
+
+  // First pass: try with Haiku (cost-efficient for structured classification)
+  // Tight timeout — if Haiku is slow, fall back to Sonnet without wasting time.
+  const HAIKU_CLASSIFY_TIMEOUT_MS = 15_000;
+
+  try {
+    const response = await anthropicClient.messages.create(
+      {
+        model: env.ANTHROPIC_FAST_MODEL,
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userContent }]
+      },
+      { signal: AbortSignal.timeout(HAIKU_CLASSIFY_TIMEOUT_MS) }
+    );
+
+    const textBlock = response.content.find((block) => block.type === "text");
+    const result = parseClassification(textBlock?.text ?? "");
+
+    if (result && result.confidence >= 0.6) {
+      log.info("classifyWithAI: Haiku classification accepted", { confidence: result.confidence });
+      return result;
+    }
+
+    // Low confidence — escalate to Sonnet for better quality
+    log.info("classifyWithAI: Haiku confidence too low, escalating to Sonnet", {
+      confidence: result?.confidence
+    });
+  } catch (error) {
+    log.warn("classifyWithAI: Haiku attempt failed, falling back to Sonnet", { error });
+  }
+
+  // Second pass: Sonnet for higher quality when Haiku is uncertain
   try {
     const response = await anthropicClient.messages.create({
       model: env.ANTHROPIC_MODEL,
       max_tokens: 4096,
       system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: `Known categories:\n${JSON.stringify(input.knownCategories, null, 2)}\n\nInput content:\n${input.text}`
-        }
-      ]
+      messages: [{ role: "user", content: userContent }]
     });
 
     const textBlock = response.content.find((block) => block.type === "text");
-    let raw = textBlock?.text?.trim();
-    if (!raw) {
-      return null;
-    }
-
-    // Strip markdown code fences if present (models sometimes wrap JSON in ```json...```)
-    raw = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?\s*```$/i, "").trim();
-
-    return JSON.parse(raw) as AIClassificationOutput;
+    return parseClassification(textBlock?.text ?? "");
   } catch (error) {
     log.error("AI classification failed", { error });
     return null;
