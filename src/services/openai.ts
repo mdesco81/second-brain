@@ -637,7 +637,19 @@ CRITICAL CARD COUNT RULES:
     let raw = text.trim();
     if (!raw) return null;
     raw = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?\s*```$/i, "").trim();
-    const parsed = JSON.parse(raw) as AIIntakePlannerOutput;
+
+    let parsed: AIIntakePlannerOutput;
+    try {
+      parsed = JSON.parse(raw) as AIIntakePlannerOutput;
+    } catch {
+      log.warn("planIntake: failed to parse JSON response", { raw: raw.slice(0, 200) });
+      return null;
+    }
+
+    if (!parsed.decision || !Array.isArray(parsed.cards) || parsed.cards.length === 0) {
+      log.warn("planIntake: response missing required fields", { hasDecision: !!parsed.decision, cardCount: parsed.cards?.length });
+      return null;
+    }
 
     // Validate: if mode is "split" but only 1 card, fix to "new"
     if (parsed.decision.mode === "split" && parsed.cards.length < 2) {
@@ -659,14 +671,20 @@ CRITICAL CARD COUNT RULES:
   // ── Two-pass approach for cost efficiency ──
   // Pass 1 (Haiku): handles simple mode=new cases (majority of messages).
   // Pass 2 (Sonnet): only for merge/split which require deeper reasoning.
+  // Haiku gets a tight timeout to avoid adding latency when it fails.
+
+  const HAIKU_TIMEOUT_MS = 15_000;
 
   try {
-    const haikuResponse = await anthropicClient.messages.create({
-      model: env.ANTHROPIC_FAST_MODEL,
-      max_tokens: 4096,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userContent }]
-    });
+    const haikuResponse = await anthropicClient.messages.create(
+      {
+        model: env.ANTHROPIC_FAST_MODEL,
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userContent }]
+      },
+      { signal: AbortSignal.timeout(HAIKU_TIMEOUT_MS) }
+    );
 
     const haikuText = haikuResponse.content.find((block) => block.type === "text")?.text ?? "";
     const haikuResult = parsePlannerResponse(haikuText);
@@ -778,17 +796,28 @@ export async function classifyWithAI(input: AIClassificationInput): Promise<AICl
     let raw = text.trim();
     if (!raw) return null;
     raw = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?\s*```$/i, "").trim();
-    return JSON.parse(raw) as AIClassificationOutput;
+    try {
+      return JSON.parse(raw) as AIClassificationOutput;
+    } catch {
+      log.warn("classifyWithAI: failed to parse JSON response", { raw: raw.slice(0, 200) });
+      return null;
+    }
   };
 
   // First pass: try with Haiku (cost-efficient for structured classification)
+  // Tight timeout — if Haiku is slow, fall back to Sonnet without wasting time.
+  const HAIKU_CLASSIFY_TIMEOUT_MS = 15_000;
+
   try {
-    const response = await anthropicClient.messages.create({
-      model: env.ANTHROPIC_FAST_MODEL,
-      max_tokens: 4096,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userContent }]
-    });
+    const response = await anthropicClient.messages.create(
+      {
+        model: env.ANTHROPIC_FAST_MODEL,
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userContent }]
+      },
+      { signal: AbortSignal.timeout(HAIKU_CLASSIFY_TIMEOUT_MS) }
+    );
 
     const textBlock = response.content.find((block) => block.type === "text");
     const result = parseClassification(textBlock?.text ?? "");
