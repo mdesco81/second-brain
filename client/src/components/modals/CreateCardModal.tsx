@@ -87,8 +87,7 @@ export function CreateCardModal() {
             </div>
             <div>
               <label className="text-[0.7rem] font-medium text-text-tertiary uppercase tracking-wider">Categoria</label>
-              <Select value={category} onValueChange={setCategory} className="mt-1">
-                <SelectItem value="">Nenhuma</SelectItem>
+              <Select value={category} onValueChange={setCategory} placeholder="Nenhuma" className="mt-1">
                 {categories?.map((c) => <SelectItem key={c.id} value={c.name}>{c.name}</SelectItem>)}
               </Select>
             </div>

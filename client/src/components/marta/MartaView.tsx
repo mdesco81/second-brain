@@ -8,11 +8,10 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { FileDropzone } from "@/components/ui/FileDropzone";
 import { Select, SelectItem } from "@/components/ui/Select";
-import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { cn } from "@/lib/cn";
 import { formatDateTimeBR, formatShortDateBR, truncate } from "@/lib/utils";
-import { Users, Heart, Bell, Handshake, UserPlus, FileText, Pencil, X, Check, RotateCcw, Copy, Eye, EyeOff, Trash2 } from "lucide-react";
-import { useState, useRef } from "react";
+import { Users, Heart, Bell, Handshake, UserPlus, FileText, Pencil, X, Check, RotateCcw, Copy, Eye, EyeOff } from "lucide-react";
+import { useState } from "react";
 import { MAX_FILE_SIZE } from "@/lib/constants";
 import type { PersonWithItems, Commitment, Reminder, HealthScore, CosOutput } from "@/types/api";
 
@@ -84,8 +83,7 @@ function UploadNotesSection({ people }: { people: PersonWithItems[] }) {
         <div className="flex items-end gap-3">
           <div className="flex-1">
             <label className="text-[0.7rem] font-medium text-text-tertiary uppercase tracking-wider">Pessoa</label>
-            <Select value={personId} onValueChange={setPersonId} className="mt-1">
-              <SelectItem value="">Selecione...</SelectItem>
+            <Select value={personId} onValueChange={setPersonId} placeholder="Selecione..." className="mt-1">
               {people.map((p) => <SelectItem key={p.id} value={String(p.id)}>{p.name}{p.role ? ` (${p.role})` : ""}</SelectItem>)}
             </Select>
           </div>
