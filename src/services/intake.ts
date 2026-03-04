@@ -1242,7 +1242,7 @@ const chatLocks = new Map<number, Promise<void>>();
 // Safety timeout: if a message takes longer than this, release the lock
 // so subsequent messages are not stuck forever (prevents deadlocks caused
 // by hung API calls or unexpected infinite waits).
-const CHAT_LOCK_TIMEOUT_MS = 120_000; // 2 minutes — covers transcription + cleanup + classification
+const CHAT_LOCK_TIMEOUT_MS = 300_000; // 5 minutes — covers full agent pipelines (deep research + multiple AI calls)
 const LOCK_WAIT_TIMEOUT_MS = 30_000;  // 30s max wait for previous lock to release
 
 function withChatLock(chatId: number, fn: () => Promise<void>): Promise<void> {

@@ -3,6 +3,12 @@ import { log } from "../../utils/logger.js";
 
 const PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions";
 
+// Timeouts per model: deep-research is significantly slower than regular sonar
+const PERPLEXITY_TIMEOUT_MS: Record<string, number> = {
+  "sonar-deep-research": 120_000, // 2 minutes — deep research is slow by design
+  default: 30_000                 // 30s for regular sonar
+};
+
 const BLOCKED_DOMAINS = [
   "-wikipedia.org",
   "-en.wikipedia.org",
@@ -75,6 +81,10 @@ async function callPerplexity(
   model: string,
   systemPrompt: string
 ): Promise<PerplexityResult | null> {
+  const timeoutMs = PERPLEXITY_TIMEOUT_MS[model] ?? PERPLEXITY_TIMEOUT_MS.default;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
     const response = await fetch(PERPLEXITY_API_URL, {
       method: "POST",
@@ -82,6 +92,7 @@ async function callPerplexity(
         "Authorization": `Bearer ${env.PERPLEXITY_API_KEY}`,
         "Content-Type": "application/json"
       },
+      signal: controller.signal,
       body: JSON.stringify({
         model,
         messages: [
@@ -131,8 +142,16 @@ async function callPerplexity(
 
     return { text, citations, model: (data.model as string) ?? model };
   } catch (error) {
-    log.error("Perplexity search failed", { error, model, query });
+    const isTimeout = error instanceof DOMException && error.name === "AbortError";
+    log.error("Perplexity search failed", {
+      error,
+      model,
+      query,
+      reason: isTimeout ? `timeout after ${timeoutMs}ms` : "api_error"
+    });
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

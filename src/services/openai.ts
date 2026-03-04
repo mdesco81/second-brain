@@ -56,7 +56,7 @@ export interface AIIntakePlannerOutput {
 // Claude handles text generation (classification, planning, vision).
 // OpenAI is still used for audio transcription and embeddings.
 
-const API_TIMEOUT_MS = 60_000; // 60s timeout for all AI API calls
+const API_TIMEOUT_MS = 90_000; // 90s timeout for all AI API calls (articles can generate 8k tokens)
 
 const anthropicClient = env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, timeout: API_TIMEOUT_MS })
