@@ -22,8 +22,11 @@ const JARBAS_PATTERN = /\bjarbas\b/i;
 const MARTA_PATTERN = /\bmarta\b/i;
 
 // Research keyword patterns — detected BEFORE smart routing for instant activation.
-// Matches: "pesquise", "pesquisa pra mim", "busca informacoes", "busque sobre", etc.
-const RESEARCH_PATTERN = /\b(?:pesquis[ea]|busca|busque|buscar)\b/i;
+// Matches: "pesquise", "pesquisar", "pesquisa pra mim", "busque sobre", etc.
+// "busca" alone is too generic (noun: "a busca por talentos"), so we require it in
+// imperative/verb context: "busca sobre", "busca pra mim", "busca informacoes".
+const RESEARCH_PATTERN = /\b(?:pesquis[ae]r?|busque|buscar)\b/i;
+const RESEARCH_BUSCA_PATTERN = /\bbusca\s+(?:sobre|pra\s+mim|para\s+mim|informac[oõ]es|dados|detalhes)\b/i;
 
 // Patterns where the keyword is used as a person name reference, NOT as a command invocation.
 // e.g. "briefing da Marta", "email pro Jarbas", "1:1 com Marta", "notas com o Jarbas"
@@ -45,14 +48,14 @@ export function stripJarbasKeyword(text: string): string {
 // ── Research keyword detection ───────────────────────────────────────
 
 export function containsResearchKeyword(text: string): boolean {
-  return RESEARCH_PATTERN.test(text);
+  return RESEARCH_PATTERN.test(text) || RESEARCH_BUSCA_PATTERN.test(text);
 }
 
-/** Strip the research verb and filler words, returning the research topic. */
+/** Strip the research verb + adjacent filler words, returning the research topic. */
 export function stripResearchKeyword(text: string): string {
   return text
-    .replace(/\b(?:pesquis[ea]|busca|busque|buscar)\b/gi, "")
-    .replace(/\b(?:pra mim|para mim|informac[oõ]es|sobre)\b/gi, "")
+    // Strip research verb + optional filler words that follow it (sobre, pra mim, etc.)
+    .replace(/\b(?:pesquis[ae]r?|busca|busque|buscar)\s*(?:(?:sobre|pra\s+mim|para\s+mim|informac[oõ]es|dados|detalhes)\s*)*(?:sobre\s*)?/gi, "")
     .replace(/[,\s]+/g, " ")
     .trim();
 }
@@ -188,11 +191,11 @@ export async function routeToAgent(
 
   try {
     const result = await handler(request);
-    if (result.success) {
-      await sendText(chatId, result.summary);
-    } else {
+    if (!result.success) {
       await sendText(chatId, `Erro no agente ${intent.agentId}: ${result.error || "erro desconhecido"}`);
     }
+    // Note: agents send their own messages internally (Telegram text, buttons, etc).
+    // The result.summary is for logging/tracking, not for re-sending to user.
   } catch (error) {
     log.error("Agent execution failed", { agentId: intent.agentId, chatId, error });
     await sendText(chatId, "Ocorreu um erro ao processar seu pedido. Tente novamente.");
@@ -240,8 +243,10 @@ export async function routeToResearch(
 
   try {
     const result = await handler(request);
+    // Note: handleResearch sends its own messages (results and errors) to the user.
+    // The result is for logging/tracking only.
     if (!result.success) {
-      await sendText(chatId, `Erro na pesquisa: ${result.error || "erro desconhecido"}`);
+      log.warn("research:failed", { chatId, error: result.error });
     }
   } catch (error) {
     log.error("Research execution failed", { chatId, error });

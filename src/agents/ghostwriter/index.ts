@@ -20,16 +20,24 @@ import { updateInboxItemMetadata } from "../../db/schema.js";
 
 // ── Research handler ──────────────────────────────────────────────────
 
-const RESEARCH_BULLETS_PROMPT = `Voce e um assistente de pesquisa. Receba o resultado de uma pesquisa e resuma em EXATAMENTE 5 bullet points concisos em portugues brasileiro.
+const RESEARCH_BULLETS_PROMPT = `Voce e um assistente de pesquisa. Resuma o resultado em EXATAMENTE 5 bullet points em portugues brasileiro.
 
-Regras:
-- Cada bullet deve ter no maximo 2 linhas
-- Use linguagem clara e direta
-- Priorize dados concretos, numeros e fatos
-- Nao inclua links ou URLs nos bullets
-- Nao use emojis
+FORMATO OBRIGATORIO — responda SOMENTE com os 5 bullets, sem introducao, sem conclusao, sem texto adicional:
+• [bullet 1]
+• [bullet 2]
+• [bullet 3]
+• [bullet 4]
+• [bullet 5]
+
+Regras para cada bullet:
+- Maximo 2 linhas por bullet
+- Linguagem clara e direta, sem jargao desnecessario
+- Priorize dados concretos, numeros, porcentagens e fatos verificaveis
+- Cada bullet deve ser auto-contido (compreensivel sem os outros)
+- NAO inclua links, URLs ou referencias numericas como [1] [2]
+- NAO use emojis
 - Comece cada bullet com "•"
-- Foque nos insights mais relevantes e acionaveis`;
+- Foque nos insights mais relevantes e acionaveis para um profissional`;
 
 async function handleResearch(
   request: AgentRequest
@@ -75,19 +83,13 @@ async function handleResearch(
     maxTokens: 1024
   });
 
+  const bulletsText = bullets || research.text.slice(0, 3000);
   if (!bullets) {
-    // Fallback: send raw research text truncated
-    const fallbackMsg = research.text.slice(0, 3000);
-    await sendText(chatId, `Pesquisa sobre "${topic}":\n\n${fallbackMsg}`);
-    return {
-      success: true,
-      agentId: "research",
-      summary: `Pesquisa sobre "${topic}" (formato raw)`
-    };
+    log.warn("research: Claude formatting failed, using raw text fallback", { topic });
   }
 
   // 3. Send clean bullets to Telegram (no links)
-  await sendText(chatId, `Pesquisa sobre "${topic}":\n\n${bullets}`);
+  await sendText(chatId, `Pesquisa sobre "${topic}":\n\n${bulletsText}`);
 
   // 4. Save full research with sources to dashboard
   const fullContent = [
@@ -98,7 +100,7 @@ async function handleResearch(
     "",
     "## Resumo",
     "",
-    bullets,
+    bulletsText,
     "",
     "## Pesquisa completa",
     "",

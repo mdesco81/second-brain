@@ -1485,9 +1485,11 @@ async function processTelegramMessageInner(
   // Keywords ALWAYS take priority over active conversations — lets users escape.
   const textContent = message.text || message.caption || "";
 
-  // Research keywords ("pesquise", "busca") activate directly without needing "Jarbas"
-  if (containsResearchKeyword(textContent) && !containsJarbasKeyword(textContent)) {
-    await routeToResearch(chatId, messageId, textContent, message);
+  // Research keywords ("pesquise", "busca sobre") take priority — works with or without "Jarbas"
+  // "Jarbas pesquise sobre X" and "pesquise sobre X" both route directly to research
+  if (containsResearchKeyword(textContent)) {
+    const researchInput = containsJarbasKeyword(textContent) ? stripJarbasKeyword(textContent) : textContent;
+    await routeToResearch(chatId, messageId, researchInput, message);
     return;
   }
 
@@ -1595,10 +1597,11 @@ async function processTelegramMessageInner(
     const rawCheck = extracted.rawTranscription || "";
     const normCheck = extracted.normalizedText;
 
-    // Research keywords in audio
+    // Research keywords in audio — takes priority over Jarbas (same as text path)
     const audioResearchText = containsResearchKeyword(normCheck) ? normCheck : (containsResearchKeyword(rawCheck) ? rawCheck : null);
-    if (audioResearchText && !containsJarbasKeyword(audioResearchText)) {
-      await routeToResearch(chatId, messageId, audioResearchText, message);
+    if (audioResearchText) {
+      const researchInput = containsJarbasKeyword(audioResearchText) ? stripJarbasKeyword(audioResearchText) : audioResearchText;
+      await routeToResearch(chatId, messageId, researchInput, message);
       return;
     }
 
