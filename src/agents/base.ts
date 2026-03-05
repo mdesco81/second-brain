@@ -17,11 +17,19 @@ export async function saveAgentOutput(params: {
     String(params.timestamp.getDate()).padStart(2, "0")
   ].join(" ");
 
-  const subFolder = params.contentType === "article" ? "Artigos" : "Posts";
+  const subFolderMap: Record<string, string> = {
+    article: "Artigos",
+    research: "Pesquisas",
+  };
+  const subFolder = subFolderMap[params.contentType] || "Posts";
   const outputDir = path.join(KNOWLEDGE_PATHS.agentOutputs, subFolder);
   await fs.mkdir(outputDir, { recursive: true });
 
-  const typeLabel = params.contentType === "article" ? "Artigo Linkedin" : "Post Linkedin";
+  const typeLabelMap: Record<string, string> = {
+    article: "Artigo Linkedin",
+    research: "Pesquisa",
+  };
+  const typeLabel = typeLabelMap[params.contentType] || "Post Linkedin";
   const topicSlug = slugify(params.topic).slice(0, 60);
   const fileName = `${dateStr} - ${typeLabel} - ${topicSlug}.md`;
   const fullPath = path.join(outputDir, fileName);
@@ -96,25 +104,31 @@ export async function trackAgentOutput(params: {
   outputPath: string;
   summary: string;
 }): Promise<number> {
+  const isResearch = params.contentType === "research";
   const categoryId = await upsertCategory(
-    "Conteudo LinkedIn",
-    "Artigos e posts gerados pelo agente ghostwriter",
+    isResearch ? "Pesquisas" : "Conteudo LinkedIn",
+    isResearch ? "Pesquisas realizadas via agente" : "Artigos e posts gerados pelo agente ghostwriter",
     "agent"
   );
+
+  const actionTitleMap: Record<string, string> = {
+    article: `Revisar artigo: ${params.topic}`,
+    research: `Pesquisa: ${params.topic}`,
+  };
 
   const itemId = await insertInboxItem({
     chatId: params.chatId,
     messageId: params.messageId,
     inputType: "text",
-    rawText: `[Jarbas Ghostwriter] ${params.topic}`,
+    rawText: isResearch ? `[Pesquisa] ${params.topic}` : `[Jarbas Ghostwriter] ${params.topic}`,
     normalizedText: params.summary,
     summaryPtBr: params.summary,
     categoryId,
     bucket: "PROJECTS",
     action: "STORE_REFERENCE",
     priority: "MEDIA",
-    actionTitle: `Revisar ${params.contentType === "article" ? "artigo" : "post"}: ${params.topic}`,
-    actionDetails: `Gerado pelo agente ghostwriter.`,
+    actionTitle: actionTitleMap[params.contentType] || `Revisar post: ${params.topic}`,
+    actionDetails: isResearch ? `Pesquisa realizada via Perplexity.` : `Gerado pelo agente ghostwriter.`,
     processingStage: "planejado",
     confidence: 0.99,
     storagePath: params.outputPath,

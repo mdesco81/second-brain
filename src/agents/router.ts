@@ -21,6 +21,10 @@ import pdfParse from "pdf-parse";
 const JARBAS_PATTERN = /\bjarbas\b/i;
 const MARTA_PATTERN = /\bmarta\b/i;
 
+// Research keyword patterns — detected BEFORE smart routing for instant activation.
+// Matches: "pesquise", "pesquisa pra mim", "busca informacoes", "busque sobre", etc.
+const RESEARCH_PATTERN = /\b(?:pesquis[ea]|busca|busque|buscar)\b/i;
+
 // Patterns where the keyword is used as a person name reference, NOT as a command invocation.
 // e.g. "briefing da Marta", "email pro Jarbas", "1:1 com Marta", "notas com o Jarbas"
 // In these cases the word is referencing a team member, not invoking the assistant.
@@ -38,24 +42,48 @@ export function stripJarbasKeyword(text: string): string {
   return text.replace(JARBAS_PATTERN, "").replace(/[,\s]+/g, " ").trim();
 }
 
+// ── Research keyword detection ───────────────────────────────────────
+
+export function containsResearchKeyword(text: string): boolean {
+  return RESEARCH_PATTERN.test(text);
+}
+
+/** Strip the research verb and filler words, returning the research topic. */
+export function stripResearchKeyword(text: string): string {
+  return text
+    .replace(/\b(?:pesquis[ea]|busca|busque|buscar)\b/gi, "")
+    .replace(/\b(?:pra mim|para mim|informac[oõ]es|sobre)\b/gi, "")
+    .replace(/[,\s]+/g, " ")
+    .trim();
+}
+
+/** Detect whether the user wants deep research based on explicit keywords. */
+export function detectSearchDepth(text: string): "quick" | "deep" {
+  const deepPattern = /\b(?:profund[ao]|detalhad[ao]|aprofundad[ao]|deep)\b/i;
+  return deepPattern.test(text) ? "deep" : "quick";
+}
+
 const INTENT_SYSTEM_PROMPT = `Voce e um roteador de intencoes. Recebe um pedido do usuario e determina qual agente deve atende-lo.
 
 Agentes disponiveis:
 - ghostwriter: Produz posts e artigos para LinkedIn. Detecte pedidos como "escrever post", "criar artigo", "texto para LinkedIn", "publicacao sobre", "conteudo sobre", "redacao sobre", "fazer um artigo", "fazer um post", "faz um post", "faz um artigo", "quero um artigo", "quero um post", "prepara um artigo", "prepara um post", "me escreve um artigo", "me escreve um post", "monta um post", "monta um artigo", "elabora um post", "produz um artigo" etc.
+- research: Pesquisa sobre um tema e retorna um resumo com bullets. Detecte pedidos como "pesquise sobre", "busca informacoes sobre", "pesquisa pra mim sobre", "busque sobre", "quero saber sobre", "me fala sobre", "levanta dados sobre", "investiga sobre".
 - unknown: Quando nenhum agente se encaixa.
 
 Responda APENAS com JSON valido:
 {
-  "agentId": "ghostwriter" | "unknown",
+  "agentId": "ghostwriter" | "research" | "unknown",
   "confidence": 0.0 a 1.0,
   "metadata": {
-    "contentType": "post" | "article",
+    "contentType": "post" | "article" | "research",
     "topic": "topico extraido do pedido",
-    "additionalInstructions": "instrucoes extras mencionadas pelo usuario ou null"
+    "additionalInstructions": "instrucoes extras mencionadas pelo usuario ou null",
+    "searchDepth": "quick" | "deep"
   }
 }
 
 Regras para contentType — PRESTE MUITA ATENCAO:
+- "research": quando o usuario pede pesquisa, busca de informacoes, investigacao. Se o pedido e para PESQUISAR/BUSCAR (nao para escrever conteudo), contentType DEVE ser "research". searchDepth deve ser "deep" se o usuario menciona "profunda", "detalhada", "aprofundada"; senao "quick".
 - "article": quando o usuario menciona "artigo", "fazer um artigo", "faz um artigo", "quero um artigo", "escreve um artigo", "texto longo", "artigo completo", "deep dive", "analise profunda". Se a palavra "artigo" aparece no pedido, contentType DEVE ser "article".
 - "post": quando menciona "post", "publicacao", "publicacao curta", ou quando NAO especifica o formato (default).
 - Na duvida entre post e article: se o usuario mencionou a palavra "artigo" em qualquer forma, use "article".`;
@@ -123,7 +151,9 @@ export async function routeToAgent(
     topic: intent.metadata.topic
   });
 
-  const handler = getAgent(intent.agentId);
+  // "research" intent is handled by the ghostwriter agent
+  const handlerId = intent.agentId === "research" ? "ghostwriter" : intent.agentId;
+  const handler = getAgent(handlerId);
   if (!handler) {
     // Save a conversation so the user can follow up without repeating the keyword.
     // This prevents the follow-up from being captured by Second Brain.
@@ -166,6 +196,56 @@ export async function routeToAgent(
   } catch (error) {
     log.error("Agent execution failed", { agentId: intent.agentId, chatId, error });
     await sendText(chatId, "Ocorreu um erro ao processar seu pedido. Tente novamente.");
+  }
+}
+
+// ── Research routing (keyword-based, no "Jarbas" needed) ─────────────
+
+export async function routeToResearch(
+  chatId: number,
+  messageId: number,
+  text: string,
+  _originalMessage: TelegramMessage
+): Promise<void> {
+  const topic = stripResearchKeyword(text);
+  if (!topic) {
+    await sendText(chatId, `Sobre o que voce quer pesquisar? Ex: "pesquise sobre IA generativa"`);
+    return;
+  }
+
+  const searchDepth = detectSearchDepth(text);
+  const handler = getAgent("ghostwriter");
+  if (!handler) {
+    await sendText(chatId, "Agente de pesquisa nao esta disponivel no momento.");
+    return;
+  }
+
+  const request: AgentRequest = {
+    chatId,
+    messageId,
+    agentId: "research",
+    rawRequest: topic,
+    intent: {
+      agentId: "research",
+      confidence: 1.0,
+      rawRequest: text,
+      metadata: {
+        contentType: "research",
+        topic,
+        searchDepth
+      }
+    },
+    timestamp: new Date()
+  };
+
+  try {
+    const result = await handler(request);
+    if (!result.success) {
+      await sendText(chatId, `Erro na pesquisa: ${result.error || "erro desconhecido"}`);
+    }
+  } catch (error) {
+    log.error("Research execution failed", { chatId, error });
+    await sendText(chatId, "Ocorreu um erro ao pesquisar. Tente novamente.");
   }
 }
 
@@ -329,11 +409,12 @@ AGENTES DISPONIVEIS:
    - Reflexao estrategica ("o que tenho negligenciado", "reflexao", "analise estrategica")
    - Conversa sobre gestao de equipe, lideranca, follow-ups, compromissos
 
-2. "jarbas" — Ghostwriter de conteudo. Responsavel por:
+2. "jarbas" — Ghostwriter de conteudo e pesquisador. Responsavel por:
    - Escrever posts para LinkedIn
    - Criar artigos longos
    - Gerar conteudo sobre um tema
    - Qualquer pedido de criacao de texto/conteudo para publicacao
+   - Pesquisas e buscas de informacao ("pesquise sobre", "busca informacoes sobre", "quero saber sobre", "me fala sobre", "levanta dados sobre")
 
 3. "intake" — Captura de informacao/conhecimento. Para:
    - Links, artigos, referencias para ler depois
@@ -345,6 +426,7 @@ AGENTES DISPONIVEIS:
 REGRAS CRITICAS:
 - Se menciona pessoas da equipe + acao (briefing, notas, email, status) → "marta" com confianca alta
 - Se menciona criar/escrever conteudo/post/artigo → "jarbas" com confianca alta
+- Se pede pesquisa, busca de informacoes, "quero saber sobre", "me fala sobre" → "jarbas" com confianca alta
 - Se e uma informacao solta, link, nota pessoal → "intake"
 - Se for ambiguo, prefira "intake" com confianca baixa (< 0.5)
 - Confianca deve refletir o quao certo voce esta: 0.9+ = obvio, 0.7-0.9 = provavel, < 0.7 = incerto

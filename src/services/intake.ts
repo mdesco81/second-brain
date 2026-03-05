@@ -48,7 +48,7 @@ import { buildOpenActionsMessage, buildWeeklyMessage } from "./reports.js";
 import { appendProjectStatus, storeIncomingMedia, writeActionBoard, writeKnowledgeNote } from "./storage.js";
 import { InputType, ProcessingStage } from "../types/domain.js";
 import { log } from "../utils/logger.js";
-import { containsJarbasKeyword, stripJarbasKeyword, routeToAgent, containsMartaKeyword, stripMartaKeyword, routeToMarta, handleMartaFollowUpFromIntake, smartRouteMessage } from "../agents/router.js";
+import { containsJarbasKeyword, stripJarbasKeyword, routeToAgent, containsMartaKeyword, stripMartaKeyword, routeToMarta, handleMartaFollowUpFromIntake, smartRouteMessage, containsResearchKeyword, routeToResearch } from "../agents/router.js";
 import { cosineSimilarity } from "../utils/math.js";
 
 interface ExtractedContent {
@@ -1481,9 +1481,16 @@ async function processTelegramMessageInner(
     return;
   }
 
-  // Step 4 — Explicit keyword routing (Jarbas/Marta in text/caption)
+  // Step 4 — Explicit keyword routing (Research/Jarbas/Marta in text/caption)
   // Keywords ALWAYS take priority over active conversations — lets users escape.
   const textContent = message.text || message.caption || "";
+
+  // Research keywords ("pesquise", "busca") activate directly without needing "Jarbas"
+  if (containsResearchKeyword(textContent) && !containsJarbasKeyword(textContent)) {
+    await routeToResearch(chatId, messageId, textContent, message);
+    return;
+  }
+
   if (containsJarbasKeyword(textContent)) {
     await routeToAgent(chatId, messageId, stripJarbasKeyword(textContent), message);
     return;
@@ -1583,10 +1590,18 @@ async function processTelegramMessageInner(
 
   log.info("pipeline:extract_done", { inputType: extracted.inputType, textLen: extracted.normalizedText.length });
 
-  // Step 7 — Audio transcription keyword check (Jarbas/Marta in spoken words)
+  // Step 7 — Audio transcription keyword check (Research/Jarbas/Marta in spoken words)
   if (extracted.inputType === "audio") {
     const rawCheck = extracted.rawTranscription || "";
     const normCheck = extracted.normalizedText;
+
+    // Research keywords in audio
+    const audioResearchText = containsResearchKeyword(normCheck) ? normCheck : (containsResearchKeyword(rawCheck) ? rawCheck : null);
+    if (audioResearchText && !containsJarbasKeyword(audioResearchText)) {
+      await routeToResearch(chatId, messageId, audioResearchText, message);
+      return;
+    }
+
     if (containsJarbasKeyword(rawCheck) || containsJarbasKeyword(normCheck)) {
       const agentInput = containsJarbasKeyword(normCheck)
         ? stripJarbasKeyword(normCheck)

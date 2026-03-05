@@ -18,9 +18,163 @@ import {
 import { buildGhostwriterPrompt, buildHashtagPrompt, buildHooksPrompt } from "./prompts.js";
 import { updateInboxItemMetadata } from "../../db/schema.js";
 
+// ── Research handler ──────────────────────────────────────────────────
+
+const RESEARCH_BULLETS_PROMPT = `Voce e um assistente de pesquisa. Receba o resultado de uma pesquisa e resuma em EXATAMENTE 5 bullet points concisos em portugues brasileiro.
+
+Regras:
+- Cada bullet deve ter no maximo 2 linhas
+- Use linguagem clara e direta
+- Priorize dados concretos, numeros e fatos
+- Nao inclua links ou URLs nos bullets
+- Nao use emojis
+- Comece cada bullet com "•"
+- Foque nos insights mais relevantes e acionaveis`;
+
+async function handleResearch(
+  request: AgentRequest
+): Promise<AgentResult> {
+  const { chatId, messageId, rawRequest, intent } = request;
+  const metadata = intent.metadata as {
+    topic?: string;
+    searchDepth?: string;
+  };
+
+  const topic = metadata.topic || rawRequest;
+  const searchDepth = metadata.searchDepth === "deep" ? "deep" : "quick";
+  const searchMode: SearchMode = searchDepth === "deep" ? "deep" : "simple";
+
+  log.info("research:start", { topic, searchDepth, chatId });
+
+  // 1. Search with Perplexity
+  await sendTypingIndicator(chatId);
+  const depthLabel = searchDepth === "deep" ? "profunda" : "rapida";
+  await sendText(chatId, `Pesquisando (${depthLabel}) sobre "${topic}"...`);
+
+  const searchQuery = `Pesquise sobre "${topic}". Inclua dados concretos, tendencias recentes, estatisticas e exemplos praticos. Foque em informacoes dos ultimos 12 meses.`;
+  const research = await searchWithPerplexity(searchQuery, searchMode);
+
+  if (!research) {
+    log.warn("research: no results from Perplexity", { topic });
+    await sendText(chatId, `Nao encontrei resultados para "${topic}". Tente reformular sua pesquisa.`);
+    return {
+      success: false,
+      agentId: "research",
+      summary: "Pesquisa sem resultados",
+      error: "No Perplexity results"
+    };
+  }
+
+  // 2. Claude formats into 5 bullets
+  await sendTypingIndicator(chatId);
+
+  const bullets = await callClaude({
+    system: RESEARCH_BULLETS_PROMPT,
+    userMessage: `Tema: ${topic}\n\nResultado da pesquisa:\n${research.text}`,
+    model: "fast",
+    maxTokens: 1024
+  });
+
+  if (!bullets) {
+    // Fallback: send raw research text truncated
+    const fallbackMsg = research.text.slice(0, 3000);
+    await sendText(chatId, `Pesquisa sobre "${topic}":\n\n${fallbackMsg}`);
+    return {
+      success: true,
+      agentId: "research",
+      summary: `Pesquisa sobre "${topic}" (formato raw)`
+    };
+  }
+
+  // 3. Send clean bullets to Telegram (no links)
+  await sendText(chatId, `Pesquisa sobre "${topic}":\n\n${bullets}`);
+
+  // 4. Save full research with sources to dashboard
+  const fullContent = [
+    `# Pesquisa: ${topic}`,
+    "",
+    `**Profundidade:** ${depthLabel}`,
+    `**Modelo:** ${research.model}`,
+    "",
+    "## Resumo",
+    "",
+    bullets,
+    "",
+    "## Pesquisa completa",
+    "",
+    research.text,
+    ""
+  ].join("\n");
+
+  let fullContentWithSources = fullContent;
+  if (research.citations.length > 0) {
+    const sourcesSection = [
+      "",
+      "---",
+      "",
+      "## Fontes consultadas",
+      "",
+      ...research.citations.map((url, i) => `${i + 1}. ${url}`),
+      ""
+    ].join("\n");
+    fullContentWithSources = fullContent + sourcesSection;
+  }
+
+  const outputPath = await saveAgentOutput({
+    agentId: "ghostwriter",
+    contentType: "research",
+    topic,
+    content: fullContentWithSources,
+    timestamp: request.timestamp
+  });
+
+  // Save research context separately
+  await saveResearchContext({
+    contentType: "research",
+    topic,
+    searchQuery,
+    searchMode: searchMode,
+    researchText: research.text,
+    citations: research.citations,
+    perplexityModel: research.model,
+    timestamp: request.timestamp
+  }).catch((err) => {
+    log.warn("research: failed to save research context", { err });
+  });
+
+  // Track in dashboard
+  const itemId = await trackAgentOutput({
+    chatId,
+    messageId,
+    agentId: "ghostwriter",
+    topic,
+    contentType: "research",
+    outputPath,
+    summary: `Pesquisa sobre "${topic}" concluida.`
+  });
+
+  log.info("research:complete", { topic, outputPath, itemId, citations: research.citations.length });
+
+  return {
+    success: true,
+    agentId: "research",
+    outputPath,
+    itemId,
+    summary: `Pesquisa sobre "${topic}" concluida com ${research.citations.length} fontes.`
+  };
+}
+
+// ── Ghostwriter handler ──────────────────────────────────────────────
+
 async function handleGhostwriter(
   request: AgentRequest
 ): Promise<AgentResult> {
+  // Dispatch research requests to dedicated handler
+  const reqMetadata = request.intent.metadata as { contentType?: string };
+  if (request.agentId === "research" || reqMetadata.contentType === "research") {
+    return handleResearch(request);
+  }
+
   const { chatId, messageId, rawRequest, intent } = request;
   const metadata = intent.metadata as {
     contentType?: string;
