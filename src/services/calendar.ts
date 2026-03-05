@@ -211,6 +211,7 @@ export interface CreateEventParams {
   description?: string;
   attendees?: string[]; // email addresses
   location?: string;
+  reminderMinutes?: number; // override default reminder (e.g. 720 = 12 hours)
 }
 
 /**
@@ -240,6 +241,13 @@ export async function createCalendarEvent(params: CreateEventParams): Promise<st
 
   if (params.attendees && params.attendees.length > 0) {
     requestBody.attendees = params.attendees.map((email) => ({ email }));
+  }
+
+  if (params.reminderMinutes != null) {
+    requestBody.reminders = {
+      useDefault: false,
+      overrides: [{ method: "popup", minutes: params.reminderMinutes }],
+    };
   }
 
   const response = await calClient.events.insert({
