@@ -18,9 +18,165 @@ import {
 import { buildGhostwriterPrompt, buildHashtagPrompt, buildHooksPrompt } from "./prompts.js";
 import { updateInboxItemMetadata } from "../../db/schema.js";
 
+// ── Research handler ──────────────────────────────────────────────────
+
+const RESEARCH_BULLETS_PROMPT = `Voce e um assistente de pesquisa. Resuma o resultado em EXATAMENTE 5 bullet points em portugues brasileiro.
+
+FORMATO OBRIGATORIO — responda SOMENTE com os 5 bullets, sem introducao, sem conclusao, sem texto adicional:
+• [bullet 1]
+• [bullet 2]
+• [bullet 3]
+• [bullet 4]
+• [bullet 5]
+
+Regras para cada bullet:
+- Maximo 2 linhas por bullet
+- Linguagem clara e direta, sem jargao desnecessario
+- Priorize dados concretos, numeros, porcentagens e fatos verificaveis
+- Cada bullet deve ser auto-contido (compreensivel sem os outros)
+- NAO inclua links, URLs ou referencias numericas como [1] [2]
+- NAO use emojis
+- Comece cada bullet com "•"
+- Foque nos insights mais relevantes e acionaveis para um profissional`;
+
+async function handleResearch(
+  request: AgentRequest
+): Promise<AgentResult> {
+  const { chatId, messageId, rawRequest, intent } = request;
+  const metadata = intent.metadata as {
+    topic?: string;
+    searchDepth?: string;
+  };
+
+  const topic = metadata.topic || rawRequest;
+  const searchDepth = metadata.searchDepth === "deep" ? "deep" : "quick";
+  const searchMode: SearchMode = searchDepth === "deep" ? "deep" : "simple";
+
+  log.info("research:start", { topic, searchDepth, chatId });
+
+  // 1. Search with Perplexity
+  await sendTypingIndicator(chatId);
+  const depthLabel = searchDepth === "deep" ? "profunda" : "rapida";
+  await sendText(chatId, `Pesquisando (${depthLabel}) sobre "${topic}"...`);
+
+  const searchQuery = `Pesquise sobre "${topic}". Inclua dados concretos, tendencias recentes, estatisticas e exemplos praticos. Foque em informacoes dos ultimos 12 meses.`;
+  const research = await searchWithPerplexity(searchQuery, searchMode);
+
+  if (!research) {
+    log.warn("research: no results from Perplexity", { topic });
+    await sendText(chatId, `Nao encontrei resultados para "${topic}". Tente reformular sua pesquisa.`);
+    return {
+      success: false,
+      agentId: "research",
+      summary: "Pesquisa sem resultados",
+      error: "No Perplexity results"
+    };
+  }
+
+  // 2. Claude formats into 5 bullets
+  await sendTypingIndicator(chatId);
+
+  const bullets = await callClaude({
+    system: RESEARCH_BULLETS_PROMPT,
+    userMessage: `Tema: ${topic}\n\nResultado da pesquisa:\n${research.text}`,
+    model: "fast",
+    maxTokens: 1024
+  });
+
+  const bulletsText = bullets || research.text.slice(0, 3000);
+  if (!bullets) {
+    log.warn("research: Claude formatting failed, using raw text fallback", { topic });
+  }
+
+  // 3. Send clean bullets to Telegram (no links)
+  await sendText(chatId, `Pesquisa sobre "${topic}":\n\n${bulletsText}`);
+
+  // 4. Save full research with sources to dashboard
+  const fullContent = [
+    `# Pesquisa: ${topic}`,
+    "",
+    `**Profundidade:** ${depthLabel}`,
+    `**Modelo:** ${research.model}`,
+    "",
+    "## Resumo",
+    "",
+    bulletsText,
+    "",
+    "## Pesquisa completa",
+    "",
+    research.text,
+    ""
+  ].join("\n");
+
+  let fullContentWithSources = fullContent;
+  if (research.citations.length > 0) {
+    const sourcesSection = [
+      "",
+      "---",
+      "",
+      "## Fontes consultadas",
+      "",
+      ...research.citations.map((url, i) => `${i + 1}. ${url}`),
+      ""
+    ].join("\n");
+    fullContentWithSources = fullContent + sourcesSection;
+  }
+
+  const outputPath = await saveAgentOutput({
+    agentId: "ghostwriter",
+    contentType: "research",
+    topic,
+    content: fullContentWithSources,
+    timestamp: request.timestamp
+  });
+
+  // Save research context separately
+  await saveResearchContext({
+    contentType: "research",
+    topic,
+    searchQuery,
+    searchMode: searchMode,
+    researchText: research.text,
+    citations: research.citations,
+    perplexityModel: research.model,
+    timestamp: request.timestamp
+  }).catch((err) => {
+    log.warn("research: failed to save research context", { err });
+  });
+
+  // Track in dashboard
+  const itemId = await trackAgentOutput({
+    chatId,
+    messageId,
+    agentId: "ghostwriter",
+    topic,
+    contentType: "research",
+    outputPath,
+    summary: `Pesquisa sobre "${topic}" concluida.`
+  });
+
+  log.info("research:complete", { topic, outputPath, itemId, citations: research.citations.length });
+
+  return {
+    success: true,
+    agentId: "research",
+    outputPath,
+    itemId,
+    summary: `Pesquisa sobre "${topic}" concluida com ${research.citations.length} fontes.`
+  };
+}
+
+// ── Ghostwriter handler ──────────────────────────────────────────────
+
 async function handleGhostwriter(
   request: AgentRequest
 ): Promise<AgentResult> {
+  // Dispatch research requests to dedicated handler
+  const reqMetadata = request.intent.metadata as { contentType?: string };
+  if (request.agentId === "research" || reqMetadata.contentType === "research") {
+    return handleResearch(request);
+  }
+
   const { chatId, messageId, rawRequest, intent } = request;
   const metadata = intent.metadata as {
     contentType?: string;

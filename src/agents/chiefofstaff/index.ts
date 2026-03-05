@@ -1430,10 +1430,10 @@ async function handleAgendar(
     return { success: true, agentId: "chiefofstaff", summary: "Aguardando detalhes do evento." };
   }
 
-  const duration = parsed.duration ?? 60;
+  const duration = parsed.duration ?? 30;
   const attendees = parsed.attendees ?? [];
   const location = parsed.location ?? undefined;
-  const description = parsed.description ?? undefined;
+  const description = parsed.description ?? rawRequest;
 
   // Build ISO datetime strings using timezone
   const startDate = new Date(`${parsed.date}T${parsed.startTime}:00`);
@@ -1455,6 +1455,7 @@ async function handleAgendar(
       description,
       attendees,
       location,
+      reminderMinutes: 720, // 12 hours before
     });
 
     await logCosEvent({

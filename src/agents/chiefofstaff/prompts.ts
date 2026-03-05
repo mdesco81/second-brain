@@ -409,7 +409,7 @@ Regras:
 - "segunda", "terca", etc = proximo dia da semana a partir de hoje
 - Se nao mencionar hora, use 09:00 como padrao
 - Se nao mencionar data, assuma HOJE
-- Se nao mencionar duracao, assuma 60 minutos
+- Se nao mencionar duracao, assuma 30 minutos
 - Extraia emails de participantes se mencionados (ex: "com pedro@email.com")
 - Extraia local se mencionado (ex: "na sala 3", "no zoom", "link: https://...")
 - "title" deve ser um titulo conciso para o evento
@@ -419,7 +419,7 @@ Responda APENAS com JSON valido:
   "title": "titulo do evento",
   "date": "YYYY-MM-DD",
   "startTime": "HH:MM",
-  "duration": 60,
+  "duration": 30,
   "attendees": ["email@example.com"],
   "location": "local ou null",
   "description": "descricao adicional ou null"
