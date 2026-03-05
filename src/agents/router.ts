@@ -22,10 +22,10 @@ const JARBAS_PATTERN = /\bjarbas\b/i;
 const MARTA_PATTERN = /\bmarta\b/i;
 
 // Research keyword patterns — detected BEFORE smart routing for instant activation.
-// Matches: "pesquise", "pesquisar", "pesquisa pra mim", "busque sobre", etc.
+// Matches: "pesquise", "pesquisar", "investigue", "busque sobre", etc.
 // "busca" alone is too generic (noun: "a busca por talentos"), so we require it in
 // imperative/verb context: "busca sobre", "busca pra mim", "busca informacoes".
-const RESEARCH_PATTERN = /\b(?:pesquis[ae]r?|busque|buscar)\b/i;
+const RESEARCH_PATTERN = /\b(?:pesquis[ae]r?|investig[ae]r?|busque|buscar)\b/i;
 const RESEARCH_BUSCA_PATTERN = /\bbusca\s+(?:sobre|pra\s+mim|para\s+mim|informac[oõ]es|dados|detalhes)\b/i;
 
 // Patterns where the keyword is used as a person name reference, NOT as a command invocation.
@@ -55,7 +55,9 @@ export function containsResearchKeyword(text: string): boolean {
 export function stripResearchKeyword(text: string): string {
   return text
     // Strip research verb + optional filler words that follow it (sobre, pra mim, etc.)
-    .replace(/\b(?:pesquis[ae]r?|busca|busque|buscar)\s*(?:(?:sobre|pra\s+mim|para\s+mim|informac[oõ]es|dados|detalhes)\s*)*(?:sobre\s*)?/gi, "")
+    .replace(/\b(?:pesquis[ae]r?|investig[ae]r?|busca|busque|buscar)\s*(?:(?:sobre|pra\s+mim|para\s+mim|informac[oõ]es|dados|detalhes)\s*)*(?:sobre\s*)?/gi, "")
+    // Clean residual hyphen suffixes from reflexive verbs (e.g. "busca-se" → "-se")
+    .replace(/^-\w+\s*/, "")
     .replace(/[,\s]+/g, " ")
     .trim();
 }
@@ -211,7 +213,8 @@ export async function routeToResearch(
   _originalMessage: TelegramMessage
 ): Promise<void> {
   const topic = stripResearchKeyword(text);
-  if (!topic) {
+  // Reject empty or punctuation-only topics (no letters = nothing useful to search)
+  if (!topic || !/[a-záéíóúãõâêôçà]/i.test(topic)) {
     await sendText(chatId, `Sobre o que voce quer pesquisar? Ex: "pesquise sobre IA generativa"`);
     return;
   }
