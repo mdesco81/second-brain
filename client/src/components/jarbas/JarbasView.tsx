@@ -6,9 +6,10 @@ import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { ArticlePreview } from "./ArticlePreview";
 import { cn } from "@/lib/cn";
 import { truncate, formatDateBR } from "@/lib/utils";
-import { Download, Upload, Trash2, PenLine } from "lucide-react";
+import { Eye, Download, Upload, Trash2, PenLine } from "lucide-react";
 import { useState, useRef } from "react";
 import type { JarbasOutput } from "@/types/api";
 
@@ -51,6 +52,7 @@ function JarbasCard({ output }: { output: JarbasOutput }) {
   const { showToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
 
   const typeLabel = output.contentType === "article" ? "Artigo" : "Post";
   const topic = output.topic || output.summaryPtBr || "Sem título";
@@ -96,7 +98,13 @@ function JarbasCard({ output }: { output: JarbasOutput }) {
       )}
 
       {preview && (
-        <p className="text-xs text-text-secondary mb-3 flex-1 line-clamp-4">{truncate(preview, 300)}</p>
+        <button
+          type="button"
+          onClick={() => setPreviewOpen(true)}
+          className="text-left text-xs text-text-secondary mb-3 flex-1 line-clamp-4 hover:text-text-primary transition-colors cursor-pointer"
+        >
+          {truncate(preview, 300)}
+        </button>
       )}
 
       {output.hooks && output.hooks.length > 0 && (
@@ -111,11 +119,15 @@ function JarbasCard({ output }: { output: JarbasOutput }) {
       )}
 
       <div className="flex items-center gap-2 mt-auto pt-3 border-t border-border-subtle">
-        <a href={`/api/items/${output.id}/file`} download className="flex-1">
-          <Button variant="secondary" size="sm" className="w-full">
-            <Download className="w-3.5 h-3.5" /> Download MD
-          </Button>
-        </a>
+        <Button
+          variant="secondary"
+          size="sm"
+          className="flex-1"
+          onClick={() => setPreviewOpen(true)}
+        >
+          <Eye className="w-3.5 h-3.5" />
+          <span className="ml-1">Visualizar</span>
+        </Button>
         {!output.hasFinalVersion ? (
           <>
             <Button variant="secondary" size="sm" onClick={() => fileInputRef.current?.click()}>
@@ -130,6 +142,18 @@ function JarbasCard({ output }: { output: JarbasOutput }) {
           <Trash2 className="w-3.5 h-3.5 text-text-tertiary" />
         </Button>
       </div>
+
+      {preview && (
+        <ArticlePreview
+          open={previewOpen}
+          onOpenChange={setPreviewOpen}
+          title={topic}
+          markdown={preview}
+          contentType={output.contentType}
+          hashtags={output.hashtags}
+          itemId={output.id}
+        />
+      )}
 
       <ConfirmDialog
         open={deleteOpen}
