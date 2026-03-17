@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import {
   countInboxQueue,
+  bulkDeleteAllItems,
   deleteInboxItem,
   getAttachmentById,
   getCosOutput,
@@ -1019,6 +1020,31 @@ apiRouter.get("/sent-emails/person/:id", async (req, res, next) => {
     }
     const emails = await listSentEmailsByPerson(id);
     res.json({ ok: true, emails });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Cleanup ──────────────────────────────────────────────────────────
+
+apiRouter.post("/cleanup", async (_req, res, next) => {
+  try {
+    const result = await bulkDeleteAllItems();
+
+    // Clean up files on disk (best-effort)
+    let filesDeleted = 0;
+    for (const filePath of result.filePaths) {
+      try {
+        await fs.unlink(filePath);
+        filesDeleted++;
+      } catch {
+        // File may already be gone
+      }
+    }
+
+    await writeActionBoard(await listOpenActionItems(undefined, 40));
+    log.info("cleanup:bulk_delete", { deletedItems: result.deletedCount, filesDeleted });
+    res.json({ ok: true, deletedItems: result.deletedCount, filesDeleted });
   } catch (error) {
     next(error);
   }

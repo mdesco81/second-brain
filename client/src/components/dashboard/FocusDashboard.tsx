@@ -3,9 +3,13 @@ import { useInboxQueue } from "@/hooks/use-inbox";
 import { useUIStore } from "@/stores/ui-store";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { cn } from "@/lib/cn";
+import { api } from "@/lib/api-client";
 import { daysFromNow, truncate } from "@/lib/utils";
+import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Clock,
@@ -17,12 +21,26 @@ import {
   CheckCircle2,
   Archive,
   Layers,
+  Trash2,
 } from "lucide-react";
 
 export function FocusDashboard() {
   const { data: dashboard, isLoading } = useDashboard();
   const { data: inboxData } = useInboxQueue();
   const { setActiveView, setCreateModalOpen, navigateToCard } = useUIStore();
+  const [cleanupOpen, setCleanupOpen] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
+  const queryClient = useQueryClient();
+
+  async function handleCleanup() {
+    setCleaning(true);
+    try {
+      await api.post("/api/cleanup");
+      queryClient.invalidateQueries();
+    } finally {
+      setCleaning(false);
+    }
+  }
 
   if (isLoading || !dashboard) {
     return (
@@ -90,7 +108,24 @@ export function FocusDashboard() {
             <Badge variant="error">{inboxCount}</Badge>
           </Button>
         )}
+        {totalItems > 0 && (
+          <Button variant="danger" onClick={() => setCleanupOpen(true)} disabled={cleaning}>
+            <Trash2 className="w-4 h-4" />
+            {cleaning ? "Limpando..." : "Limpar base"}
+          </Button>
+        )}
       </div>
+
+      <ConfirmDialog
+        open={cleanupOpen}
+        onOpenChange={setCleanupOpen}
+        title="Limpar base de dados"
+        message={`Tem certeza que deseja apagar todos os ${totalItems} itens registrados? Esta acao e irreversivel.`}
+        icon={<Trash2 className="w-8 h-8 text-error" />}
+        confirmText="Apagar tudo"
+        variant="danger"
+        onConfirm={handleCleanup}
+      />
 
       {/* Today's Focus */}
       {todayFocus.length > 0 && (

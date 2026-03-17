@@ -406,6 +406,43 @@ export async function ensureSchema(): Promise<void> {
       ON sent_emails(chat_id, sent_at DESC);
   `);
 
+  // ── Orchestrator: chat context + memory ──────────────────────────
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS chat_context (
+      id SERIAL PRIMARY KEY,
+      chat_id BIGINT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      agent TEXT,
+      metadata JSONB DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_chat_context_recent
+      ON chat_context(chat_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS orchestrator_memory (
+      id SERIAL PRIMARY KEY,
+      chat_id BIGINT NOT NULL,
+      memory_type TEXT NOT NULL,
+      key TEXT NOT NULL,
+      content TEXT NOT NULL,
+      confidence REAL DEFAULT 0.5,
+      times_confirmed INTEGER DEFAULT 1,
+      times_used INTEGER DEFAULT 0,
+      last_used_at TIMESTAMPTZ,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_orch_memory_chat
+      ON orchestrator_memory(chat_id, memory_type) WHERE active = TRUE;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_memory_unique
+      ON orchestrator_memory(chat_id, memory_type, key) WHERE active = TRUE;
+  `);
+
   for (const category of DEFAULT_CATEGORIES) {
     await pool.query(
       `INSERT INTO categories(name, description, source)
@@ -4308,6 +4345,182 @@ export async function computeRelationshipHealth(chatId: number): Promise<Relatio
   }
 
   return results;
+}
+
+// ── Chat Context (conversational memory) ──────────────────────────
+
+export async function saveChatMessage(
+  chatId: number,
+  role: string,
+  content: string,
+  agent?: string,
+  metadata?: Record<string, unknown>
+): Promise<number> {
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO chat_context (chat_id, role, content, agent, metadata)
+     VALUES ($1, $2, $3, $4, $5::JSONB)
+     RETURNING id`,
+    [chatId, role, content, agent ?? null, JSON.stringify(metadata ?? {})]
+  );
+  return result.rows[0].id;
+}
+
+export async function getRecentChatContext(
+  chatId: number,
+  limit = 10
+): Promise<Array<{ id: number; role: string; content: string; agent: string | null; metadata: Record<string, unknown>; createdAt: string }>> {
+  const result = await pool.query<{
+    id: number;
+    role: string;
+    content: string;
+    agent: string | null;
+    metadata: Record<string, unknown>;
+    created_at: string;
+  }>(
+    `SELECT id, role, content, agent, metadata, created_at::TEXT
+     FROM chat_context
+     WHERE chat_id = $1 AND created_at > NOW() - INTERVAL '4 hours'
+     ORDER BY created_at DESC
+     LIMIT $2`,
+    [chatId, limit]
+  );
+  return result.rows.map(r => ({
+    id: r.id,
+    role: r.role,
+    content: r.content,
+    agent: r.agent,
+    metadata: r.metadata,
+    createdAt: r.created_at
+  })).reverse(); // chronological order
+}
+
+// ── Orchestrator Memory (persistent learning) ─────────────────────
+
+export async function saveOrchestratorMemory(params: {
+  chatId: number;
+  memoryType: string;
+  key: string;
+  content: string;
+  confidence?: number;
+}): Promise<number> {
+  const result = await pool.query<{ id: number }>(
+    `INSERT INTO orchestrator_memory (chat_id, memory_type, key, content, confidence)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (chat_id, memory_type, key) WHERE active = TRUE
+     DO UPDATE SET content = EXCLUDED.content,
+                   confidence = GREATEST(orchestrator_memory.confidence, EXCLUDED.confidence),
+                   times_confirmed = orchestrator_memory.times_confirmed + 1,
+                   updated_at = NOW()
+     RETURNING id`,
+    [params.chatId, params.memoryType, params.key, params.content, params.confidence ?? 0.5]
+  );
+  return result.rows[0]?.id ?? 0;
+}
+
+export async function getOrchestratorMemories(
+  chatId: number,
+  limit = 20
+): Promise<Array<{ id: number; memoryType: string; key: string; content: string; confidence: number; timesConfirmed: number }>> {
+  const result = await pool.query<{
+    id: number;
+    memory_type: string;
+    key: string;
+    content: string;
+    confidence: number;
+    times_confirmed: number;
+  }>(
+    `SELECT id, memory_type, key, content, confidence, times_confirmed
+     FROM orchestrator_memory
+     WHERE chat_id = $1 AND active = TRUE
+     ORDER BY times_confirmed DESC, confidence DESC
+     LIMIT $2`,
+    [chatId, limit]
+  );
+  return result.rows.map(r => ({
+    id: r.id,
+    memoryType: r.memory_type,
+    key: r.key,
+    content: r.content,
+    confidence: r.confidence,
+    timesConfirmed: r.times_confirmed
+  }));
+}
+
+export async function confirmOrchestratorMemory(id: number): Promise<void> {
+  await pool.query(
+    `UPDATE orchestrator_memory
+     SET times_confirmed = times_confirmed + 1,
+         times_used = times_used + 1,
+         last_used_at = NOW(),
+         updated_at = NOW()
+     WHERE id = $1`,
+    [id]
+  );
+}
+
+export async function getChatContextForPatternAnalysis(
+  chatId: number,
+  days = 28
+): Promise<Array<{ content: string; agent: string | null; metadata: Record<string, unknown>; createdAt: string }>> {
+  const result = await pool.query<{
+    content: string;
+    agent: string | null;
+    metadata: Record<string, unknown>;
+    created_at: string;
+  }>(
+    `SELECT content, agent, metadata, created_at::TEXT
+     FROM chat_context
+     WHERE chat_id = $1
+       AND role = 'user'
+       AND created_at > NOW() - INTERVAL '1 day' * $2
+     ORDER BY created_at`,
+    [chatId, days]
+  );
+  return result.rows.map(r => ({
+    content: r.content,
+    agent: r.agent,
+    metadata: r.metadata,
+    createdAt: r.created_at
+  }));
+}
+
+export async function bulkDeleteAllItems(): Promise<{
+  deletedCount: number;
+  filePaths: string[];
+}> {
+  // Gather all file paths before deleting
+  const itemPaths = await pool.query<{ storage_path: string | null }>(
+    `SELECT storage_path FROM inbox_items WHERE storage_path IS NOT NULL`
+  );
+  const attachPaths = await pool.query<{ storage_path: string }>(
+    `SELECT storage_path FROM item_attachments`
+  );
+
+  const filePaths = [
+    ...itemPaths.rows.map(r => r.storage_path).filter((p): p is string => Boolean(p)),
+    ...attachPaths.rows.map(r => r.storage_path)
+  ];
+
+  // Nullify project FK references
+  await pool.query(`UPDATE projects SET source_item_id = NULL WHERE source_item_id IS NOT NULL`);
+  // Nullify commitment FK references
+  await pool.query(`UPDATE commitments SET source_item_id = NULL WHERE source_item_id IS NOT NULL`);
+
+  // Delete all items (cascades to item_attachments, item_embeddings)
+  const result = await pool.query(`DELETE FROM inbox_items`);
+
+  return {
+    deletedCount: result.rowCount ?? 0,
+    filePaths: [...new Set(filePaths)]
+  };
+}
+
+export async function cleanupOldChatContext(retentionDays = 30): Promise<number> {
+  const result = await pool.query(
+    `DELETE FROM chat_context WHERE created_at < NOW() - INTERVAL '1 day' * $1`,
+    [retentionDays]
+  );
+  return result.rowCount ?? 0;
 }
 
 export async function closePool(): Promise<void> {

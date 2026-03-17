@@ -42,13 +42,14 @@ import {
   upsertChatSubscription,
   insertItemAttachment,
   getActiveCosConversation,
-  completeCosConversation
+  completeCosConversation,
+  saveChatMessage
 } from "../db/schema.js";
 import { buildOpenActionsMessage, buildWeeklyMessage } from "./reports.js";
 import { appendProjectStatus, storeIncomingMedia, writeActionBoard, writeKnowledgeNote } from "./storage.js";
 import { InputType, ProcessingStage } from "../types/domain.js";
 import { log } from "../utils/logger.js";
-import { containsJarbasKeyword, stripJarbasKeyword, routeToAgent, containsMartaKeyword, stripMartaKeyword, routeToMarta, handleMartaFollowUpFromIntake, smartRouteMessage, containsResearchKeyword, routeToResearch } from "../agents/router.js";
+import { routeToAgent, routeToMarta, handleMartaFollowUpFromIntake, orchestrateMessage, dispatchOrchestratorActions, containsResearchKeyword, routeToResearch } from "../agents/router.js";
 import { cosineSimilarity } from "../utils/math.js";
 
 interface ExtractedContent {
@@ -1392,7 +1393,7 @@ async function processTelegramMessageInner(
   //   5. Active Marta conversation follow-up (no keyword needed)
   //   6. Media extraction → audio keyword check → AI classification pipeline
 
-  const rawText = message.text || message.caption || "";
+  let rawText = message.text || message.caption || "";
 
   // Step 1 — Pending relation decisions (exact responses like "complemento" / "novo")
   if (message.text && (await tryResolvePendingRelation(chatId, message))) {
@@ -1481,32 +1482,14 @@ async function processTelegramMessageInner(
     return;
   }
 
-  // Step 4 — Explicit keyword routing (Research/Jarbas/Marta in text/caption)
-  // Keywords ALWAYS take priority over active conversations — lets users escape.
+  // Step 3b — Research keywords take absolute priority ("pesquise", "busca sobre")
   const textContent = message.text || message.caption || "";
-
-  // Research keywords ("pesquise", "busca sobre") take priority — works with or without "Jarbas"
-  // "Jarbas pesquise sobre X" and "pesquise sobre X" both route directly to research
   if (containsResearchKeyword(textContent)) {
-    const researchInput = containsJarbasKeyword(textContent) ? stripJarbasKeyword(textContent) : textContent;
-    await routeToResearch(chatId, messageId, researchInput, message);
+    await routeToResearch(chatId, messageId, textContent, message);
     return;
   }
 
-  if (containsJarbasKeyword(textContent)) {
-    await routeToAgent(chatId, messageId, stripJarbasKeyword(textContent), message);
-    return;
-  }
-
-  if (containsMartaKeyword(textContent)) {
-    await routeToMarta(chatId, messageId, stripMartaKeyword(textContent), message);
-    return;
-  }
-
-  // Step 5 — Active Marta/Jarbas conversation follow-up (no keyword required)
-  // Handles text, PDFs, images as follow-up responses.
-  // Audio is EXCLUDED here — it needs transcription first (handled in Step 6).
-  // Audio sent as document (e.g. MP3 attachment) must also be treated as audio
+  // Detect audio messages early (needed for routing decisions)
   const isAudioDocument = Boolean(
     message.document?.mime_type?.startsWith("audio/") ||
     (message.document?.file_name && AUDIO_EXTENSIONS.has(path.extname(message.document.file_name).toLowerCase()))
@@ -1515,40 +1498,60 @@ async function processTelegramMessageInner(
     (message.document && !isAudioDocument) || (message.photo && message.photo.length > 0)
   );
   const isAudioMessage = Boolean(message.voice || message.audio || isAudioDocument);
+
+  // Step 4 — Active conversation follow-up (Marta/Jarbas)
+  // Handles text, PDFs, images as follow-up responses.
+  // Audio is EXCLUDED — needs transcription first (handled after Step 6).
   if (!isAudioMessage && (rawText || hasNonAudioAttachment) && (await handleMartaFollowUpFromIntake(chatId, messageId, rawText, message))) {
-    log.info("Marta follow-up handled", { chatId, messageId });
+    log.info("conversation_follow_up_handled", { chatId, messageId });
+    await saveChatMessage(chatId, "user", rawText || "[attachment]");
     return;
   }
 
-  // Step 5b — Jarbas active conversation follow-up (no keyword needed)
-  // Check if there's an active Jarbas conversation that this message might continue.
-  // This covers cases where handleMartaFollowUpFromIntake didn't match (e.g. audio-only).
-  if (!isAudioMessage && rawText) {
-    const activeConv = await getActiveCosConversation(chatId);
-    if (activeConv && activeConv.intent.includes("jarbas") && !containsMartaKeyword(textContent)) {
-      const handled = await handleMartaFollowUpFromIntake(chatId, messageId, textContent, message);
-      if (handled) {
-        log.info("Jarbas follow-up handled", { chatId, messageId });
-        return;
+  // Step 5 — Intelligent Orchestrator (replaces keyword routing + smart routing)
+  // AI classifier detects ALL actions in the message and dispatches to agents in parallel.
+  if (!isAudioMessage && rawText && rawText.length >= 5) {
+    // Save user message to chat context for conversational memory
+    await saveChatMessage(chatId, "user", rawText);
+
+    const orchestratorResult = await orchestrateMessage(rawText, chatId);
+
+    // If orchestrator thinks this is a follow-up and there's an active conversation,
+    // defer to the conversation handler
+    if (orchestratorResult.isFollowUp) {
+      const activeConv = await getActiveCosConversation(chatId);
+      if (activeConv) {
+        if (await handleMartaFollowUpFromIntake(chatId, messageId, rawText, message)) {
+          return;
+        }
       }
     }
-  }
 
-  // Step 5c — Smart routing (no keyword, no active conversation)
-  // AI classifier determines if message should go to an agent even without explicit keyword.
-  // Only runs for text messages with enough content to classify.
-  if (!isAudioMessage && rawText && rawText.length >= 5) {
-    const routeResult = await smartRouteMessage(rawText, chatId);
-    if (routeResult.agent === "marta" && routeResult.confidence >= 0.75) {
-      log.info("smart_route:marta", { chatId, messageId, confidence: routeResult.confidence });
-      await routeToMarta(chatId, messageId, rawText, message);
-      return;
+    // Filter to high-confidence actions
+    const confidentActions = orchestratorResult.actions.filter(a => a.confidence >= 0.70);
+
+    if (confidentActions.length > 0) {
+      const hasAgentAction = confidentActions.some(a => a.agent !== "intake");
+      if (hasAgentAction) {
+        const dispatchResult = await dispatchOrchestratorActions(
+          chatId, messageId, rawText, message, confidentActions
+        );
+
+        // If there's also an intake portion, let it fall through to the intake pipeline
+        if (dispatchResult.intakeText) {
+          // Override rawText with the intake-specific portion for the rest of the pipeline
+          rawText = dispatchResult.intakeText;
+          // Fall through to content extraction + intake pipeline
+        } else {
+          return; // All actions dispatched to agents
+        }
+      }
+      // If only intake actions with high confidence, fall through to intake pipeline
     }
-    if (routeResult.agent === "jarbas" && routeResult.confidence >= 0.75) {
-      log.info("smart_route:jarbas", { chatId, messageId, confidence: routeResult.confidence });
-      await routeToAgent(chatId, messageId, rawText, message);
-      return;
-    }
+    // If no high-confidence actions, fall through to intake pipeline (default behavior)
+  } else if (!isAudioMessage && rawText) {
+    // Short text messages: just save to chat context
+    await saveChatMessage(chatId, "user", rawText);
   }
 
   // Step 6 — Content extraction (audio transcription, PDF text, image description)
@@ -1557,7 +1560,7 @@ async function processTelegramMessageInner(
   if (isAudioMessage || message.photo || message.document) {
     await sendTypingIndicator(chatId);
   }
-  const extracted = await extractFromMessage(message);
+  let extracted = await extractFromMessage(message);
   if (!extracted.normalizedText) {
     const categoryId = await upsertCategory("Inbox Geral", "Itens sem extração automatica completa", "agent");
     const fallbackSummary = "Arquivo recebido, mas nao foi possivel extrair conteudo automaticamente.";
@@ -1592,55 +1595,59 @@ async function processTelegramMessageInner(
 
   log.info("pipeline:extract_done", { inputType: extracted.inputType, textLen: extracted.normalizedText.length });
 
-  // Step 7 — Audio transcription keyword check (Research/Jarbas/Marta in spoken words)
+  // Step 7 — Intelligent orchestrator for audio transcriptions
   if (extracted.inputType === "audio") {
-    const rawCheck = extracted.rawTranscription || "";
     const normCheck = extracted.normalizedText;
 
-    // Research keywords in audio — takes priority over Jarbas (same as text path)
-    const audioResearchText = containsResearchKeyword(normCheck) ? normCheck : (containsResearchKeyword(rawCheck) ? rawCheck : null);
-    if (audioResearchText) {
-      const researchInput = containsJarbasKeyword(audioResearchText) ? stripJarbasKeyword(audioResearchText) : audioResearchText;
-      await routeToResearch(chatId, messageId, researchInput, message);
+    // Research keywords in audio — takes absolute priority (same as text path)
+    if (containsResearchKeyword(normCheck)) {
+      await routeToResearch(chatId, messageId, normCheck, message);
       return;
     }
 
-    if (containsJarbasKeyword(rawCheck) || containsJarbasKeyword(normCheck)) {
-      const agentInput = containsJarbasKeyword(normCheck)
-        ? stripJarbasKeyword(normCheck)
-        : stripJarbasKeyword(rawCheck);
-      await routeToAgent(chatId, messageId, agentInput, message);
-      return;
-    }
-
-    if (containsMartaKeyword(rawCheck) || containsMartaKeyword(normCheck)) {
-      const martaInput = containsMartaKeyword(normCheck)
-        ? stripMartaKeyword(normCheck)
-        : stripMartaKeyword(rawCheck);
-      await routeToMarta(chatId, messageId, martaInput, message);
-      return;
-    }
-
-    // Audio without keyword but active Marta conversation → treat as follow-up
-    // (audio transcription was not available before step 5, so check again now)
+    // Check active Marta conversation first (audio transcription wasn't available in Step 4)
     if (await handleMartaFollowUpFromIntake(chatId, messageId, normCheck, message)) {
       log.info("Marta follow-up handled (audio)", { chatId, messageId });
       return;
     }
 
-    // Step 7b — Smart routing for audio (no keyword, no active conversation)
+    // Save audio transcription to chat context (even short ones, for continuity)
+    if (normCheck.length > 0) {
+      await saveChatMessage(chatId, "user", normCheck, undefined, { source: "audio" });
+    }
+
+    // Route through orchestrator (same logic as text in Step 5)
     if (normCheck.length >= 5) {
-      const routeResult = await smartRouteMessage(normCheck, chatId);
-      if (routeResult.agent === "marta" && routeResult.confidence >= 0.75) {
-        log.info("smart_route:marta_audio", { chatId, messageId, confidence: routeResult.confidence });
-        await routeToMarta(chatId, messageId, normCheck, message);
-        return;
+      const orchResult = await orchestrateMessage(normCheck, chatId);
+      log.info("orchestrator:audio_result", {
+        chatId, messageId,
+        actions: orchResult.actions.length,
+        isFollowUp: orchResult.isFollowUp,
+      });
+
+      const validActions = orchResult.actions.filter(a => a.confidence >= 0.70);
+
+      if (validActions.length > 0) {
+        const hasAgentActions = validActions.some(a => a.agent !== "intake");
+        const intakeAction = validActions.find(a => a.agent === "intake");
+
+        if (hasAgentActions) {
+          const dispatchResult = await dispatchOrchestratorActions(
+            chatId, messageId, normCheck, message, validActions
+          );
+
+          if (dispatchResult.intakeText) {
+            rawText = dispatchResult.intakeText;
+            extracted = { ...extracted, normalizedText: rawText, rawText };
+          } else {
+            return;
+          }
+        } else if (intakeAction) {
+          // All actions are intake — fall through to intake pipeline
+          log.info("orchestrator:audio_intake_only", { chatId, messageId });
+        }
       }
-      if (routeResult.agent === "jarbas" && routeResult.confidence >= 0.75) {
-        log.info("smart_route:jarbas_audio", { chatId, messageId, confidence: routeResult.confidence });
-        await routeToAgent(chatId, messageId, normCheck, message);
-        return;
-      }
+      // No valid actions or only intake → fall through to intake pipeline
     }
   }
 

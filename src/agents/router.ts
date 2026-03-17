@@ -3,14 +3,17 @@ import { callClaude, describeImage } from "../services/openai.js";
 import { getFileBuffer, sendText, sendTypingIndicator } from "../services/telegram.js";
 import { log } from "../utils/logger.js";
 import { getAgent, listAgents } from "./registry.js";
-import { AgentIntent, AgentRequest } from "./types.js";
+import { AgentIntent, AgentRequest, OrchestratorAction, OrchestratorResult, DispatchResult } from "./types.js";
 import { TelegramMessage } from "../types/telegram.js";
 import {
   appendConversationMessage,
   completeCosConversation,
   createCosConversation,
   getActiveCosConversation,
+  getOrchestratorMemories,
+  getRecentChatContext,
   listPeople,
+  saveChatMessage,
   updateCosConversation
 } from "../db/schema.js";
 import { handleFollowUp } from "./chiefofstaff/index.js";
@@ -18,32 +21,11 @@ import { classifyMartaIntent } from "./chiefofstaff/intents.js";
 import { buildHelpMessage } from "./chiefofstaff/prompts.js";
 import pdfParse from "pdf-parse";
 
-const JARBAS_PATTERN = /\bjarbas\b/i;
-const MARTA_PATTERN = /\bmarta\b/i;
-
-// Research keyword patterns — detected BEFORE smart routing for instant activation.
-// Matches: "pesquise", "pesquisar", "investigue", "busque sobre", etc.
-// "busca" alone is too generic (noun: "a busca por talentos"), so we require it in
-// imperative/verb context: "busca sobre", "busca pra mim", "busca informacoes".
+// Research keyword patterns — detected BEFORE orchestrator for instant activation.
 const RESEARCH_PATTERN = /\b(?:pesquis[ae]r?|investig[ae]r?|busque|buscar)\b/i;
 const RESEARCH_BUSCA_PATTERN = /\bbusca\s+(?:sobre|pra\s+mim|para\s+mim|informac[oõ]es|dados|detalhes)\b/i;
 
-// Patterns where the keyword is used as a person name reference, NOT as a command invocation.
-// e.g. "briefing da Marta", "email pro Jarbas", "1:1 com Marta", "notas com o Jarbas"
-// In these cases the word is referencing a team member, not invoking the assistant.
-const PERSON_REF_PATTERNS_MARTA = /\b(?:da|do|com|pro|pra|com a|com o|sobre a|sobre o|para a|para o)\s+marta\b/i;
-const PERSON_REF_PATTERNS_JARBAS = /\b(?:da|do|com|pro|pra|com a|com o|sobre a|sobre o|para a|para o)\s+jarbas\b/i;
-
-export function containsJarbasKeyword(text: string): boolean {
-  if (!JARBAS_PATTERN.test(text)) return false;
-  // If the only occurrence of "jarbas" is as a person reference (e.g. "email pro Jarbas"), skip
-  const stripped = text.replace(PERSON_REF_PATTERNS_JARBAS, "___");
-  return JARBAS_PATTERN.test(stripped);
-}
-
-export function stripJarbasKeyword(text: string): string {
-  return text.replace(JARBAS_PATTERN, "").replace(/[,\s]+/g, " ").trim();
-}
+// ── Jarbas intent classification (used internally by routeToAgent) ──
 
 // ── Research keyword detection ───────────────────────────────────────
 
@@ -115,7 +97,9 @@ export async function classifyAgentIntent(text: string): Promise<AgentIntent> {
 
     let parsed: { agentId?: string; confidence?: number; metadata?: Record<string, unknown> };
     try {
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      const jsonStart = response.indexOf("{");
+      const jsonEnd = response.lastIndexOf("}");
+      const jsonMatch = jsonStart >= 0 && jsonEnd > jsonStart ? [response.slice(jsonStart, jsonEnd + 1)] : null;
       if (!jsonMatch) return fallback;
       parsed = JSON.parse(jsonMatch[0]);
     } catch {
@@ -134,15 +118,16 @@ export async function classifyAgentIntent(text: string): Promise<AgentIntent> {
   }
 }
 
+// ── Jarbas routing (internal dispatch) ──────────────────────────────
+
 export async function routeToAgent(
   chatId: number,
   messageId: number,
   strippedText: string,
   _originalMessage: TelegramMessage
 ): Promise<void> {
-  // Handle empty text (user sent just "Jarbas" with nothing else)
   if (!strippedText.trim()) {
-    await sendText(chatId, `O que voce precisa? Tente algo como "Jarbas escreve um post sobre X" ou "Jarbas faz um artigo sobre Y".`);
+    await sendText(chatId, `O que voce precisa? Tente algo como "escreve um post sobre X" ou "faz um artigo sobre Y".`);
     return;
   }
 
@@ -160,15 +145,12 @@ export async function routeToAgent(
   const handlerId = intent.agentId === "research" ? "ghostwriter" : intent.agentId;
   const handler = getAgent(handlerId);
   if (!handler) {
-    // Save a conversation so the user can follow up without repeating the keyword.
-    // This prevents the follow-up from being captured by Second Brain.
-    // Track retryCount to prevent infinite clarification loops.
     const activeConv = await getActiveCosConversation(chatId);
     const prevRetryCount = activeConv?.intent === "jarbas_clarification"
       ? ((activeConv.context as { retryCount?: number }).retryCount ?? 0)
       : 0;
 
-    const helpMsg = `Nao entendi o que voce precisa. Tente algo como "Jarbas escreve um post sobre X", ou me diga mais detalhes sobre o que voce quer.`;
+    const helpMsg = `Nao entendi o que voce precisa. Me diga mais detalhes sobre o conteudo que quer criar.`;
     const convId = await createCosConversation({
       chatId,
       intent: "jarbas_clarification",
@@ -259,23 +241,11 @@ export async function routeToResearch(
 
 // ── Marta (Chief of Staff) routing ────────────────────────────────────
 
-export function containsMartaKeyword(text: string): boolean {
-  if (!MARTA_PATTERN.test(text)) return false;
-  // If the only occurrence of "marta" is as a person reference (e.g. "briefing da Marta"), skip
-  const stripped = text.replace(PERSON_REF_PATTERNS_MARTA, "___");
-  return MARTA_PATTERN.test(stripped);
-}
-
-export function stripMartaKeyword(text: string): string {
-  return text.replace(MARTA_PATTERN, "").replace(/[,\s]+/g, " ").trim();
-}
-
 /**
  * Extract content from PDF or image attachments in a Telegram message.
  * Returns the extracted text (PDF text or image description), or null if no media.
  */
 export async function extractMediaContent(message: TelegramMessage): Promise<string | null> {
-  // Detect PDF
   const isPdf = message.document?.mime_type === "application/pdf"
     || message.document?.file_name?.toLowerCase().endsWith(".pdf");
 
@@ -294,7 +264,6 @@ export async function extractMediaContent(message: TelegramMessage): Promise<str
     return null;
   }
 
-  // Detect image (photo array or document with image/* mime type)
   const isImage = (message.photo && message.photo.length > 0)
     || message.document?.mime_type?.startsWith("image/");
 
@@ -337,33 +306,26 @@ export async function routeToMarta(
     return;
   }
 
-  // Handle empty text (user sent just "Marta" with nothing else)
   if (!strippedText.trim()) {
     await sendText(chatId, buildHelpMessage());
     return;
   }
 
-  // When user explicitly invokes "Marta" keyword, check if the new request matches
-  // the active conversation's intent. If same intent → treat as follow-up (don't close).
-  // If different intent → close the old conversation and process fresh.
   const activeConv = await getActiveCosConversation(chatId);
   if (activeConv) {
     const newIntent = await classifyMartaIntent(strippedText);
     if (newIntent.intent === activeConv.intent) {
-      // Same intent — let the normal Marta processing detect the active conversation
-      // and treat this as a follow-up instead of starting a new conversation.
-      log.info("marta:explicit_keyword_same_intent_follow_up", {
+      log.info("marta:same_intent_follow_up", {
         chatId, convId: activeConv.id, intent: activeConv.intent
       });
     } else {
       await completeCosConversation(activeConv.id);
-      log.info("marta:explicit_keyword_closed_conversation", {
+      log.info("marta:closed_conversation", {
         chatId, convId: activeConv.id, prevIntent: activeConv.intent, newIntent: newIntent.intent
       });
     }
   }
 
-  // Extract content from PDF/image attachments
   const mediaContent = await extractMediaContent(originalMessage);
 
   const request: AgentRequest = {
@@ -386,115 +348,13 @@ export async function routeToMarta(
     if (!result.success) {
       log.error("Marta execution failed", { chatId, error: result.error });
     }
-    // Note: Marta sends her own messages via sendText internally.
-    // The result.summary is for logging, not for sending to user.
   } catch (error) {
     log.error("Marta execution error", { chatId, error });
     await sendText(chatId, "Ocorreu um erro ao processar seu pedido. Tente novamente.");
   }
 }
 
-// ── Smart Conversational Routing (no keyword required) ──────────────
-
-export interface SmartRouteResult {
-  agent: "marta" | "jarbas" | "intake";
-  confidence: number;
-  reasoning: string;
-}
-
-const SMART_ROUTING_PROMPT = `Voce e um meta-roteador de mensagens. Classifique se a mensagem do usuario deve ser processada por um assistente virtual ou capturada como informacao.
-
-AGENTES DISPONIVEIS:
-
-1. "marta" — Chief of Staff virtual. Responsavel por:
-   - Briefings e preparacao para reunioes/1:1s ("prepara o briefing", "me ajuda com o 1:1", "o que pegar com")
-   - Processar notas de reuniao ("anota aqui", "notas do 1:1", "acabei de sair da reuniao", "segue o transcript")
-   - Status da equipe ("como ta a galera", "panorama", "status")
-   - Draft de emails ("escreve um email", "manda mensagem pro", "email de cobranca")
-   - Registrar pessoa na equipe ("adiciona o fulano", "novo liderado", "registra")
-   - Lembretes ("me lembra", "nao esquece de", "lembrete")
-   - Agendar eventos ("agendar reuniao", "marca um 1:1", "coloca na agenda")
-   - Reflexao estrategica ("o que tenho negligenciado", "reflexao", "analise estrategica")
-   - Conversa sobre gestao de equipe, lideranca, follow-ups, compromissos
-
-2. "jarbas" — Ghostwriter de conteudo e pesquisador. Responsavel por:
-   - Escrever posts para LinkedIn
-   - Criar artigos longos
-   - Gerar conteudo sobre um tema
-   - Qualquer pedido de criacao de texto/conteudo para publicacao
-   - Pesquisas e buscas de informacao ("pesquise sobre", "busca informacoes sobre", "quero saber sobre", "me fala sobre", "levanta dados sobre")
-
-3. "intake" — Captura de informacao/conhecimento. Para:
-   - Links, artigos, referencias para ler depois
-   - Notas pessoais, ideias soltas, pensamentos
-   - Informacoes para guardar (financeiro, saude, estudos)
-   - Qualquer coisa que NAO e um pedido de acao para Marta ou Jarbas
-   - Mensagens ambiguas ou muito curtas para classificar com confianca
-
-REGRAS CRITICAS:
-- Se menciona pessoas da equipe + acao (briefing, notas, email, status) → "marta" com confianca alta
-- Se menciona criar/escrever conteudo/post/artigo → "jarbas" com confianca alta
-- Se pede pesquisa, busca de informacoes, "quero saber sobre", "me fala sobre" → "jarbas" com confianca alta
-- Se e uma informacao solta, link, nota pessoal → "intake"
-- Se for ambiguo, prefira "intake" com confianca baixa (< 0.5)
-- Confianca deve refletir o quao certo voce esta: 0.9+ = obvio, 0.7-0.9 = provavel, < 0.7 = incerto
-
-Responda APENAS com JSON valido:
-{"agent": "marta" | "jarbas" | "intake", "confidence": 0.0-1.0, "reasoning": "explicacao curta"}`;
-
-export async function smartRouteMessage(
-  text: string,
-  chatId: number
-): Promise<SmartRouteResult> {
-  const fallback: SmartRouteResult = { agent: "intake", confidence: 0.5, reasoning: "fallback" };
-
-  // Skip very short messages — not enough context to classify
-  if (text.length < 5) return fallback;
-
-  try {
-    // Load registered people names for context
-    const people = await listPeople(true);
-    const peopleContext = people.length > 0
-      ? `\nPessoas registradas na equipe: ${people.map((p) => p.name).join(", ")}`
-      : "";
-
-    const response = await callClaude({
-      system: SMART_ROUTING_PROMPT + peopleContext,
-      userMessage: text,
-      model: "fast",
-      maxTokens: 128
-    });
-
-    if (!response) return fallback;
-
-    let parsed: { agent?: string; confidence?: number; reasoning?: string };
-    try {
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) return fallback;
-      parsed = JSON.parse(jsonMatch[0]);
-    } catch {
-      return fallback;
-    }
-
-    const validAgents = ["marta", "jarbas", "intake"];
-    const agent = validAgents.includes(parsed.agent ?? "")
-      ? (parsed.agent as SmartRouteResult["agent"])
-      : "intake";
-    const confidence = typeof parsed.confidence === "number" ? parsed.confidence : 0.5;
-
-    log.info("smart_route:classified", {
-      agent,
-      confidence,
-      reasoning: parsed.reasoning,
-      textPreview: text.slice(0, 80)
-    });
-
-    return { agent, confidence, reasoning: parsed.reasoning ?? "" };
-  } catch (error) {
-    log.warn("smart_route:classification_failed", { error });
-    return fallback;
-  }
-}
+// ── Active conversation follow-up handler ────────────────────────────
 
 export async function handleMartaFollowUpFromIntake(
   chatId: number,
@@ -506,16 +366,11 @@ export async function handleMartaFollowUpFromIntake(
   if (!activeConv) return false;
 
   // ── Jarbas follow-up ──────────────────────────────────────────────
-  // If the active conversation belongs to Jarbas (clarification), route the
-  // follow-up back through routeToAgent with the enriched context.
-  // Guard against infinite loops: if we've already retried, stop and let it
-  // fall through to Second Brain instead of creating another clarification.
   if (activeConv.intent === "jarbas_clarification") {
     const context = activeConv.context as { originalRequest?: string; retryCount?: number };
     const retryCount = context.retryCount ?? 0;
 
     if (retryCount >= 3) {
-      // Already retried 3 times — stop the loop, complete conversation, save to inbox
       await completeCosConversation(activeConv.id);
       log.info("jarbas:follow_up_max_retries", { chatId, retryCount });
       await sendText(chatId, "Nao consegui processar para Jarbas. Guardei como item no seu inbox.");
@@ -540,15 +395,266 @@ export async function handleMartaFollowUpFromIntake(
 
   // ── Marta follow-up ──────────────────────────────────────────────
   try {
-    // Extract content from PDF/image attachments in follow-up messages
     const mediaContent = await extractMediaContent(message);
     await handleFollowUp(chatId, messageId, text, activeConv, mediaContent ?? undefined);
     return true;
   } catch (error) {
     log.error("Marta follow-up error", { chatId, error });
-    // Still return true — the message was intended for Marta (conversation was active).
-    // Returning false would let it fall through to Second Brain pipeline, creating confusion.
     await sendText(chatId, "Desculpa, tive um problema ao processar. Pode tentar de novo?");
     return true;
   }
+}
+
+// ── Intelligent Orchestrator ─────────────────────────────────────────
+
+const ORCHESTRATOR_PROMPT = `Voce e um orquestrador inteligente de mensagens. Analise a mensagem do usuario e identifique TODAS as acoes que devem ser executadas, podendo ser mais de uma.
+
+Voce funciona como um assistente executivo de altissimo QI. Entende contexto, continuacoes, referencias implicitas e nuances da comunicacao natural em portugues brasileiro.
+
+AGENTES DISPONIVEIS:
+
+1. "marta" — Chief of Staff virtual:
+   - Briefings e preparacao para reunioes/1:1s ("prepara o briefing", "me ajuda com o 1:1", "o que pegar com")
+   - Processar notas de reuniao ("anota aqui", "notas do 1:1", "acabei de sair da reuniao")
+   - Status da equipe ("como ta a galera", "panorama", "status")
+   - Draft de emails ("escreve um email", "manda mensagem pro")
+   - Registrar pessoa na equipe ("adiciona o fulano", "novo liderado")
+   - Lembretes ("me lembra", "nao esquece de", "lembrete")
+   - Agendar eventos ("agendar reuniao", "marca um 1:1", "coloca na agenda")
+   - Reflexao estrategica ("o que tenho negligenciado", "reflexao", "analise estrategica")
+   - Conversa sobre gestao de equipe, lideranca, follow-ups, compromissos
+
+2. "jarbas" — Ghostwriter de conteudo:
+   - Escrever posts para LinkedIn
+   - Criar artigos longos
+   - Gerar conteudo sobre um tema para publicacao
+   - Detecte "escreve", "post", "artigo", "conteudo sobre", "publicacao"
+
+3. "intake" — Captura de informacao/conhecimento:
+   - Links, artigos, referencias para ler depois
+   - Notas pessoais, ideias soltas, pensamentos
+   - Informacoes para guardar (financeiro, saude, estudos, negocios)
+   - Qualquer coisa que NAO e um pedido de acao para Marta ou Jarbas
+   - Relatos de fatos, decisoes, acontecimentos
+
+REGRAS:
+- Uma mensagem pode conter MULTIPLAS acoes para agentes diferentes. Identifique TODAS.
+- Para cada acao, extraia em "extracted_request" o trecho relevante da mensagem original.
+- Se menciona pessoas + acao (briefing, notas, email, status, lembrete, agendar) → "marta"
+- Se menciona criar/escrever conteudo/post/artigo → "jarbas"
+- Se e informacao solta, link, nota pessoal, relato → "intake"
+- Se for ambiguo ou muito curto → "intake" com confianca < 0.5
+- Confianca: 0.9+ = obvio, 0.7-0.9 = provavel, < 0.7 = incerto
+- Para jarbas, indique content_type_hint: "post" ou "article"
+- Para marta, indique intent_hint: briefing | notas | status | email | equipe | reflexao | reminder | agendar | conversa_geral
+- is_follow_up: true se a mensagem parece ser continuacao/resposta de algo anterior (ex: "sim", "pode fazer", "muda pra alta", "manda por email")
+- Se is_follow_up=true, em follow_up_context explique o que o usuario esta respondendo baseado no historico
+
+Responda APENAS com JSON valido:
+{
+  "actions": [
+    {
+      "agent": "marta" | "jarbas" | "intake",
+      "confidence": 0.0-1.0,
+      "reasoning": "explicacao curta",
+      "extracted_request": "trecho da mensagem para este agente",
+      "intent_hint": "string ou null",
+      "content_type_hint": "post" | "article" | null
+    }
+  ],
+  "is_follow_up": false,
+  "follow_up_context": "null ou explicacao",
+  "reasoning": "visao geral da classificacao"
+}`;
+
+export async function orchestrateMessage(
+  text: string,
+  chatId: number
+): Promise<OrchestratorResult> {
+  const fallback: OrchestratorResult = {
+    actions: [{ agent: "intake", confidence: 0.5, reasoning: "fallback", extractedRequest: text }],
+    isFollowUp: false,
+    rawReasoning: "fallback"
+  };
+
+  if (text.trim().length < 5) return fallback;
+
+  try {
+    // Load context for the prompt — individual failures degrade gracefully
+    const [people, memories, chatHistory] = await Promise.all([
+      listPeople(true).catch(() => [] as Awaited<ReturnType<typeof listPeople>>),
+      getOrchestratorMemories(chatId).catch(() => [] as Awaited<ReturnType<typeof getOrchestratorMemories>>),
+      getRecentChatContext(chatId, 10).catch(() => [] as Awaited<ReturnType<typeof getRecentChatContext>>)
+    ]);
+
+    // Build dynamic context sections
+    let contextSections = "";
+
+    if (people.length > 0) {
+      contextSections += `\nPESSOAS DA EQUIPE: ${people.map((p) => p.name).join(", ")}`;
+    }
+
+    if (memories.length > 0) {
+      const memoryLines = memories
+        .filter(m => m.memoryType === "routing_preference" || m.memoryType === "correction")
+        .slice(0, 10)
+        .map(m => `- ${m.content} (confirmado ${m.timesConfirmed}x)`);
+      if (memoryLines.length > 0) {
+        contextSections += `\n\nPREFERENCIAS APRENDIDAS:\n${memoryLines.join("\n")}`;
+      }
+    }
+
+    if (chatHistory.length > 0) {
+      const historyLines = chatHistory
+        .slice(-10)
+        .map(h => {
+          const agentTag = h.agent ? `/${h.agent}` : "";
+          // Truncate long messages in history
+          const content = h.content.length > 200 ? h.content.slice(0, 200) + "..." : h.content;
+          return `[${h.role}${agentTag}] ${content}`;
+        });
+      contextSections += `\n\nHISTORICO RECENTE DO CHAT:\n${historyLines.join("\n")}`;
+    }
+
+    const response = await callClaude({
+      system: ORCHESTRATOR_PROMPT + contextSections,
+      userMessage: text,
+      model: "fast",
+      maxTokens: 512
+    });
+
+    if (!response) return fallback;
+
+    let parsed: {
+      actions?: Array<{
+        agent?: string;
+        confidence?: number;
+        reasoning?: string;
+        extracted_request?: string;
+        intent_hint?: string;
+        content_type_hint?: string;
+      }>;
+      is_follow_up?: boolean;
+      follow_up_context?: string;
+      reasoning?: string;
+    };
+
+    try {
+      const jsonStart = response.indexOf("{");
+      const jsonEnd = response.lastIndexOf("}");
+      const jsonMatch = jsonStart >= 0 && jsonEnd > jsonStart ? [response.slice(jsonStart, jsonEnd + 1)] : null;
+      if (!jsonMatch) return fallback;
+      parsed = JSON.parse(jsonMatch[0]);
+    } catch {
+      return fallback;
+    }
+
+    if (!parsed.actions || !Array.isArray(parsed.actions) || parsed.actions.length === 0) {
+      return fallback;
+    }
+
+    const validAgents = new Set(["marta", "jarbas", "intake"]);
+    const actions: OrchestratorAction[] = parsed.actions
+      .filter(a => a.agent && validAgents.has(a.agent))
+      .map(a => ({
+        agent: a.agent as OrchestratorAction["agent"],
+        confidence: typeof a.confidence === "number" ? a.confidence : 0.5,
+        reasoning: a.reasoning ?? "",
+        extractedRequest: a.extracted_request || text,
+        intentHint: a.intent_hint ?? undefined,
+        contentTypeHint: (a.content_type_hint === "post" || a.content_type_hint === "article")
+          ? a.content_type_hint
+          : undefined
+      }));
+
+    if (actions.length === 0) return fallback;
+
+    const result: OrchestratorResult = {
+      actions,
+      isFollowUp: parsed.is_follow_up === true,
+      followUpContext: parsed.follow_up_context ?? undefined,
+      rawReasoning: parsed.reasoning ?? ""
+    };
+
+    log.info("orchestrator:classified", {
+      actionsCount: actions.length,
+      agents: actions.map(a => `${a.agent}(${a.confidence.toFixed(2)})`).join(", "),
+      isFollowUp: result.isFollowUp,
+      textPreview: text.slice(0, 80)
+    });
+
+    return result;
+  } catch (error) {
+    log.warn("orchestrator:classification_failed", { error });
+    return fallback;
+  }
+}
+
+// ── Parallel Dispatch ────────────────────────────────────────────────
+
+export async function dispatchOrchestratorActions(
+  chatId: number,
+  messageId: number,
+  text: string,
+  message: TelegramMessage,
+  actions: OrchestratorAction[]
+): Promise<DispatchResult> {
+  const agentActions = actions.filter(a => a.agent !== "intake");
+  const intakeActions = actions.filter(a => a.agent === "intake");
+
+  const agentResults: DispatchResult["agentResults"] = [];
+
+  if (agentActions.length > 0) {
+    const results = await Promise.allSettled(
+      agentActions.map(async (action) => {
+        if (action.agent === "marta") {
+          log.info("orchestrator:dispatch_marta", {
+            chatId, messageId,
+            confidence: action.confidence,
+            intentHint: action.intentHint
+          });
+          await routeToMarta(chatId, messageId, action.extractedRequest, message);
+          // Save assistant response context
+          await saveChatMessage(chatId, "system", `[Orquestrador despachou para Marta: ${action.extractedRequest.slice(0, 100)}]`, "orchestrator", {
+            agent: "marta",
+            confidence: action.confidence,
+            intentHint: action.intentHint
+          });
+          return { agent: "marta", success: true };
+        }
+        if (action.agent === "jarbas") {
+          log.info("orchestrator:dispatch_jarbas", {
+            chatId, messageId,
+            confidence: action.confidence,
+            contentTypeHint: action.contentTypeHint
+          });
+          await routeToAgent(chatId, messageId, action.extractedRequest, message);
+          await saveChatMessage(chatId, "system", `[Orquestrador despachou para Jarbas: ${action.extractedRequest.slice(0, 100)}]`, "orchestrator", {
+            agent: "jarbas",
+            confidence: action.confidence,
+            contentTypeHint: action.contentTypeHint
+          });
+          return { agent: "jarbas", success: true };
+        }
+        return { agent: action.agent, success: false, error: "unknown agent" };
+      })
+    );
+
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        agentResults.push(result.value);
+      } else {
+        log.error("orchestrator:agent_dispatch_failed", {
+          chatId, error: result.reason
+        });
+        agentResults.push({ agent: "unknown", success: false, error: String(result.reason) });
+      }
+    }
+  }
+
+  const intakeText = intakeActions.length > 0
+    ? intakeActions.map(a => a.extractedRequest).join("\n\n")
+    : null;
+
+  return { intakeText, agentResults };
 }

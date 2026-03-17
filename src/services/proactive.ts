@@ -2,6 +2,7 @@ import cron from "node-cron";
 import { env } from "../config/env.js";
 import {
   CalendarEvent,
+  cleanupOldChatContext,
   decayUnusedMemories,
   escalateOverdueItems,
   expireStaleConversations,
@@ -31,7 +32,10 @@ import {
   markPreBriefSent,
   markReminderSent,
   Person,
-  scheduleNextRecurrence
+  scheduleNextRecurrence,
+  getChatContextForPatternAnalysis,
+  saveOrchestratorMemory,
+  getOrchestratorMemories
 } from "../db/schema.js";
 import { syncCalendarEvents, isCalendarEnabled } from "./calendar.js";
 import {
@@ -45,6 +49,7 @@ import {
   buildWeeklyMessage,
   TeamStat
 } from "./reports.js";
+import { callClaude } from "./openai.js";
 import { sendText, sendTextWithButtons } from "./telegram.js";
 import { log } from "../utils/logger.js";
 
@@ -188,8 +193,22 @@ async function deliverEveningRun(chatIds: number[]): Promise<void> {
 async function deliverWeeklyRun(chatIds: number[]): Promise<void> {
   for (const chatId of chatIds) {
     try {
-      const summary = await loadWeeklySummary(chatId);
-      const message = buildWeeklyMessage(summary);
+      const [summary, patterns] = await Promise.all([
+        loadWeeklySummary(chatId),
+        analyzePatterns(chatId).catch(err => {
+          log.error("pattern_analysis:failed", { chatId, error: err });
+          return [] as PatternResult[];
+        })
+      ]);
+
+      let message = buildWeeklyMessage(summary);
+
+      // Append agent suggestions if patterns detected
+      const suggestionsBlock = buildAgentSuggestionsBlock(patterns);
+      if (suggestionsBlock) {
+        message += suggestionsBlock;
+      }
+
       await sendText(chatId, message);
       await insertProactiveRun(chatId, message, "weekly");
     } catch (error) {
@@ -338,8 +357,9 @@ export function startProactiveScheduler(): void {
       try {
         const expired = await expireStaleConversations();
         const decayed = await decayUnusedMemories();
-        if (expired > 0 || decayed > 0) {
-          log.info("Marta housekeeping completed", { expiredConversations: expired, decayedMemories: decayed });
+        const chatCtxCleaned = await cleanupOldChatContext(30);
+        if (expired > 0 || decayed > 0 || chatCtxCleaned > 0) {
+          log.info("Marta housekeeping completed", { expiredConversations: expired, decayedMemories: decayed, chatContextCleaned: chatCtxCleaned });
         }
       } catch (error) {
         log.error("Marta housekeeping failed", { error });
@@ -406,6 +426,115 @@ export function startProactiveScheduler(): void {
     martaInsights: { day: env.WEEKLY_REPORT_DAY, hour: insightHour },
     calendarSync: { intervalMinutes: calendarInterval, enabled: isCalendarEnabled() }
   });
+}
+
+// ── Pattern analysis & agent suggestions ─────────────────────────────
+
+const PATTERN_ANALYSIS_PROMPT = `Voce e um analista de padroes comportamentais. Analise as mensagens do usuario abaixo (ultimas 4 semanas) e identifique padroes recorrentes que poderiam se beneficiar de um agente especializado.
+
+Regras:
+- So reporte padroes que aparecem 3 ou mais vezes
+- Ignore pedidos unicos ou raros
+- Foque em comportamentos que um agente poderia automatizar ou agilizar
+- Considere frequencia (diario, semanal, mensal), tipo de tarefa, e contexto
+
+Responda APENAS com JSON valido:
+{
+  "patterns": [
+    {
+      "key": "identificador_unico_curto",
+      "description": "Descricao curta do padrao",
+      "occurrences": 4,
+      "frequency": "semanal",
+      "agentSuggestion": "O que um agente especializado faria"
+    }
+  ]
+}
+
+Se nao encontrar padroes relevantes, retorne: { "patterns": [] }`;
+
+interface PatternResult {
+  key: string;
+  description: string;
+  occurrences: number;
+  frequency: string;
+  agentSuggestion: string;
+}
+
+async function analyzePatterns(chatId: number): Promise<PatternResult[]> {
+  const messages = await getChatContextForPatternAnalysis(chatId, 28);
+  if (messages.length < 10) return []; // Not enough data
+
+  // Check existing agent_suggestion memories to avoid duplicates
+  const existingMemories = await getOrchestratorMemories(chatId, 50);
+  const existingSuggestionKeys = new Set(
+    existingMemories
+      .filter(m => m.memoryType === "agent_suggestion")
+      .map(m => m.key)
+  );
+
+  const messageSummary = messages
+    .map(m => `[${m.createdAt}] ${m.content.slice(0, 200)}`)
+    .join("\n");
+
+  const response = await callClaude({
+    system: PATTERN_ANALYSIS_PROMPT,
+    userMessage: `MENSAGENS DO USUARIO (${messages.length} mensagens, ultimas 4 semanas):\n\n${messageSummary}`,
+    model: "fast",
+    maxTokens: 512
+  });
+
+  if (!response) return [];
+
+  try {
+    const jsonMatch = response.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return [];
+    const parsed = JSON.parse(jsonMatch[0]) as { patterns: PatternResult[] };
+    if (!Array.isArray(parsed.patterns)) return [];
+
+    const newPatterns: PatternResult[] = [];
+    for (const pattern of parsed.patterns) {
+      if (pattern.occurrences < 3) continue;
+      if (existingSuggestionKeys.has(pattern.key)) continue;
+
+      // Save as agent_suggestion memory
+      await saveOrchestratorMemory({
+        chatId,
+        memoryType: "agent_suggestion",
+        key: pattern.key,
+        content: `${pattern.description} (${pattern.frequency}, ${pattern.occurrences}x). Sugestao: ${pattern.agentSuggestion}`,
+        confidence: Math.min(pattern.occurrences / 10, 1.0)
+      });
+      newPatterns.push(pattern);
+    }
+
+    log.info("pattern_analysis:done", { chatId, totalMessages: messages.length, patternsFound: newPatterns.length });
+    return newPatterns;
+  } catch (error) {
+    log.error("pattern_analysis:parse_failed", { chatId, error });
+    return [];
+  }
+}
+
+function buildAgentSuggestionsBlock(patterns: PatternResult[]): string {
+  if (patterns.length === 0) return "";
+
+  const lines: string[] = [
+    "",
+    "💡 *Sugestoes de Novos Agentes*",
+    "",
+    "Identifiquei padroes nas suas ultimas semanas:",
+    ""
+  ];
+
+  patterns.forEach((p, i) => {
+    lines.push(`${i + 1}. *${p.description}* (${p.occurrences}x, ${p.frequency})`);
+    lines.push(`   → ${p.agentSuggestion}`);
+    lines.push("");
+  });
+
+  lines.push("_Responda com o numero para explorar a criacao, ou ignore._");
+  return lines.join("\n");
 }
 
 // ── Marta proactive delivery functions ────────────────────────────────
