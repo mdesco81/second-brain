@@ -538,7 +538,7 @@ export async function orchestrateMessage(
     const response = await callClaude({
       system: ORCHESTRATOR_PROMPT + contextSections,
       userMessage: text,
-      model: "fast",
+      model: "default",
       maxTokens: 1024
     });
 
