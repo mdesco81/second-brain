@@ -407,64 +407,82 @@ export async function handleMartaFollowUpFromIntake(
 
 // ── Intelligent Orchestrator ─────────────────────────────────────────
 
-const ORCHESTRATOR_PROMPT = `Voce e um orquestrador inteligente de mensagens. Analise a mensagem do usuario e identifique TODAS as acoes que devem ser executadas, podendo ser mais de uma.
+const ORCHESTRATOR_PROMPT = `Voce e o cerebro de roteamento de um assistente executivo. Sua unica tarefa: ler a mensagem do usuario e decidir QUAL agente (ou agentes) deve atender, com alta precisao.
 
-Voce funciona como um assistente executivo de altissimo QI. Entende contexto, continuacoes, referencias implicitas e nuances da comunicacao natural em portugues brasileiro.
+AGENTES:
 
-AGENTES DISPONIVEIS:
+"marta" — Chief of Staff virtual. Cuida de PESSOAS e GESTAO:
+  briefing, preparacao de 1:1, notas de reuniao, status da equipe, draft de email,
+  registrar pessoa, lembretes, agendar eventos, reflexao estrategica, cobranças,
+  follow-ups com liderados, feedback, PDI
 
-1. "marta" — Chief of Staff virtual:
-   - Briefings e preparacao para reunioes/1:1s ("prepara o briefing", "me ajuda com o 1:1", "o que pegar com")
-   - Processar notas de reuniao ("anota aqui", "notas do 1:1", "acabei de sair da reuniao")
-   - Status da equipe ("como ta a galera", "panorama", "status")
-   - Draft de emails ("escreve um email", "manda mensagem pro")
-   - Registrar pessoa na equipe ("adiciona o fulano", "novo liderado")
-   - Lembretes ("me lembra", "nao esquece de", "lembrete")
-   - Agendar eventos ("agendar reuniao", "marca um 1:1", "coloca na agenda")
-   - Reflexao estrategica ("o que tenho negligenciado", "reflexao", "analise estrategica")
-   - Conversa sobre gestao de equipe, lideranca, follow-ups, compromissos
+"jarbas" — Ghostwriter. Cuida de CONTEUDO para publicacao:
+  escrever post LinkedIn, criar artigo, produzir conteudo sobre um tema
 
-2. "jarbas" — Ghostwriter de conteudo:
-   - Escrever posts para LinkedIn
-   - Criar artigos longos
-   - Gerar conteudo sobre um tema para publicacao
-   - Detecte "escreve", "post", "artigo", "conteudo sobre", "publicacao"
+"pesquisa" — Pesquisador. Cuida de BUSCAR INFORMACAO externa:
+  pesquisar sobre um tema, buscar dados, investigar assunto
 
-3. "intake" — Captura de informacao/conhecimento:
-   - Links, artigos, referencias para ler depois
-   - Notas pessoais, ideias soltas, pensamentos
-   - Informacoes para guardar (financeiro, saude, estudos, negocios)
-   - Qualquer coisa que NAO e um pedido de acao para Marta ou Jarbas
-   - Relatos de fatos, decisoes, acontecimentos
+"intake" — Captura de conhecimento. Cuida de GUARDAR informacao:
+  links, notas pessoais, ideias, informacoes para arquivo, relatos, decisoes,
+  qualquer coisa que NAO e pedido de acao
+
+EXEMPLOS (aprenda o padrao):
+
+"faz um post sobre lideranca e prepara o briefing do Joao" →
+  actions: [{agent:"jarbas", confidence:0.95, extracted_request:"faz um post sobre lideranca", content_type_hint:"post"},
+            {agent:"marta", confidence:0.95, extracted_request:"prepara o briefing do Joao", intent_hint:"briefing"}]
+
+"me lembra de cobrar o Pedro amanha e pesquisa sobre OKRs" →
+  actions: [{agent:"marta", confidence:0.95, extracted_request:"me lembra de cobrar o Pedro amanha", intent_hint:"reminder"},
+            {agent:"pesquisa", confidence:0.90, extracted_request:"pesquisa sobre OKRs"}]
+
+"como ta a galera?" →
+  actions: [{agent:"marta", confidence:0.95, extracted_request:"como ta a galera?", intent_hint:"status"}]
+
+"vi um artigo bom sobre IA generativa, salva ai" →
+  actions: [{agent:"intake", confidence:0.90, extracted_request:"vi um artigo bom sobre IA generativa, salva ai"}]
+
+"escreve um artigo sobre transformacao digital" →
+  actions: [{agent:"jarbas", confidence:0.95, extracted_request:"escreve um artigo sobre transformacao digital", content_type_hint:"article"}]
+
+"sim" / "pode ser" / "manda" / "isso" →
+  is_follow_up: true, follow_up_context: "usuario confirmando acao anterior"
+
+"tive uma reuniao com a Ana e o principal ponto foi alinhar prioridades do Q2" →
+  actions: [{agent:"marta", confidence:0.90, extracted_request:"tive uma reuniao com a Ana e o principal ponto foi alinhar prioridades do Q2", intent_hint:"notas"}]
+
+"pesquisa sobre tendencias de IA no marketing 2025" →
+  actions: [{agent:"pesquisa", confidence:0.95, extracted_request:"pesquisa sobre tendencias de IA no marketing 2025"}]
 
 REGRAS:
-- Uma mensagem pode conter MULTIPLAS acoes para agentes diferentes. Identifique TODAS.
-- Para cada acao, extraia em "extracted_request" o trecho relevante da mensagem original.
-- Se menciona pessoas + acao (briefing, notas, email, status, lembrete, agendar) → "marta"
-- Se menciona criar/escrever conteudo/post/artigo → "jarbas"
-- Se e informacao solta, link, nota pessoal, relato → "intake"
-- Se for ambiguo ou muito curto → "intake" com confianca < 0.5
-- Confianca: 0.9+ = obvio, 0.7-0.9 = provavel, < 0.7 = incerto
-- Para jarbas, indique content_type_hint: "post" ou "article"
-- Para marta, indique intent_hint: briefing | notas | status | email | equipe | reflexao | reminder | agendar | conversa_geral
-- is_follow_up: true se a mensagem parece ser continuacao/resposta de algo anterior (ex: "sim", "pode fazer", "muda pra alta", "manda por email")
-- Se is_follow_up=true, em follow_up_context explique o que o usuario esta respondendo baseado no historico
+1. Uma mensagem pode ter MULTIPLAS acoes. Separe cada uma.
+2. "extracted_request" = trecho da mensagem original relevante para aquele agente.
+3. Confianca: 0.95 = obvio, 0.80 = provavel, 0.60 = incerto, < 0.50 = nao sei.
+4. Se a mensagem e AMBIGUA ou voce nao tem certeza do que o usuario quer, use needs_clarification=true e escreva a pergunta em clarification_question. NAO invente uma acao — pergunte.
+5. is_follow_up=true SOMENTE quando a mensagem e claramente uma resposta/continuacao (ex: "sim", "pode fazer", "muda pra alta", "nao, quero X"). Use o HISTORICO para decidir.
+6. Para jarbas: content_type_hint = "post" (default) ou "article" (quando menciona artigo/texto longo).
+7. Para marta: intent_hint = briefing|notas|status|email|equipe|reflexao|reminder|agendar|conversa_geral
+8. Para pesquisa: nenhum hint necessario.
+9. NUNCA classifique como intake algo que e claramente um PEDIDO de acao. Intake e para INFORMACAO passiva.
+10. Se a mensagem menciona uma PESSOA + um VERBO de acao (cobrar, falar, alinhar, preparar, agendar, lembrar) → provavelmente "marta".
 
-Responda APENAS com JSON valido:
+Responda SOMENTE com JSON valido:
 {
   "actions": [
     {
-      "agent": "marta" | "jarbas" | "intake",
+      "agent": "marta" | "jarbas" | "pesquisa" | "intake",
       "confidence": 0.0-1.0,
       "reasoning": "explicacao curta",
-      "extracted_request": "trecho da mensagem para este agente",
+      "extracted_request": "trecho relevante",
       "intent_hint": "string ou null",
       "content_type_hint": "post" | "article" | null
     }
   ],
   "is_follow_up": false,
-  "follow_up_context": "null ou explicacao",
-  "reasoning": "visao geral da classificacao"
+  "follow_up_context": null,
+  "needs_clarification": false,
+  "clarification_question": null,
+  "reasoning": "visao geral"
 }`;
 
 export async function orchestrateMessage(
@@ -474,6 +492,7 @@ export async function orchestrateMessage(
   const fallback: OrchestratorResult = {
     actions: [{ agent: "intake", confidence: 0.5, reasoning: "fallback", extractedRequest: text }],
     isFollowUp: false,
+    needsClarification: false,
     rawReasoning: "fallback"
   };
 
@@ -520,7 +539,7 @@ export async function orchestrateMessage(
       system: ORCHESTRATOR_PROMPT + contextSections,
       userMessage: text,
       model: "fast",
-      maxTokens: 512
+      maxTokens: 1024
     });
 
     if (!response) return fallback;
@@ -536,6 +555,8 @@ export async function orchestrateMessage(
       }>;
       is_follow_up?: boolean;
       follow_up_context?: string;
+      needs_clarification?: boolean;
+      clarification_question?: string;
       reasoning?: string;
     };
 
@@ -546,14 +567,26 @@ export async function orchestrateMessage(
       if (!jsonMatch) return fallback;
       parsed = JSON.parse(jsonMatch[0]);
     } catch {
+      log.warn("orchestrator:json_parse_failed", { response: response.slice(0, 200) });
       return fallback;
+    }
+
+    // If orchestrator needs clarification, return early with the question
+    if (parsed.needs_clarification && parsed.clarification_question) {
+      return {
+        actions: [],
+        isFollowUp: false,
+        needsClarification: true,
+        clarificationQuestion: parsed.clarification_question,
+        rawReasoning: parsed.reasoning ?? ""
+      };
     }
 
     if (!parsed.actions || !Array.isArray(parsed.actions) || parsed.actions.length === 0) {
       return fallback;
     }
 
-    const validAgents = new Set(["marta", "jarbas", "intake"]);
+    const validAgents = new Set(["marta", "jarbas", "pesquisa", "intake"]);
     const actions: OrchestratorAction[] = parsed.actions
       .filter(a => a.agent && validAgents.has(a.agent))
       .map(a => ({
@@ -573,6 +606,7 @@ export async function orchestrateMessage(
       actions,
       isFollowUp: parsed.is_follow_up === true,
       followUpContext: parsed.follow_up_context ?? undefined,
+      needsClarification: false,
       rawReasoning: parsed.reasoning ?? ""
     };
 
@@ -599,14 +633,18 @@ export async function dispatchOrchestratorActions(
   message: TelegramMessage,
   actions: OrchestratorAction[]
 ): Promise<DispatchResult> {
-  const agentActions = actions.filter(a => a.agent !== "intake");
+  const agentActions = actions.filter(a => a.agent !== "intake" && a.agent !== "pesquisa");
+  const pesquisaActions = actions.filter(a => a.agent === "pesquisa");
   const intakeActions = actions.filter(a => a.agent === "intake");
 
   const agentResults: DispatchResult["agentResults"] = [];
 
-  if (agentActions.length > 0) {
+  // Combine agent + pesquisa actions for parallel dispatch
+  const allDispatchable = [...agentActions, ...pesquisaActions];
+
+  if (allDispatchable.length > 0) {
     const results = await Promise.allSettled(
-      agentActions.map(async (action) => {
+      allDispatchable.map(async (action) => {
         if (action.agent === "marta") {
           log.info("orchestrator:dispatch_marta", {
             chatId, messageId,
@@ -614,7 +652,6 @@ export async function dispatchOrchestratorActions(
             intentHint: action.intentHint
           });
           await routeToMarta(chatId, messageId, action.extractedRequest, message);
-          // Save assistant response context
           await saveChatMessage(chatId, "system", `[Orquestrador despachou para Marta: ${action.extractedRequest.slice(0, 100)}]`, "orchestrator", {
             agent: "marta",
             confidence: action.confidence,
@@ -635,6 +672,18 @@ export async function dispatchOrchestratorActions(
             contentTypeHint: action.contentTypeHint
           });
           return { agent: "jarbas", success: true };
+        }
+        if (action.agent === "pesquisa") {
+          log.info("orchestrator:dispatch_pesquisa", {
+            chatId, messageId,
+            confidence: action.confidence
+          });
+          await routeToResearch(chatId, messageId, action.extractedRequest, message);
+          await saveChatMessage(chatId, "system", `[Orquestrador despachou pesquisa: ${action.extractedRequest.slice(0, 100)}]`, "orchestrator", {
+            agent: "pesquisa",
+            confidence: action.confidence
+          });
+          return { agent: "pesquisa", success: true };
         }
         return { agent: action.agent, success: false, error: "unknown agent" };
       })

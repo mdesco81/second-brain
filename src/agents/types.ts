@@ -29,7 +29,7 @@ export type AgentHandler = (request: AgentRequest) => Promise<AgentResult>;
 // ── Orchestrator types ──────────────────────────────────────────────
 
 export interface OrchestratorAction {
-  agent: "marta" | "jarbas" | "intake";
+  agent: "marta" | "jarbas" | "pesquisa" | "intake";
   confidence: number;
   reasoning: string;
   extractedRequest: string;
@@ -41,6 +41,8 @@ export interface OrchestratorResult {
   actions: OrchestratorAction[];
   isFollowUp: boolean;
   followUpContext?: string;
+  needsClarification: boolean;
+  clarificationQuestion?: string;
   rawReasoning: string;
 }
 

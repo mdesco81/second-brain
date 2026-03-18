@@ -1516,6 +1516,13 @@ async function processTelegramMessageInner(
 
     const orchestratorResult = await orchestrateMessage(rawText, chatId);
 
+    // If orchestrator needs clarification, ask the user and stop
+    if (orchestratorResult.needsClarification && orchestratorResult.clarificationQuestion) {
+      await sendText(chatId, orchestratorResult.clarificationQuestion);
+      await saveChatMessage(chatId, "assistant", orchestratorResult.clarificationQuestion, "orchestrator");
+      return;
+    }
+
     // If orchestrator thinks this is a follow-up and there's an active conversation,
     // defer to the conversation handler
     if (orchestratorResult.isFollowUp) {
@@ -1624,6 +1631,13 @@ async function processTelegramMessageInner(
         actions: orchResult.actions.length,
         isFollowUp: orchResult.isFollowUp,
       });
+
+      // If orchestrator needs clarification, ask and stop
+      if (orchResult.needsClarification && orchResult.clarificationQuestion) {
+        await sendText(chatId, orchResult.clarificationQuestion);
+        await saveChatMessage(chatId, "assistant", orchResult.clarificationQuestion, "orchestrator");
+        return;
+      }
 
       const validActions = orchResult.actions.filter(a => a.confidence >= 0.70);
 
