@@ -12,6 +12,7 @@ const envSchema = z.object({
   ANTHROPIC_API_KEY: z.preprocess((v) => v === "" ? undefined : v, z.string().min(1).optional()),
   ANTHROPIC_MODEL: z.string().default("claude-sonnet-4-6"),
   ANTHROPIC_FAST_MODEL: z.string().default("claude-haiku-4-5-20251001"),
+  ANTHROPIC_PREMIUM_MODEL: z.string().default("claude-opus-4-6"),
   OPENAI_API_KEY: z.preprocess((v) => v === "" ? undefined : v, z.string().min(1).optional()),
   OPENAI_TRANSCRIBE_MODEL: z.string().default("gpt-4o-mini-transcribe"),
   OPENAI_EMBED_MODEL: z.string().default("text-embedding-3-small"),

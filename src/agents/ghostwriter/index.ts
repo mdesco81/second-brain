@@ -298,7 +298,7 @@ async function handleGhostwriter(
     draft = await callClaude({
       system: prompt.system,
       userMessage: prompt.user,
-      model: "default",
+      model: "premium",
       maxTokens
     });
   } catch (error) {
@@ -346,7 +346,7 @@ async function handleGhostwriter(
         const retryDraft = await callClaude({
           system: prompt.system,
           userMessage: `${prompt.user}\n\n## AJUSTE OBRIGATORIO\n${adjustInstruction}`,
-          model: "default",
+          model: "premium",
           maxTokens
         });
 

@@ -857,7 +857,7 @@ export async function classifyWithAI(input: AIClassificationInput): Promise<AICl
 export async function callClaude(params: {
   system: string;
   userMessage: string;
-  model?: "default" | "fast";
+  model?: "default" | "fast" | "premium";
   maxTokens?: number;
 }): Promise<string | null> {
   if (!anthropicClient) {
@@ -865,7 +865,11 @@ export async function callClaude(params: {
     return null;
   }
 
-  const model = params.model === "fast" ? env.ANTHROPIC_FAST_MODEL : env.ANTHROPIC_MODEL;
+  const model = params.model === "fast"
+    ? env.ANTHROPIC_FAST_MODEL
+    : params.model === "premium"
+      ? env.ANTHROPIC_PREMIUM_MODEL
+      : env.ANTHROPIC_MODEL;
   const maxAttempts = 2;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
