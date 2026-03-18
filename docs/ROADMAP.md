@@ -11,24 +11,34 @@
 
 | Agente | Capacidades | Maturidade |
 |--------|-------------|------------|
-| **Second Brain** | Captura multimidia (texto, audio, PDF, imagem), classificacao AI em PARC buckets, embeddings semanticos, dedup, URL enrichment, continuations | ★★★★☆ |
-| **Marta (Chief of Staff)** | 8 intents (briefing, notas, status, email, equipe, reflexao, ajuda, conversa_geral), fuzzy matching de pessoas, conversas multi-turn, multi-instrucao | ★★★☆☆ |
-| **Jarbas (Ghostwriter)** | Posts e artigos LinkedIn, research via Perplexity, 5 tipos de hook, validacao de tamanho, style guide multi-camada | ★★★☆☆ |
-| **Proactive Engine** | Briefing matinal, afternoon follow-up, evening wrap-up, weekly report, pre-1:1 alerts | ★★★☆☆ |
-| **Dashboard Web** | Kanban board, filtros, busca, CRUD de cards, viewer de outputs | ★★☆☆☆ |
+| **Second Brain** | Captura multimidia, classificacao AI, embeddings, dedup, URL enrichment, continuations, **orquestrador inteligente** | ★★★★☆ |
+| **Orquestrador** | Roteamento automatico sem keywords, multi-agent dispatch paralelo, clarificacao, memoria conversacional, aprendizado | ★★★★☆ |
+| **Marta (Chief of Staff)** | 10 intents (+ reminder, agendar), fuzzy matching, conversas multi-turn, calendar sync, email SMTP, decisions | ★★★★☆ |
+| **Jarbas (Ghostwriter)** | Posts e artigos LinkedIn (Claude Opus), research via Perplexity, hooks, validacao, style guide, article preview | ★★★★☆ |
+| **Pesquisa** | Pesquisa externa via Perplexity com citacoes, integrado ao orquestrador | ★★★☆☆ |
+| **Proactive Engine** | Briefing matinal, afternoon/evening, weekly report, pre-1:1, **analise de padroes**, **sugestao de agentes** | ★★★★☆ |
+| **Dashboard Web** | React SPA, Kanban, filtros, busca, CRUD completo, viewer de outputs, article preview, **cleanup DB** | ★★★☆☆ |
 
-### Gaps criticos identificados
+### Gaps criticos identificados (atualizado 2026-03-18)
 
-1. **Marta nao tem acesso a calendario** — briefings sao reativos, nao proativos por agenda
+1. ~~**Marta nao tem acesso a calendario**~~ — **RESOLVIDO**: Google Calendar sync bidirecional implementado
 2. **Jarbas nao publica** — gera drafts mas exige acao manual no LinkedIn
-3. **Nao ha email real** — Marta drafta mas nao envia
-4. **Zero integracao com ferramentas de trabalho** — sem Slack, Calendar, Jira
-5. **Dashboard estatico** — sem real-time, sem mobile-first
+3. ~~**Nao ha email real**~~ — **RESOLVIDO**: SMTP integrado, Marta envia emails
+4. **Zero integracao com ferramentas de trabalho** — sem Slack, Jira (Calendar resolvido)
+5. ~~**Dashboard estatico**~~ — **PARCIALMENTE RESOLVIDO**: migrado para React SPA com CRUD
 6. **Sem mecanismo de feedback** — o sistema nao aprende com aprovacoes/rejeicoes
-7. **Sem recurring tasks** — nao suporta tarefas que se repetem
-8. **Sem reminders customizados** — apenas schedules fixos (9h, 15h, 21h)
-9. **Sem decision journal** — decisoes nao sao rastreadas formalmente
+7. ~~**Sem recurring tasks**~~ — **RESOLVIDO**: lembretes recorrentes implementados
+8. ~~**Sem reminders customizados**~~ — **RESOLVIDO**: intent "reminder" na Marta
+9. ~~**Sem decision journal**~~ — **RESOLVIDO**: tabela `decisions` com extracao automatica
 10. **Sem content calendar** — posts nao tem programacao ou cadencia
+
+### Novas capacidades (Marco 2026)
+
+11. **Orquestrador inteligente** — roteamento automatico sem keywords, multi-agent dispatch
+12. **3 tiers de modelo** — Opus para escrita, Sonnet para orquestracao, Haiku para classificacao
+13. **Memoria conversacional** — chat_context + orchestrator_memory para aprendizado continuo
+14. **Pesquisa integrada** — agente de pesquisa via Perplexity como cidadao de primeira classe
+15. **Analise de padroes** — sugestao automatica de novos agentes baseada em uso
 
 ---
 

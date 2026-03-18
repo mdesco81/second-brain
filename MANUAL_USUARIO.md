@@ -235,16 +235,19 @@ Voce pode usar comandos especiais no Telegram para acoes rapidas:
 
 ## 6. Usando o Jarbas (Criacao de Conteudo)
 
-O Jarbas eh seu escritor fantasma pessoal. Ele pesquisa, escreve e formata posts e artigos para LinkedIn.
+O Jarbas eh seu escritor fantasma pessoal. Ele pesquisa, escreve e formata posts e artigos para LinkedIn usando o modelo Claude Opus (premium) para maxima qualidade de escrita.
 
 ### 6.1 Como Pedir um Post
 
-Basta comecar a mensagem com "jarbas" seguido do que voce quer:
+Basta enviar naturalmente o que voce quer. **Nao precisa mais usar a keyword "jarbas"** — o sistema detecta automaticamente que voce quer conteudo:
 
 **Exemplos:**
-- "jarbas escreve um post sobre inteligencia artificial na gestao de pessoas"
-- "jarbas cria um artigo sobre lideranca em tempos de mudanca"
-- "jarbas post sobre as tendencias de tecnologia para 2026"
+- "escreve um post sobre inteligencia artificial na gestao de pessoas"
+- "cria um artigo sobre lideranca em tempos de mudanca"
+- "faz um post sobre as tendencias de tecnologia para 2026"
+
+**Voce tambem pode combinar pedidos numa unica mensagem:**
+- "faz um post sobre lideranca e prepara o briefing do Joao" — o sistema envia para o Jarbas E para a Marta em paralelo
 
 ### 6.2 O que o Jarbas Faz
 
@@ -282,16 +285,16 @@ A Marta eh sua chief of staff virtual. Ela ajuda a gerenciar pessoas, reunioes, 
 
 ### 7.1 Cadastrando Pessoas
 
-Antes de usar a Marta, cadastre as pessoas da sua equipe:
+Antes de usar a Marta, cadastre as pessoas da sua equipe. **Nao precisa mais usar a keyword "marta"** — basta falar naturalmente:
 
 ```
-marta adiciona Joao Silva como desenvolvedor senior, email joao@empresa.com
+adiciona Joao Silva como desenvolvedor senior, email joao@empresa.com
 ```
 
 Voce tambem pode:
 ```
-marta joao agora eh tech lead
-marta atualiza email do joao para joao.silva@empresa.com
+joao agora eh tech lead
+atualiza email do joao para joao.silva@empresa.com
 ```
 
 ### 7.2 Briefing Pre-Reuniao
@@ -299,7 +302,7 @@ marta atualiza email do joao para joao.silva@empresa.com
 Antes de uma reuniao 1:1, peca um briefing:
 
 ```
-marta briefing do joao
+prepara o briefing do joao
 ```
 
 A Marta vai gerar um resumo com:
@@ -311,10 +314,10 @@ A Marta vai gerar um resumo com:
 
 ### 7.3 Notas de Reuniao
 
-Apos uma reuniao, envie suas anotacoes:
+Apos uma reuniao, envie suas anotacoes naturalmente:
 
 ```
-marta notas da reuniao com joao: discutimos o projeto X, ele vai entregar a proposta ate sexta. Decidimos adiar o lancamento para marco. Preciso enviar o orcamento revisado.
+tive uma reuniao com o joao, discutimos o projeto X, ele vai entregar a proposta ate sexta. Decidimos adiar o lancamento para marco. Preciso enviar o orcamento revisado.
 ```
 
 A Marta automaticamente:
@@ -323,18 +326,19 @@ A Marta automaticamente:
 - Atualiza a data do ultimo 1:1
 - Armazena o contexto para futuras reunioes
 
-Voce tambem pode enviar um **audio** ou **PDF** com as notas:
-```
-marta notas da reuniao com joao
-[anexe o audio ou PDF]
-```
+Voce tambem pode enviar um **audio** ou **PDF** com as notas — o sistema transcreve e processa automaticamente.
 
 ### 7.4 Status da Equipe
 
 Peca uma visao geral:
 
 ```
-marta status da equipe
+como ta a galera?
+```
+
+Ou mais formalmente:
+```
+status da equipe
 ```
 
 A Marta mostra:
@@ -345,21 +349,21 @@ A Marta mostra:
 
 ### 7.5 Rascunho de Email
 
-Peca para a Marta escrever um email:
+Peca para escrever um email:
 
 ```
-marta escreve email pro joao sobre o atraso na entrega do relatorio
+escreve email pro joao sobre o atraso na entrega do relatorio
 ```
 
 Ela gera um rascunho que voce pode revisar e enviar pelo painel de controle.
 
 ### 7.6 Lembretes
 
-Agende lembretes relacionados a pessoas:
+Agende lembretes naturalmente:
 
 ```
-marta lembra de perguntar pro joao sobre o projeto na segunda
-marta lembrete: revisar metas da equipe toda primeira segunda do mes
+me lembra de cobrar o Pedro amanha
+lembrete: revisar metas da equipe toda primeira segunda do mes
 ```
 
 ### 7.7 Agendar Reunioes
@@ -367,7 +371,7 @@ marta lembrete: revisar metas da equipe toda primeira segunda do mes
 Se voce tem o Google Calendar configurado:
 
 ```
-marta agenda 1:1 com joao para quinta as 14h
+agenda 1:1 com joao para quinta as 14h
 ```
 
 ### 7.8 Reflexao Estrategica
@@ -375,23 +379,25 @@ marta agenda 1:1 com joao para quinta as 14h
 Para momentos de reflexao:
 
 ```
-marta reflexao sobre como melhorar a comunicacao da equipe
+reflexao sobre como melhorar a comunicacao da equipe
 ```
 
 A Marta gera uma analise com base no historico de interacoes, decisoes e padroes que observou.
 
-### 7.9 Conversas com a Marta
+### 7.9 Conversas Continuas
 
-A Marta mantem o contexto durante uma conversa. Voce pode enviar multiplas mensagens de continuacao sem precisar repetir "marta" toda vez. Por exemplo:
+O sistema mantem o contexto durante uma conversa. Voce pode enviar multiplas mensagens de continuacao naturalmente:
 
 ```
-Voce: marta briefing do joao
-Marta: [gera briefing]
+Voce: prepara o briefing do joao
+Sistema: [gera briefing]
 Voce: adiciona tambem o assunto do orcamento
-Marta: [atualiza briefing]
+Sistema: [atualiza briefing]
 Voce: perfeito, agora manda como email
-Marta: [gera email baseado no briefing]
+Sistema: [gera email baseado no briefing]
 ```
+
+O sistema entende que "sim", "pode ser", "manda", "isso" sao respostas ao contexto anterior — nao precisa repetir o que ja foi dito.
 
 ### 7.10 Vendo no Painel
 
@@ -594,11 +600,11 @@ Sim. Seus dados ficam armazenados no seu servidor privado (banco de dados Postgr
 ### "E se a internet cair ou o servico de IA ficar fora?"
 O sistema tem mecanismos de fallback. Se a IA estiver indisponivel, ele usa regras basicas de classificacao (por palavras-chave) para nao perder nenhuma captura. Quando a IA voltar, tudo continua normalmente.
 
-### "Posso usar o Jarbas e a Marta ao mesmo tempo?"
-Sim! Sao agentes independentes. Voce pode pedir um post ao Jarbas e logo depois pedir um briefing para a Marta. Cada um trabalha no seu escopo.
+### "Posso pedir varias coisas numa unica mensagem?"
+Sim! O sistema detecta multiplas acoes automaticamente. Por exemplo: "faz um post sobre lideranca e me lembra de cobrar o Pedro amanha" — o Jarbas comeca o post enquanto a Marta agenda o lembrete, tudo em paralelo.
 
 ### "Como o sistema sabe se estou falando com o Jarbas, com a Marta, ou so capturando algo?"
-Simples: se sua mensagem comeca com "jarbas", vai para o Jarbas. Se comeca com "marta", vai para a Marta. Qualquer outra coisa eh processada pelo pipeline normal de captura.
+O sistema usa um **orquestrador inteligente** que analisa o conteudo da sua mensagem e direciona automaticamente para o agente correto. Nao precisa usar keywords como "jarbas" ou "marta" — basta falar naturalmente. Se o sistema nao tiver certeza do que voce quer, ele pergunta antes de agir.
 
 ### "O check-in diario eh obrigatorio?"
 Nao, mas eh muito recomendado. Voce pode configurar o horario que preferir. O sistema envia automaticamente - basta ler e agir.
@@ -616,4 +622,4 @@ Sim. Todos os seus dados estao disponiveis de duas formas:
 
 ---
 
-*Documento criado em 2026-02-28. Para duvidas tecnicas ou suporte, consulte o documento ARQUITETURA.md.*
+*Documento atualizado em 2026-03-18. Para duvidas tecnicas ou suporte, consulte o documento ARQUITETURA.md.*

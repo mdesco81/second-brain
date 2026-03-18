@@ -35,18 +35,21 @@ O dashboard web serve como painel de controle visual, mas o **canal primario de 
               +------------------+
               |  INTAKE PIPELINE |  (services/intake.ts) -- cerebro do sistema
               +------------------+
-               /       |        \
-              v        v         v
-        Extracao   Ranking    Planner
-        de         de         com IA
-        Conteudo   Contexto   (OpenAI)
-              \        |        /
-               v       v       v
+                       |
+                       v
               +------------------+
-              |    DECISAO       |  merge | new | split
+              |   ORQUESTRADOR   |  (agents/router.ts) — Claude Sonnet
+              |   INTELIGENTE    |  Classifica TODAS as acoes da mensagem
               +------------------+
-              |  confianca alta  |  -> executa automaticamente
-              |  confianca baixa |  -> pergunta ao usuario
+               /    |    |     \
+              v     v    v      v
+          Marta  Jarbas Pesquisa  Intake
+          (CoS)  (Ghost) (Search)  (Captura)
+              \     |    |      /
+               v    v    v     v
+              +------------------+
+              |  DISPATCH        |  Promise.allSettled (paralelo)
+              |  PARALELO        |  + fallthrough para intake
               +------------------+
                        |
             +----------+-----------+
@@ -56,7 +59,7 @@ O dashboard web serve como painel de controle visual, mas o **canal primario de 
                        |
               +------------------+
               |    PROACTIVE     |  (services/proactive.ts)
-              |  Daily + Weekly  |
+              |  Daily + Weekly  |  + pattern analysis + agent suggestions
               +------------------+
                        |
                        v
@@ -64,10 +67,9 @@ O dashboard web serve como painel de controle visual, mas o **canal primario de 
                   (check-in)
 
               +------------------+
-              |    DASHBOARD     |  (public/ + routes/api.ts)
-              |   (somente       |
-              |    leitura +     |
-              |    status update)|
+              |    DASHBOARD     |  (client/ React + routes/api.ts)
+              |   CRUD completo  |
+              |   + cleanup DB   |
               +------------------+
 ```
 
@@ -164,22 +166,40 @@ Cada item recebe:
 
 ## 5. Inteligencia Artificial no Sistema
 
-### 5.1 Modelos Utilizados
-- **gpt-4o-mini** (ou gpt-4.1-mini): classificacao, planejamento, visao de imagem
-- **gpt-4o-mini-transcribe**: transcricao de audio
-- **text-embedding-3-small**: embeddings para busca semantica
+### 5.1 Modelos Utilizados — 3 Tiers
 
-### 5.2 Dois Niveis de IA
+| Tier | Modelo | Uso |
+|------|--------|-----|
+| **Premium** (Opus) | `claude-opus-4-6` | Ghostwriter: draft de posts e artigos |
+| **Default** (Sonnet) | `claude-sonnet-4-6` | Orquestrador, briefings Marta, notas de reuniao |
+| **Fast** (Haiku) | `claude-haiku-4-5` | Classificacao de intents, hashtags, bullets, formatacao |
+| **OpenAI** | `gpt-4o-mini-transcribe` | Transcricao de audio (Whisper) |
+| **OpenAI** | `text-embedding-3-small` | Embeddings para busca semantica |
+| **Perplexity** | `sonar` | Pesquisa externa com citacoes |
 
-1. **Planner** (`planIntakeWithContext`): agente de orquestracao que decide merge/new/split com contexto completo dos cards abertos. Prompt orientado a "second brain brasileiro, action-oriented".
+### 5.2 Camadas de IA
 
-2. **Classifier** (`classifyWithAI`): classificador simples que recebe texto e retorna classificacao. Usado como **fallback** quando o planner falha.
+1. **Orquestrador** (`orchestrateMessage`): classifica a mensagem do usuario e detecta TODAS as acoes (multi-agent), com suporte a clarificacao quando ambiguo. Usa Claude Sonnet.
 
-3. **Fallback heuristico** (`fallbackClassification`): regras por keywords quando a IA esta indisponivel. Categorias hardcoded: Negocios, Saude, Estudos, Financeiro. Confianca fixa em 0.45-0.62.
+2. **Planner** (`planIntakeWithContext`): decide merge/new/split com contexto completo dos cards abertos para o pipeline de intake.
 
-### 5.3 Observacao Critica
+3. **Classifier** (`classifyWithAI`): classificador simples usado como **fallback** quando o planner falha.
 
-O sistema usa **JSON Schema mode** da OpenAI (structured outputs) para garantir que a resposta da IA sempre tenha o formato esperado. Isso eh robusto. Porem, toda a inteligencia depende exclusivamente da OpenAI - nao ha cache de respostas, nao ha fine-tuning, e o fallback heuristico eh bastante limitado.
+4. **Fallback heuristico** (`fallbackClassification`): regras por keywords quando a IA esta indisponivel.
+
+### 5.3 Orquestrador Inteligente (Novo)
+
+O sistema agora usa um **orquestrador central** (`agents/router.ts`) que:
+- Analisa cada mensagem com few-shot examples em portugues
+- Detecta multiplas acoes numa unica mensagem (multi-agent dispatch)
+- Mantém contexto conversacional via tabela `chat_context` (ultimas 10 mensagens, janela de 4h)
+- Usa memoria persistente (`orchestrator_memory`) para aprender preferencias de roteamento
+- Faz perguntas de clarificacao quando a confianca eh baixa (em vez de assumir intake)
+- Despacha acoes em paralelo via `Promise.allSettled`
+
+### 5.4 Observacao
+
+O sistema usa providers multiplos (Anthropic para raciocinio, OpenAI para transcricao/embeddings, Perplexity para pesquisa). Cada chamada tem retry com backoff exponencial (2 tentativas). O fallback heuristico garante funcionamento basico mesmo sem IA.
 
 ---
 
@@ -252,8 +272,8 @@ Configuravel via `TIMEZONE` (padrao: America/Sao_Paulo).
 
 ## 10. Pontos de Atencao e Possiveis Fragilidades
 
-### 10.1 Dependencia Total da OpenAI
-Todo o pipeline inteligente depende de um unico provedor. Se a API cair ou mudar pricing, o sistema degrada para heuristicas basicas. Nao ha cache de classificacoes similares, nem modelo local de fallback.
+### 10.1 ~~Dependencia Total da OpenAI~~ (Parcialmente Resolvido)
+O sistema agora usa **Anthropic Claude** como provedor principal (Opus/Sonnet/Haiku) e OpenAI apenas para transcricao e embeddings. A diversificacao de providers reduz o risco de single point of failure.
 
 ### 10.2 Embeddings Armazenados como JSONB
 Os vetores de embedding estao em JSONB no PostgreSQL. Isso funciona para volumes pequenos, mas busca por similaridade cosseno em JSONB nao escala - cada comparacao requer parse do JSON e calculo em aplicacao. Para volumes maiores, pgvector seria mais adequado.
@@ -267,8 +287,8 @@ O sistema usa `chat_id` para filtrar, mas a arquitetura eh fundamentalmente sing
 ### 10.5 Sem Undo/Historico de Alteracoes
 Quando um card recebe merge, o conteudo anterior eh sobrescrito (summary, category, priority). Nao ha log de auditoria do que mudou - apenas o texto normalizado recebe um append com timestamp.
 
-### 10.6 Owner como Texto Livre
-O campo `follow_up_with` eh texto livre. Nao existe tabela de pessoas/responsaveis. Isso pode gerar inconsistencias (ex: "Joao", "joao", "Joao Silva" referindo-se a mesma pessoa).
+### 10.6 ~~Owner como Texto Livre~~ (Resolvido)
+O sistema agora tem tabela `people` com nome, variantes de nome, cargo e fuzzy matching via `resolvePersonFuzzy()`. A Marta gerencia o cadastro de pessoas.
 
 ### 10.7 Dashboard Somente-Leitura para Classificacao
 O dashboard permite resolver/eliminar/reabrir cards, mas nao permite editar a classificacao (mudar categoria, prioridade, proximo passo). Toda correcao de classificacao depende de interacao via Telegram.
@@ -295,11 +315,17 @@ A evolucao do git mostra uma trajetoria consistente:
 4. Dashboard kanban para visualizacao
 5. Lifecycle completo com acoes (resolver/eliminar/reabrir)
 6. Multi-agent com merge/split e pending decisions
+7. Agentes especializados: Jarbas (ghostwriter) e Marta (chief of staff)
+8. Pesquisa via Perplexity com citacoes
+9. **Orquestrador inteligente com roteamento automatico** (sem keywords)
+10. **3 tiers de modelo** (Haiku/Sonnet/Opus) por tipo de tarefa
+11. **Memoria conversacional** (chat_context) e **aprendizado persistente** (orchestrator_memory)
+12. **Analise de padroes** e sugestao de novos agentes
 
-O sistema esta no estagio de **MVP funcional com inteligencia real**. Nao eh um simples "save to database" - ha logica sofisticada de deduplicacao, priorizacao e cobranca. Porem, ainda carrega dividas tecnicas tipicas de um MVP: sem testes, sem observabilidade alem de logs, e com pontos de fragilidade que so aparecem em escala.
+O sistema esta no estagio de **produto funcional com inteligencia real e roteamento autonomo**. Nao eh um simples "save to database" - ha logica sofisticada de deduplicacao, priorizacao e cobranca. Porem, ainda carrega dividas tecnicas tipicas de um MVP: sem testes, sem observabilidade alem de logs, e com pontos de fragilidade que so aparecem em escala.
 
 A metafora que melhor descreve o sistema: eh um **assistente executivo digital** que recebe briefings por audio/texto, organiza em fichas (cards), prioriza, e cobra follow-up. O dashboard eh o "quadro da sala de reunioes" onde voce ve o status geral.
 
 ---
 
-*Documento gerado por analise estatica do codigo-fonte. Nenhum teste de execucao foi realizado.*
+*Documento atualizado em 2026-03-18. Analise estatica do codigo-fonte.*

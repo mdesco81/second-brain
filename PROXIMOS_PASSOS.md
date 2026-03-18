@@ -1,7 +1,7 @@
 # Second Brain - Proximos Passos e Roadmap de Evolucao
 
-**Data:** 2026-03-01
-**Estado atual:** MVP funcional com pipeline de intake, 2 agentes (Jarbas + Marta), dashboard web
+**Data:** 2026-03-18 (atualizado)
+**Estado atual:** Produto funcional com orquestrador inteligente, 3 agentes (Jarbas + Marta + Pesquisa), dashboard React, 3 tiers de modelo (Haiku/Sonnet/Opus)
 **Baseado em:** Revisao completa do codigo + pesquisa de melhores praticas 2025-2026
 
 ---
@@ -51,6 +51,43 @@
 - `buildNotesProcessingPrompt()`: recebe `teamMembers`, instrui Claude a usar nomes exatos, exige JSON puro, granularidade por pessoa
 - Novo `formatNotesContent()`: converte parsed JSON em texto legivel com emojis e estrutura clara para exibicao no dashboard
 - Aplicado em ambos os fluxos (Telegram e Dashboard)
+
+---
+
+## 1b. Implementacoes Concluidas (Marco 2026)
+
+### IMPL-001: Orquestrador Inteligente com Roteamento Automatico
+**Status:** CONCLUIDO (2026-03-18)
+- Roteamento automatico sem keywords ("jarbas"/"marta" nao sao mais necessarios)
+- Deteccao de multiplas acoes numa unica mensagem (multi-agent dispatch paralelo)
+- Few-shot examples em portugues para alta precisao
+- Agente "pesquisa" integrado ao orquestrador
+- Clarificacao inteligente quando confianca baixa
+
+### IMPL-002: 3 Tiers de Modelo
+**Status:** CONCLUIDO (2026-03-18)
+- Premium (Opus): draft de posts/artigos do Jarbas
+- Default (Sonnet): orquestrador, briefings, notas
+- Fast (Haiku): classificacao de intents, hashtags, bullets
+- Configuravel via ANTHROPIC_PREMIUM_MODEL env var
+
+### IMPL-003: Memoria Conversacional
+**Status:** CONCLUIDO (2026-03-18)
+- Tabela `chat_context`: ultimas mensagens com janela de 4h
+- Tabela `orchestrator_memory`: preferencias de roteamento aprendidas
+- Follow-up inteligente via isFollowUp do orquestrador
+
+### IMPL-004: Analise de Padroes e Sugestao de Agentes
+**Status:** CONCLUIDO (2026-03-18)
+- `analyzePatterns()` em proactive.ts analisa mensagens dos ultimos 28 dias
+- Detecta padroes recorrentes e sugere criacao de novos agentes
+- Integrado ao relatorio semanal
+
+### IMPL-005: Eliminacao de Redundancias
+**Status:** CONCLUIDO (2026-03-18)
+- Removida dupla classificacao do Jarbas (pre-classified intent do orquestrador)
+- Removido duplo follow-up check no intake
+- Removido research keyword short-circuit (orquestrador cuida)
 
 ---
 
@@ -536,17 +573,9 @@ Rascunho gerado
 - Adicionar "resumo de conversa" quando o limite de turnos se aproxima
 - Possibilitar retomar conversas pausadas com contexto
 
-### 3.5 Multi-Instrucao Inteligente
-**Prioridade:** MEDIA
-**Esforco:** 2 dias
-**Impacto:** Mensagens longas com multiplas acoes sao processadas corretamente
-
-**Situacao atual:** A Marta ja tem deteccao de multi-instrucao (split de mensagens com multiplas acoes). Mas o pipeline principal de intake nao tem essa capacidade — audios longos com 3+ assuntos dependem do planner decidir `split`.
-
-**O que fazer:**
-- Adicionar deteccao de multi-instrucao no pipeline de intake antes do planner
-- Para audios longos (>45s), rodar deteccao de topicos primeiro
-- Cada topico eh processado independentemente pelo planner
+### 3.5 ~~Multi-Instrucao Inteligente~~ (CONCLUIDO)
+**Status:** Implementado via orquestrador inteligente (2026-03-18)
+O orquestrador agora detecta multiplas acoes em qualquer mensagem (texto ou audio) e despacha para agentes diferentes em paralelo. Exemplo: "faz um post sobre lideranca e prepara o briefing do Joao" → Jarbas + Marta em paralelo.
 
 ---
 
