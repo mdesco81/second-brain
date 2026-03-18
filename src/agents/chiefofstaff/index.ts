@@ -39,7 +39,8 @@ import {
   updateLastContact,
   updateLastOneOnOne,
   upsertCosMemory,
-  upsertPerson
+  upsertPerson,
+  saveChatMessage
 } from "../../db/schema.js";
 import { env } from "../../config/env.js";
 import { classifyMartaIntent, MartaIntent, resolvePersonFuzzy } from "./intents.js";
@@ -286,6 +287,7 @@ async function getPeopleList(chatId: number): Promise<Person[]> {
 
 async function handleChiefOfStaff(request: AgentRequest): Promise<AgentResult> {
   const { chatId, messageId, rawRequest, mediaContent } = request;
+  const orchestratorIntentHint = request.intent.metadata?.intentHint as string | undefined;
 
   try {
     // Check for active conversation (follow-up flow)
@@ -295,18 +297,13 @@ async function handleChiefOfStaff(request: AgentRequest): Promise<AgentResult> {
     }
 
     // ── Multi-instruction detection ──────────────────────────────────
-    // Split messages with multiple distinct instructions (e.g. audio transcriptions)
-    // Each instruction is processed independently with its own intent classification.
-    // mediaContent (PDF/image) is passed to the FIRST instruction only — subsequent
-    // split instructions are text-only by nature.
     const instructions = await splitMultipleInstructions(rawRequest);
     if (instructions.length > 1) {
       await sendText(chatId, `Entendi ${instructions.length} pedidos. Vou processar cada um...`);
       const results: AgentResult[] = [];
       for (let i = 0; i < instructions.length; i++) {
-        // Pass mediaContent only to the first instruction
         const mc = i === 0 ? mediaContent : undefined;
-        const result = await processSingleInstruction(chatId, messageId, instructions[i], mc);
+        const result = await processSingleInstruction(chatId, messageId, instructions[i], mc, orchestratorIntentHint);
         results.push(result);
 
         // If this instruction created a clarification conversation, stop processing
@@ -330,7 +327,7 @@ async function handleChiefOfStaff(request: AgentRequest): Promise<AgentResult> {
     }
 
     // Single instruction — process normally
-    return await processSingleInstruction(chatId, messageId, rawRequest, mediaContent);
+    return await processSingleInstruction(chatId, messageId, rawRequest, mediaContent, orchestratorIntentHint);
   } catch (error) {
     log.error("marta:handler_error", { chatId, error });
     await sendText(chatId, "Desculpa, tive um problema ao processar seu pedido. Pode tentar de novo?");
@@ -348,7 +345,8 @@ async function processSingleInstruction(
   chatId: number,
   messageId: number,
   rawRequest: string,
-  mediaContent: string | undefined
+  mediaContent: string | undefined,
+  orchestratorIntentHint?: string
 ): Promise<AgentResult> {
   // Quick brief shortcut — bypasses intent classification for speed
   const quickBriefMatch = rawRequest.match(
@@ -361,9 +359,14 @@ async function processSingleInstruction(
 
   // For intent classification, include a hint about attached media so the NLU
   // can better classify (e.g. PDF with notes → intent "notas")
-  const classificationText = mediaContent
+  // Also include orchestrator's intentHint to guide classification and reduce errors
+  let classificationText = mediaContent
     ? `${rawRequest}\n\n[Conteudo extraido de arquivo anexo — ${mediaContent.length} caracteres]`
     : rawRequest;
+
+  if (orchestratorIntentHint) {
+    classificationText = `[DICA DO ORQUESTRADOR: o intent provavel eh "${orchestratorIntentHint}"]\n\n${classificationText}`;
+  }
 
   // Classify intent (cache people list for reuse in handlers)
   const people = await getPeopleList(chatId);
@@ -391,6 +394,13 @@ async function processSingleInstruction(
 
     await logCosEvent({ chatId, eventType: "follow_up_asked", conversationId: convId, details: { intent: intent.intent } });
     await sendText(chatId, intent.clarificationQuestion);
+
+    // Save clarification question to chat_context so the orchestrator sees it in history
+    await saveChatMessage(chatId, "assistant", intent.clarificationQuestion, "marta", {
+      type: "clarification",
+      intent: intent.intent,
+      originalRequest: rawRequest
+    });
 
     return { success: true, agentId: "chiefofstaff", summary: "Aguardando esclarecimento." };
   }

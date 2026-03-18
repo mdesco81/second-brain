@@ -13,7 +13,7 @@ export interface MartaIntent {
 }
 
 const INTENT_SYSTEM_PROMPT = `Voce e o classificador de intencoes da Marta, Chief of Staff virtual.
-Recebe uma mensagem em linguagem natural (ja sem a keyword "marta") e extrai:
+Recebe uma mensagem em linguagem natural e extrai:
 
 1. intent: briefing | notas | status | email | equipe | reflexao | ajuda | reminder | agendar | conversa_geral
 2. pessoa: nome PROPRIO da pessoa mencionada (ou null). Extraia APENAS o nome, sem papel/cargo.
@@ -65,11 +65,19 @@ REGRAS CRITICAS de extracao para "equipe":
 - needs_clarification = false se tem pelo menos o nome da pessoa
 - needs_clarification = true SOMENTE se NAO tem nome nenhum (ex: "adiciona um novo liderado")
 
+REGRA CRITICA para "reuniao" e "encontro":
+- Se o usuario diz "terei reuniao com X" ou "amanha tenho reuniao com X" e menciona TOPICOS/PONTOS → intent="briefing" (preparacao) com pessoa=X
+- Se o usuario diz "tive reuniao com X" e menciona o que foi DISCUTIDO → intent="notas"
+- Se a mensagem menciona MULTIPLAS pessoas (ex: "ana e tasca"), use a PRIMEIRA como pessoa principal. NUNCA diga que nao tem pessoa se nomes foram mencionados.
+- Ao extrair pessoa, tente fazer MATCH com as pessoas registradas. Se "tasca" pode ser parte de um nome registrado (ex: "Renata Tasca"), use o nome registrado.
+
 Para needs_clarification (outros intents):
+- needs_clarification=true SOMENTE quando realmente falta informacao critica que NAO esta na mensagem
 - Se o intent e "briefing" e nao tem pessoa → needs_clarification=true, perguntar "Com quem e o 1:1?"
 - Se o intent e "email" e nao tem tema → needs_clarification=true, perguntar "Sobre qual assunto?"
 - Se o intent e "notas" e a mensagem e curta (parece so aviso, sem conteudo) → needs_clarification=true, perguntar "Pode me mandar as notas/transcript?"
 - Se tem pessoa mas e ambiguo → needs_clarification=true com as opcoes
+- NUNCA peca clarificacao se a mensagem ja tem as informacoes necessarias (pessoa + contexto)
 
 Responda APENAS com JSON valido:
 {
@@ -109,7 +117,7 @@ export async function classifyMartaIntent(
     const response = await callClaude({
       system: INTENT_SYSTEM_PROMPT + peopleContext,
       userMessage: classificationMessage,
-      model: "fast",
+      model: "default",
       maxTokens: 512
     });
 

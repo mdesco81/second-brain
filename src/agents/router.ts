@@ -302,7 +302,8 @@ export async function routeToMarta(
   chatId: number,
   messageId: number,
   strippedText: string,
-  originalMessage: TelegramMessage
+  originalMessage: TelegramMessage,
+  intentHint?: string
 ): Promise<void> {
   const handler = getAgent("chiefofstaff");
   if (!handler) {
@@ -341,7 +342,7 @@ export async function routeToMarta(
       agentId: "chiefofstaff",
       confidence: 1.0,
       rawRequest: strippedText,
-      metadata: {}
+      metadata: intentHint ? { intentHint } : {}
     },
     timestamp: new Date(),
     mediaContent: mediaContent ?? undefined
@@ -655,7 +656,7 @@ export async function dispatchOrchestratorActions(
             confidence: action.confidence,
             intentHint: action.intentHint
           });
-          await routeToMarta(chatId, messageId, action.extractedRequest, message);
+          await routeToMarta(chatId, messageId, action.extractedRequest, message, action.intentHint);
           await saveChatMessage(chatId, "system", `[Orquestrador despachou para Marta: ${action.extractedRequest.slice(0, 100)}]`, "orchestrator", {
             agent: "marta",
             confidence: action.confidence,
