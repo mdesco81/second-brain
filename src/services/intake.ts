@@ -49,7 +49,7 @@ import { buildOpenActionsMessage, buildWeeklyMessage } from "./reports.js";
 import { appendProjectStatus, storeIncomingMedia, writeActionBoard, writeKnowledgeNote } from "./storage.js";
 import { InputType, ProcessingStage } from "../types/domain.js";
 import { log } from "../utils/logger.js";
-import { routeToAgent, routeToMarta, handleMartaFollowUpFromIntake, orchestrateMessage, dispatchOrchestratorActions, containsResearchKeyword, routeToResearch } from "../agents/router.js";
+import { routeToAgent, routeToMarta, handleMartaFollowUpFromIntake, orchestrateMessage, dispatchOrchestratorActions } from "../agents/router.js";
 import { cosineSimilarity } from "../utils/math.js";
 
 interface ExtractedContent {
@@ -1482,12 +1482,9 @@ async function processTelegramMessageInner(
     return;
   }
 
-  // Step 3b — Research keywords take absolute priority ("pesquise", "busca sobre")
-  const textContent = message.text || message.caption || "";
-  if (containsResearchKeyword(textContent)) {
-    await routeToResearch(chatId, messageId, textContent, message);
-    return;
-  }
+  // Note: Research keywords are now handled by the orchestrator (Step 5/7).
+  // No short-circuit needed — the orchestrator detects "pesquisa" as a dedicated agent
+  // and can also split multi-action messages like "pesquise X e prepara briefing do Y".
 
   // Detect audio messages early (needed for routing decisions)
   const isAudioDocument = Boolean(
@@ -1499,12 +1496,12 @@ async function processTelegramMessageInner(
   );
   const isAudioMessage = Boolean(message.voice || message.audio || isAudioDocument);
 
-  // Step 4 — Active conversation follow-up (Marta/Jarbas)
-  // Handles text, PDFs, images as follow-up responses.
+  // Step 4 — Active conversation follow-up for NON-TEXT inputs (PDFs, images)
+  // Text follow-ups are handled by the orchestrator (Step 5) which detects isFollowUp.
   // Audio is EXCLUDED — needs transcription first (handled after Step 6).
-  if (!isAudioMessage && (rawText || hasNonAudioAttachment) && (await handleMartaFollowUpFromIntake(chatId, messageId, rawText, message))) {
-    log.info("conversation_follow_up_handled", { chatId, messageId });
-    await saveChatMessage(chatId, "user", rawText || "[attachment]");
+  if (!isAudioMessage && !rawText && hasNonAudioAttachment && (await handleMartaFollowUpFromIntake(chatId, messageId, "", message))) {
+    log.info("conversation_follow_up_handled_attachment", { chatId, messageId });
+    await saveChatMessage(chatId, "user", "[attachment]");
     return;
   }
 
@@ -1606,19 +1603,8 @@ async function processTelegramMessageInner(
   if (extracted.inputType === "audio") {
     const normCheck = extracted.normalizedText;
 
-    // Research keywords in audio — takes absolute priority (same as text path)
-    if (containsResearchKeyword(normCheck)) {
-      await routeToResearch(chatId, messageId, normCheck, message);
-      return;
-    }
-
-    // Check active Marta conversation first (audio transcription wasn't available in Step 4)
-    if (await handleMartaFollowUpFromIntake(chatId, messageId, normCheck, message)) {
-      log.info("Marta follow-up handled (audio)", { chatId, messageId });
-      return;
-    }
-
     // Save audio transcription to chat context (even short ones, for continuity)
+    // Note: follow-ups and research are handled by the orchestrator below (isFollowUp detection)
     if (normCheck.length > 0) {
       await saveChatMessage(chatId, "user", normCheck, undefined, { source: "audio" });
     }
@@ -1637,6 +1623,16 @@ async function processTelegramMessageInner(
         await sendText(chatId, orchResult.clarificationQuestion);
         await saveChatMessage(chatId, "assistant", orchResult.clarificationQuestion, "orchestrator");
         return;
+      }
+
+      // Handle follow-up detected by orchestrator (same as text path Step 5)
+      if (orchResult.isFollowUp) {
+        const activeConv = await getActiveCosConversation(chatId);
+        if (activeConv) {
+          if (await handleMartaFollowUpFromIntake(chatId, messageId, normCheck, message)) {
+            return;
+          }
+        }
       }
 
       const validActions = orchResult.actions.filter(a => a.confidence >= 0.70);

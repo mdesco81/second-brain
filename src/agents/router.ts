@@ -124,7 +124,8 @@ export async function routeToAgent(
   chatId: number,
   messageId: number,
   strippedText: string,
-  _originalMessage: TelegramMessage
+  _originalMessage: TelegramMessage,
+  preClassifiedIntent?: AgentIntent
 ): Promise<void> {
   if (!strippedText.trim()) {
     await sendText(chatId, `O que voce precisa? Tente algo como "escreve um post sobre X" ou "faz um artigo sobre Y".`);
@@ -132,9 +133,12 @@ export async function routeToAgent(
   }
 
   await sendTypingIndicator(chatId);
-  await sendText(chatId, "Entendido! Analisando seu pedido...");
 
-  const intent = await classifyAgentIntent(strippedText);
+  // Skip "Analisando..." and reclassification when the orchestrator already classified
+  const intent = preClassifiedIntent ?? await (async () => {
+    await sendText(chatId, "Entendido! Analisando seu pedido...");
+    return classifyAgentIntent(strippedText);
+  })();
   log.info("agent:intent_classified", {
     agentId: intent.agentId,
     confidence: intent.confidence,
@@ -665,7 +669,17 @@ export async function dispatchOrchestratorActions(
             confidence: action.confidence,
             contentTypeHint: action.contentTypeHint
           });
-          await routeToAgent(chatId, messageId, action.extractedRequest, message);
+          // Build pre-classified intent from orchestrator data to skip redundant reclassification
+          const preIntent: AgentIntent = {
+            agentId: action.contentTypeHint === "article" ? "ghostwriter" : "ghostwriter",
+            confidence: action.confidence,
+            rawRequest: action.extractedRequest,
+            metadata: {
+              contentType: action.contentTypeHint || "post",
+              topic: action.extractedRequest
+            }
+          };
+          await routeToAgent(chatId, messageId, action.extractedRequest, message, preIntent);
           await saveChatMessage(chatId, "system", `[Orquestrador despachou para Jarbas: ${action.extractedRequest.slice(0, 100)}]`, "orchestrator", {
             agent: "jarbas",
             confidence: action.confidence,
