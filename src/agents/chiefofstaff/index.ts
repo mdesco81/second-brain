@@ -671,6 +671,7 @@ async function handleBriefing(
       await appendConversationMessage(convId, "assistant", question);
       await updateCosConversation(convId, { state: "clarifying" });
       await sendText(chatId, question);
+      await saveChatMessage(chatId, "assistant", question, "marta", { type: "clarification", intent: "briefing" });
       return { success: true, agentId: "chiefofstaff", summary: "Aguardando nome da pessoa." };
     }
   }
@@ -681,7 +682,7 @@ async function handleBriefing(
   const people = await getPeopleList(chatId);
   const person = people.find((p) => p.id === intent.personId);
   if (!person) {
-    await sendText(chatId, `Nao encontrei ${intent.person} na equipe. Use \"Marta, adiciona [nome]\" para registrar.`);
+    await sendText(chatId, `Nao encontrei ${intent.person} na equipe. Diga \"adiciona [nome]\" para registrar.`);
     return { success: false, agentId: "chiefofstaff", summary: "Pessoa nao encontrada.", error: "person_not_found" };
   }
 
@@ -728,6 +729,7 @@ async function handleBriefing(
 
   await logCosEvent({ chatId, eventType: "briefing_generated", personId: person.id, outputId });
   await sendText(chatId, response);
+  await saveChatMessage(chatId, "assistant", response.slice(0, 500), "marta", { type: "briefing", personId: person.id });
 
   return { success: true, agentId: "chiefofstaff", summary: `Briefing gerado para ${person.name}.` };
 }
@@ -761,6 +763,7 @@ async function handleNotas(
       await appendConversationMessage(convId, "assistant", question);
       await updateCosConversation(convId, { state: "clarifying" });
       await sendText(chatId, question);
+      await saveChatMessage(chatId, "assistant", question, "marta", { type: "clarification", intent: "notas" });
       return { success: true, agentId: "chiefofstaff", summary: "Aguardando nome da pessoa." };
     }
   }
@@ -783,6 +786,7 @@ async function handleNotas(
       await appendConversationMessage(convId, "assistant", question);
       await updateCosConversation(convId, { state: "clarifying" });
       await sendText(chatId, question);
+      await saveChatMessage(chatId, "assistant", question, "marta", { type: "clarification", intent: "notas" });
       return { success: true, agentId: "chiefofstaff", summary: "Aguardando notas." };
     }
   }
@@ -793,7 +797,7 @@ async function handleNotas(
   const people = await getPeopleList(chatId);
   const person = people.find((p) => p.id === intent.personId);
   if (!person) {
-    await sendText(chatId, `Nao encontrei ${intent.person} na equipe. Use \"Marta, adiciona [nome]\" para registrar.`);
+    await sendText(chatId, `Nao encontrei ${intent.person} na equipe. Diga \"adiciona [nome]\" para registrar.`);
     return { success: false, agentId: "chiefofstaff", summary: "Pessoa nao encontrada.", error: "person_not_found" };
   }
   const memories = await loadMemoriesForPerson(person.id);
@@ -1067,7 +1071,9 @@ async function handleNotas(
     : "\n\nNenhum action item, decisao ou compromisso identificados. Quer que eu revise algo?";
   tgParts.push(footer);
 
-  await sendText(chatId, tgParts.join("\n"));
+  const tgMessage = tgParts.join("\n");
+  await sendText(chatId, tgMessage);
+  await saveChatMessage(chatId, "assistant", tgMessage.slice(0, 500), "marta", { type: "notas", personId: person.id });
 
   return { success: true, agentId: "chiefofstaff", summary: `Notas processadas: ${createdItems} items, ${createdDecisions} decisoes, ${createdCommitments} compromissos.` };
 }
@@ -1084,7 +1090,7 @@ async function handleStatus(
 
   const peopleWithItems = await listPeopleWithItems();
   if (peopleWithItems.length === 0) {
-    await sendText(chatId, "Ainda nao tenho ninguem da equipe registrado. Use: \"Marta, adiciona o [nome], [papel]\" para registrar.");
+    await sendText(chatId, "Ainda nao tenho ninguem da equipe registrado. Diga \"adiciona o [nome], [papel]\" para registrar.");
     return { success: true, agentId: "chiefofstaff", summary: "Nenhuma pessoa registrada." };
   }
 
@@ -1121,6 +1127,7 @@ async function handleStatus(
 
   await logCosEvent({ chatId, eventType: "status_generated", outputId, details: { peopleCount: peopleWithItems.length } });
   await sendText(chatId, response);
+  await saveChatMessage(chatId, "assistant", response.slice(0, 500), "marta", { type: "status" });
 
   return { success: true, agentId: "chiefofstaff", summary: "Panorama cross-team gerado." };
 }
@@ -1153,6 +1160,7 @@ async function handleEmail(
       await appendConversationMessage(convId, "assistant", question);
       await updateCosConversation(convId, { state: "clarifying" });
       await sendText(chatId, question);
+      await saveChatMessage(chatId, "assistant", question, "marta", { type: "clarification", intent: "email" });
       return { success: true, agentId: "chiefofstaff", summary: "Aguardando destinatario." };
     }
   }
@@ -1175,6 +1183,7 @@ async function handleEmail(
     await appendConversationMessage(convId, "assistant", question);
     await updateCosConversation(convId, { state: "clarifying" });
     await sendText(chatId, question);
+    await saveChatMessage(chatId, "assistant", question, "marta", { type: "clarification", intent: "email" });
     return { success: true, agentId: "chiefofstaff", summary: "Aguardando tema do email." };
   }
 
@@ -1184,7 +1193,7 @@ async function handleEmail(
   const people = await getPeopleList(chatId);
   const person = people.find((p) => p.id === intent.personId);
   if (!person) {
-    await sendText(chatId, `Nao encontrei ${intent.person} na equipe. Use \"Marta, adiciona [nome]\" para registrar.`);
+    await sendText(chatId, `Nao encontrei ${intent.person} na equipe. Diga \"adiciona [nome]\" para registrar.`);
     return { success: false, agentId: "chiefofstaff", summary: "Pessoa nao encontrada.", error: "person_not_found" };
   }
 
@@ -1246,6 +1255,8 @@ async function handleEmail(
     await updateCosConversation(convId, { state: "clarifying" });
     await sendText(chatId, response + "\n\nQuer ajustar o tom ou algum ponto?");
   }
+
+  await saveChatMessage(chatId, "assistant", response.slice(0, 500), "marta", { type: "email_draft", personId: person.id });
 
   return { success: true, agentId: "chiefofstaff", summary: `Draft de email gerado para ${person.name}.` };
 }

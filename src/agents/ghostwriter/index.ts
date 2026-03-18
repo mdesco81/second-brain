@@ -16,7 +16,7 @@ import {
   SearchMode
 } from "./search.js";
 import { buildGhostwriterPrompt, buildHashtagPrompt, buildHooksPrompt } from "./prompts.js";
-import { updateInboxItemMetadata } from "../../db/schema.js";
+import { updateInboxItemMetadata, saveChatMessage } from "../../db/schema.js";
 
 // ── Research handler ──────────────────────────────────────────────────
 
@@ -89,7 +89,9 @@ async function handleResearch(
   }
 
   // 3. Send clean bullets to Telegram (no links)
-  await sendText(chatId, `Pesquisa sobre "${topic}":\n\n${bulletsText}`);
+  const researchMsg = `Pesquisa sobre "${topic}":\n\n${bulletsText}`;
+  await sendText(chatId, researchMsg);
+  await saveChatMessage(chatId, "assistant", researchMsg.slice(0, 500), "pesquisa", { type: "research", topic }).catch(() => {});
 
   // 4. Save full research with sources to dashboard
   const fullContent = [
@@ -507,6 +509,13 @@ async function handleGhostwriter(
   } else {
     await sendText(chatId, summaryMsg);
   }
+
+  // Save to chat_context so the orchestrator sees it in history
+  await saveChatMessage(chatId, "assistant", `[Jarbas] ${typeLabel} sobre "${topic}" gerado e salvo no dashboard.`, "jarbas", {
+    type: contentType,
+    topic,
+    itemId
+  }).catch(() => {});
 
   return {
     success: true,
